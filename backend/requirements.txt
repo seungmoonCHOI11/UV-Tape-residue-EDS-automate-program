@@ -11,3 +11,5 @@ python-pptx>=1.0
 reportlab>=4.2
 openai>=1.0
 Pillow>=10.0
+boto3>=1.35
+supabase>=2.7

@@ -59,3 +59,21 @@ The frontend never receives the key. The backend calls the official OpenAI Pytho
 
 ## Real-data limitations
 The PDF crop coordinates are based on the current standardized report layout supplied by the user. If the EDS vendor export has a different layout, the crop/parser should be made vendor-specific. Element-map quantitative values should not be inferred from raw RGB brightness alone; quantitative EDS values should come from the vendor's numerical output where available.
+
+
+## Production storage configuration
+
+The backend now persists uploaded source files and extracted point assets to Cloudflare R2 and stores projects, points, CV results, AI results, and asset metadata in Supabase PostgreSQL.
+
+Render backend environment variables:
+- `R2_ENDPOINT_URL`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET_NAME=uv-tape-eds`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (backend only; never expose it to the frontend)
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL=gpt-5.5`
+- `CORS_ORIGINS` set to the deployed Vercel frontend URL
+
+The R2 bucket remains private. The backend returns short-lived presigned URLs through the asset API.

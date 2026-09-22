@@ -1,3 +1,4 @@
+
 import os, json
 from pathlib import Path
 from openai import OpenAI
@@ -14,7 +15,7 @@ Keep rationale concise and cite the supplied feature values in the evidence list
 def ai_available():
     return bool(os.getenv("OPENAI_API_KEY"))
 
-def analyze_with_openai(record):
+def analyze_with_openai(record, r2_storage=None):
     if not ai_available():
         return {"status":"not_configured","message":"OPENAI_API_KEY is not set."}
     client=OpenAI()
@@ -22,9 +23,12 @@ def analyze_with_openai(record):
     f=record.get("features",{})
     images=[]
     for key in ("sem","element_maps"):
-        path=record.get("assets",{}).get(key)
+        path=(record.get("assets") or {}).get(key)
+        r2_key=(record.get("r2_assets") or {}).get(key)
         if path and Path(path).exists():
             images.append({"type":"input_image","image_url":image_to_data_url(path),"detail":"low"})
+        elif r2_key and r2_storage and r2_storage.configured:
+            images.append({"type":"input_image","image_url":r2_storage.presigned_url(r2_key,expires=900),"detail":"low"})
     prompt={
         "point":record.get("id"),
         "condition":f"{record.get('power')} / {record.get('time')}",
