@@ -2,12 +2,12 @@
 import os, json, uuid, shutil, mimetypes
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from dotenv import load_dotenv
 
-from .analysis import extract_pdf
+from .analysis import extract_pdfs
 from .ai import analyze_with_openai, ai_available
 from .reports import export_ppt, export_pdf
 from .r2_storage import r2
@@ -79,69 +79,96 @@ def health():
     }
 
 @app.post("/api/upload")
-async def upload(files:list[UploadFile]=File(...),condition_count:int=7):
-    project_id=str(uuid.uuid4())
-    pdir=UPLOAD/project_id
-    pdir.mkdir(parents=True,exist_ok=True)
-    all_records=[]
-    saved=[]
+async def upload(
+    files: list[UploadFile] = File(...),
+    conditions_json: str = Form(...),
+    pages_per_point: int = Form(3),
+):
+    """Upload one or more EDS PDFs and map them sequentially into Points.
+
+    The frontend supplies the experimental condition order. Every N consecutive
+    PDF pages (N defaults to 3) become one Point.
+    """
+    try:
+        conditions = json.loads(conditions_json)
+        if not isinstance(conditions, list):
+            raise ValueError("conditions_json must be a list")
+    except Exception as e:
+        raise HTTPException(400, f"Invalid condition settings: {e}")
+    if pages_per_point < 1:
+        raise HTTPException(400, "pages_per_point must be at least 1")
+
+    project_id = str(uuid.uuid4())
+    pdir = UPLOAD / project_id
+    pdir.mkdir(parents=True, exist_ok=True)
+    pdf_paths = []
+    saved = []
+
     for f in files:
-        ext=Path(f.filename or "").suffix.lower()
-        if ext not in {".pdf",".csv",".xlsx",".xls",".txt"}:
+        ext = Path(f.filename or "").suffix.lower()
+        if ext != ".pdf":
             continue
-        safe_name=Path(f.filename or "upload").name
-        target=pdir/safe_name
+        safe_name = Path(f.filename or "upload.pdf").name
+        target = pdir / safe_name
         with target.open("wb") as out:
-            shutil.copyfileobj(f.file,out,length=1024*1024)
+            shutil.copyfileobj(f.file, out, length=1024*1024)
         saved.append(safe_name)
+        pdf_paths.append(target)
 
         if r2.configured:
-            content_type=mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-            r2.upload_file(target,f"projects/{project_id}/source/{safe_name}",content_type)
+            content_type = mimetypes.guess_type(safe_name)[0] or "application/pdf"
+            r2.upload_file(target, f"projects/{project_id}/source/{safe_name}", content_type)
 
-        if ext==".pdf":
-            try:
-                all_records.extend(extract_pdf(target,pdir/"assets"))
-            except Exception as e:
-                raise HTTPException(400,f"PDF parsing failed: {e}")
+    if not pdf_paths:
+        raise HTTPException(400, "PDF 파일을 하나 이상 업로드하세요.")
+
+    try:
+        all_records = extract_pdfs(pdf_paths, pdir / "assets", conditions, pages_per_point)
+    except Exception as e:
+        raise HTTPException(400, f"EDS PDF mapping failed: {e}")
 
     if not all_records:
-        raise HTTPException(400,"No analyzable PDF points were found.")
+        raise HTTPException(400, "No analyzable PDF points were found.")
 
-    # Persist project and all point-level data.
     if db.configured():
         try:
             db.create_project(project_id, "UV Tape Residue", f"Uploaded files: {', '.join(saved)}")
         except Exception as e:
-            raise HTTPException(500,f"Supabase project save failed: {e}")
+            raise HTTPException(500, f"Supabase project save failed: {e}")
 
     for r in all_records:
-        RECORDS[r["id"]]=r
-        if r2.configured():
-            for asset_type, local_path in r.get("assets",{}).items():
-                lp=Path(local_path)
-                key=f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
-                r2.upload_file(lp,key,"image/jpeg")
-                r.setdefault("r2_assets",{})[asset_type]=key
+        RECORDS[r["id"]] = r
+        if r2.configured:
+            for asset_type, local_path in r.get("assets", {}).items():
+                lp = Path(local_path)
+                key = f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                r2.upload_file(lp, key, "image/jpeg")
+                r.setdefault("r2_assets", {})[asset_type] = key
         if db.configured():
             try:
-                db.upsert_point(project_id,r)
-                db.upsert_analysis(r["id"],r.get("features",{}))
-                for asset_type,key in r.get("r2_assets",{}).items():
-                    db.upsert_asset(r["id"],asset_type,key)
+                db.upsert_point(project_id, r)
+                db.upsert_analysis(r["id"], r.get("features", {}))
+                for asset_type, key in r.get("r2_assets", {}).items():
+                    db.upsert_asset(r["id"], asset_type, key)
             except Exception as e:
-                raise HTTPException(500,f"Supabase point save failed: {e}")
+                raise HTTPException(500, f"Supabase point save failed: {e}")
 
-    PROJECTS[project_id]={
-        "id":project_id,"condition_count":condition_count,"files":saved,
-        "records":[r["id"] for r in all_records]
+    PROJECTS[project_id] = {
+        "id": project_id,
+        "condition_count": len(conditions),
+        "conditions": conditions,
+        "pages_per_point": pages_per_point,
+        "files": saved,
+        "records": [r["id"] for r in all_records],
     }
     return {
-        "project_id":project_id,
-        "condition_count":condition_count,
-        "files":saved,
-        "points":[public_record(r) for r in all_records],
-        "count":len(all_records),
+        "project_id": project_id,
+        "condition_count": len(conditions),
+        "conditions": conditions,
+        "pages_per_point": pages_per_point,
+        "files": saved,
+        "points": [public_record(r) for r in all_records],
+        "count": len(all_records),
     }
 
 @app.get("/api/projects/latest")
@@ -155,7 +182,10 @@ def latest_project():
         project_id = p["id"]
         rows = db.get_points(project_id)
     except Exception as e:
-        raise HTTPException(500, f"Latest project lookup failed: {e}")
+        print(f"[latest_project] Supabase lookup failed: {type(e).__name__}: {e}")
+        # Keep the dashboard usable when the database has no readable project yet.
+        # The exact Supabase error remains visible in Render logs for diagnosis.
+        return {"project_id": None, "points": [], "warning": str(e)}
     recs = [db_record(project_id, row) for row in rows]
     for r in recs:
         RECORDS[r["id"]] = r
