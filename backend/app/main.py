@@ -94,6 +94,31 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, p
     try:
         normalized = normalize_conditions(conditions)
         expected_points = len(condition_point_sequence(normalized))
+        expected_pages = expected_points * pages_per_point
+
+        # Persist the original source PDF outside the Render filesystem. This is
+        # intentionally done after the HTTP request has returned.
+        if r2.configured:
+            set_job(job_id, phase="storage", progress=7, message="원본 PDF를 저장하고 있습니다.", total=expected_points, completed=0)
+            for path in pdf_paths:
+                content_type = mimetypes.guess_type(path.name)[0] or "application/pdf"
+                r2.upload_file(path, f"projects/{project_id}/source/{path.name}", content_type)
+
+        # Validate page count in the background, so a large PDF never blocks the
+        # upload HTTP request.
+        set_job(job_id, phase="validation", progress=9, message="PDF 페이지 구조를 확인하고 있습니다.", total=expected_points, completed=0)
+        import pymupdf as fitz
+        total_pages = 0
+        for path in pdf_paths:
+            with fitz.open(path) as doc:
+                total_pages += len(doc)
+        if total_pages != expected_pages:
+            raise ValueError(
+                f"Page count mismatch: expected {expected_pages} pages "
+                f"({expected_points} points × {pages_per_point} pages/point), "
+                f"but received {total_pages} pages. Check condition order/count."
+            )
+
         set_job(job_id, status="processing", phase="analysis", progress=10, message="PDF 분석을 시작했습니다.", total=expected_points, completed=0)
 
         def point_progress(done, total, phase):
@@ -178,33 +203,19 @@ async def upload(
             shutil.copyfileobj(f.file, out, length=1024*1024)
         saved.append(safe_name)
         pdf_paths.append(target)
-        if r2.configured:
-            content_type = mimetypes.guess_type(safe_name)[0] or "application/pdf"
-            r2.upload_file(target, f"projects/{project_id}/source/{safe_name}", content_type)
 
     if not pdf_paths:
         raise HTTPException(400, "PDF 파일을 하나 이상 업로드하세요.")
 
-    # Validate page count before starting background work. This is lightweight.
-    try:
-        import pymupdf as fitz
-        total_pages = 0
-        for path in pdf_paths:
-            with fitz.open(path) as doc:
-                total_pages += len(doc)
-        expected_pages = len(condition_point_sequence(normalized)) * pages_per_point
-        if total_pages != expected_pages:
-            raise ValueError(
-                f"Page count mismatch: expected {expected_pages} pages "
-                f"({len(condition_point_sequence(normalized))} points × {pages_per_point} pages/point), "
-                f"but received {total_pages} pages. Check condition order/count."
-            )
-    except Exception as e:
-        raise HTTPException(400, f"EDS PDF mapping failed: {e}")
-
+    # IMPORTANT: do not parse the PDF, upload it to R2, or validate page counts
+    # inside the HTTP request. The browser upload can finish while the server is
+    # still handling the request body, and any heavy work here can cause Render
+    # to keep the connection open until the instance is killed.
+    expected_points = len(condition_point_sequence(normalized))
+    expected_pages = expected_points * pages_per_point
     set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
-            total=len(condition_point_sequence(normalized)), project_id=project_id,
-            message="파일 검증 완료 · 분석 대기 중")
+            total=expected_points, project_id=project_id,
+            message="파일 업로드 완료 · 분석 대기 중")
     threading.Thread(
         target=process_upload_job,
         args=(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point),
@@ -218,8 +229,8 @@ async def upload(
         "conditions": conditions,
         "pages_per_point": pages_per_point,
         "files": saved,
-        "expected_points": len(condition_point_sequence(normalized)),
-        "expected_pages": len(condition_point_sequence(normalized)) * pages_per_point,
+        "expected_points": expected_points,
+        "expected_pages": expected_pages,
     }
 
 @app.get("/api/jobs/{job_id}")
