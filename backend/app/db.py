@@ -71,6 +71,10 @@ def update_point(point_id: str, **values):
 def get_project(project_id: str):
     return get_client().table("projects").select("*").eq("id", project_id).single().execute().data
 
+def get_latest_project():
+    rows = get_client().table("projects").select("*").order("created_at", desc=True).limit(1).execute().data or []
+    return rows[0] if rows else None
+
 def get_points(project_id: str):
     return get_client().table("points").select("*").eq("project_id", project_id).order("created_at").execute().data or []
 

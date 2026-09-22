@@ -144,6 +144,29 @@ async def upload(files:list[UploadFile]=File(...),condition_count:int=7):
         "count":len(all_records),
     }
 
+@app.get("/api/projects/latest")
+def latest_project():
+    if not db.configured():
+        return {"project_id": None, "points": []}
+    try:
+        p = db.get_latest_project()
+        if not p:
+            return {"project_id": None, "points": []}
+        project_id = p["id"]
+        rows = db.get_points(project_id)
+    except Exception as e:
+        raise HTTPException(500, f"Latest project lookup failed: {e}")
+    recs = [db_record(project_id, row) for row in rows]
+    for r in recs:
+        RECORDS[r["id"]] = r
+    PROJECTS[project_id] = {
+        "id": project_id,
+        "condition_count": None,
+        "files": [],
+        "records": [r["id"] for r in recs],
+    }
+    return {"project_id": project_id, "points": [public_record(r) for r in recs]}
+
 @app.get("/api/projects/{project_id}")
 def project(project_id:str):
     if project_id in PROJECTS:
