@@ -1,7 +1,7 @@
-import base64, re
+import base64, re, gc
 from pathlib import Path
 import cv2
-import fitz
+import pymupdf as fitz
 import numpy as np
 
 ZONE_MAP = {1:"Center",2:"Center",3:"Center",4:"Edge",5:"Diamond",6:"Edge",7:"Edge",8:"Center",9:"Diamond"}
@@ -142,40 +142,45 @@ def residue_features(sem, c_map=None, o_map=None):
 def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
     """Read PDFs in upload order and map every N pages to one Point.
 
-    The Point metadata is driven by the user-entered condition sequence, not by
-    text embedded on individual PDF pages. This matches the lab workflow where
-    3 consecutive pages represent one Point.
+    Memory-conscious implementation: source PDFs are opened one at a time and
+    pages are rendered only for the current Point. The Point metadata is driven
+    entirely by the user-entered condition sequence.
     """
     if pages_per_point < 1:
         raise ValueError("pages_per_point must be at least 1")
     conditions = normalize_conditions(conditions)
     sequence = condition_point_sequence(conditions)
+
+    pdf_paths = [Path(p) for p in pdf_paths]
+    file_counts = []
     total_pages = 0
-    docs = []
+    for path in pdf_paths:
+        with fitz.open(path) as doc:
+            count = len(doc)
+        file_counts.append(count)
+        total_pages += count
+
+    expected_pages = len(sequence) * pages_per_point
+    if total_pages != expected_pages:
+        raise ValueError(
+            f"Page count mismatch: expected {expected_pages} pages "
+            f"({len(sequence)} points × {pages_per_point} pages/point), "
+            f"but received {total_pages} pages. Check condition order/count."
+        )
+
+    # Build only lightweight page-location metadata; do not keep PDF Page
+    # objects or rendered images for the entire document in memory.
+    page_locations = []
+    for path, count in zip(pdf_paths, file_counts):
+        page_locations.extend((path, i) for i in range(count))
+
+    records = []
+    open_path = None
+    open_doc = None
     try:
-        for path in pdf_paths:
-            doc = fitz.open(path)
-            docs.append((Path(path), doc))
-            total_pages += len(doc)
-
-        expected_pages = len(sequence) * pages_per_point
-        if total_pages != expected_pages:
-            raise ValueError(
-                f"Page count mismatch: expected {expected_pages} pages "
-                f"({len(sequence)} points × {pages_per_point} pages/point), "
-                f"but received {total_pages} pages. Check condition order/count."
-            )
-
-        # Flatten page references while keeping source-file information.
-        pages = []
-        for path, doc in docs:
-            for page_index in range(len(doc)):
-                pages.append((path, page_index, doc[page_index]))
-
-        records = []
         for point_index, meta in enumerate(sequence):
             start = point_index * pages_per_point
-            group = pages[start:start + pages_per_point]
+            group = page_locations[start:start + pages_per_point]
             power = f"{meta['power']}W"
             time = f"{meta['time']}s"
             point_id = f"{power}_{time}_W{meta['wafer']}_P{meta['point']}"
@@ -185,20 +190,23 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
             rendered = []
             source_pages = []
 
-            for local_no, (source_path, page_index, page) in enumerate(group, 1):
+            for local_no, (source_path, page_index) in enumerate(group, 1):
+                if open_doc is None or open_path != source_path:
+                    if open_doc is not None:
+                        open_doc.close()
+                    open_doc = fitz.open(source_path)
+                    open_path = source_path
+                page = open_doc.load_page(page_index)
                 img = render_page(page)
                 rendered.append(img)
-                source_pages.append({
-                    "file": source_path.name,
-                    "page": page_index + 1,
-                })
+                source_pages.append({"file": source_path.name, "page": page_index + 1})
                 fp = pdir / f"page_{local_no}.jpg"
                 save_crop(img, fp)
                 paths[f"page_{local_no}"] = str(fp)
+                del page
 
-            # Keep the existing report asset names for compatibility, while also
-            # preserving all three original pages. The exact vendor-specific
-            # component-to-page mapping should be validated against the real source PDF.
+            # Compatibility assets are generated from the first source page.
+            # The three original pages remain available as page_1..page_3.
             if rendered:
                 c0 = crop_layout(rendered[0])
                 for key, crop in c0.items():
@@ -206,6 +214,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
                     save_crop(crop, fp)
                     paths[key] = str(fp)
                 feat = residue_features(c0["sem"], c0["element_maps"], c0["element_maps"])
+                del c0
             else:
                 feat = residue_features(np.zeros((100, 100), dtype=np.uint8))
 
@@ -224,10 +233,15 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
                 "features": feat,
             }
             records.append(rec)
+
+            # Explicitly release image arrays before moving to the next Point.
+            del rendered
+            gc.collect()
+
         return records
     finally:
-        for _, doc in docs:
-            doc.close()
+        if open_doc is not None:
+            open_doc.close()
 
 
 def extract_pdf(pdf_path: Path, output_dir: Path, conditions=None, pages_per_point=3):
