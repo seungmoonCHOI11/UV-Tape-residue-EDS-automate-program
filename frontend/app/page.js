@@ -7,7 +7,7 @@ const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5,9",points:"1-9"};
 
 export default function App(){
  const [page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),input=useRef();
- const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false);
+ const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState("");
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  useEffect(()=>{(async()=>{try{const r=await fetch(`${API}/api/projects/latest`);if(!r.ok)return;const j=await r.json();if(j?.project_id){setProject(j.project_id);setPoints(j.points||[]);}}catch{}})()},[]);
  function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toLowerCase().endsWith(".pdf"));if(!incoming.length)return notify("PDF 파일만 추가할 수 있습니다.");setFiles(prev=>[...prev,...incoming]);}
@@ -20,13 +20,31 @@ export default function App(){
    const n=expectedPoints();
    if(!n)return notify("Power / Time / Wafer / Point 조건을 확인하세요.");
    const fd=new FormData();files.forEach(f=>fd.append("files",f));fd.append("conditions_json",JSON.stringify(conditions));fd.append("pages_per_point",String(pagesPerPoint));
-   setBusy(true);notify(`업로드 및 ${n} Points 매핑을 시작합니다...`);
+   setBusy(true);setProgress(0);setProgressPhase("upload");setProgressMessage("PDF 파일을 서버에 업로드하는 중...");
    try{
-     const r=await fetch(`${API}/api/upload`,{method:"POST",body:fd});
-     const body=await r.text();
-     if(!r.ok){let detail=body;try{detail=JSON.parse(body)?.detail||body}catch{}throw Error(`HTTP ${r.status}: ${detail}`)}
-     const j=JSON.parse(body);setProject(j.project_id);setPoints((j.points||[]).map(x=>({...x,ai_result:x.features?.result,human_result:null})));setIdx(0);notify(`${j.count} points 분석 완료`);setPage("AI Review");
-   }catch(e){notify(`Backend 오류: ${e?.message||"network error"}`)}finally{setBusy(false)}
+     const j=await new Promise((resolve,reject)=>{
+       const xhr=new XMLHttpRequest();
+       xhr.open("POST",`${API}/api/upload`);
+       xhr.upload.onprogress=e=>{if(e.lengthComputable){const pct=Math.round((e.loaded/e.total)*10);setProgress(pct);setProgressMessage(`PDF 업로드 중 · ${Math.round(e.loaded/e.total*100)}%`);}};
+       xhr.onerror=()=>reject(new Error("서버 연결에 실패했습니다."));
+       xhr.ontimeout=()=>reject(new Error("업로드 시간이 초과되었습니다."));
+       xhr.onload=()=>{let body=xhr.responseText;let data={};try{data=JSON.parse(body)}catch{}if(xhr.status<200||xhr.status>=300){reject(new Error(`HTTP ${xhr.status}: ${data.detail||body||"server error"}`));return}resolve(data)};
+       xhr.send(fd);
+     });
+     setProgress(10);setProgressPhase("processing");setProgressMessage("파일 검증 완료 · 분석을 시작합니다...");
+     let done=false;
+     while(!done){
+       await new Promise(r=>setTimeout(r,1000));
+       const r=await fetch(`${API}/api/jobs/${j.job_id}`);const st=await r.json();
+       if(!r.ok)throw new Error(st.detail||"분석 작업 상태를 확인할 수 없습니다.");
+       setProgress(Math.max(10,Math.min(100,st.progress||10)));setProgressPhase(st.phase||"processing");setProgressMessage(st.message||"분석 중...");
+       if(st.status==="completed"){
+         done=true;
+         const pr=await fetch(`${API}/api/projects/${st.project_id}`);const pj=await pr.json();
+         setProject(st.project_id);setPoints((pj.points||[]).map(x=>({...x,ai_result:x.features?.result,human_result:x.human_result||null})));setIdx(0);setPage("AI Review");notify(`${st.count||pj.points?.length||n} points 분석 완료`);
+       }else if(st.status==="failed")throw new Error(st.error||st.message||"분석에 실패했습니다.");
+     }
+   }catch(e){notify(`Backend 오류: ${e?.message||"network error"}`)}finally{setBusy(false);setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},700)}
  }
  async function human(v){const p=points[idx];try{const r=await fetch(`${API}/api/points/${p.id}/human?result=${encodeURIComponent(v)}`,{method:"POST"});if(r.ok){const j=await r.json();setPoints(x=>x.map(z=>z.id===p.id?j:z));}}catch{}setIdx(Math.min(points.length-1,idx+1))}
  async function runAI(){const p=points[idx];notify("OpenAI 분석 요청 중...");try{const r=await fetch(`${API}/api/points/${p.id}/ai`,{method:"POST"});const j=await r.json();if(j.result){setPoints(x=>x.map(z=>z.id===p.id?{...z,ai_result:j.result,ai_confidence:j.confidence,ai_rationale:j.rationale}:z));notify("OpenAI 결과 반영 완료")}else notify(j.message||"AI 결과 없음")}catch(e){notify("AI endpoint 오류: "+e.message)}}
@@ -37,7 +55,11 @@ export default function App(){
  {page==="New Analysis"&&<UploadPage input={input} files={files} setFiles={setFiles} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} dragging={dragging} setDragging={setDragging} addFiles={addFiles} expectedPoints={expectedPoints} busy={busy}/>} 
  {page==="AI Review"&&(p?<Review p={p} idx={idx} total={points.length} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human} runAI={runAI}/>:<Empty title="분석 데이터가 없습니다" text="EDS PDF를 업로드하면 Point별 분석 결과가 이 화면에 표시됩니다." go={()=>setPage("New Analysis")}/>)}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult} open={p=>{setIdx(points.findIndex(x=>x.id===p.id));setPage("AI Review")}}/>}
- {page==="Condition Compare"&&<Compare points={points}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} </main>{msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition Compare"&&<Compare points={points}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} </main>{busy&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+}
+function AnalysisProgress({progress,phase,message}){
+ const label=phase==="upload"?"파일 업로드":phase==="queued"?"분석 준비":phase==="analysis"?"Point 분석":phase==="database"?"결과 저장":"분석 진행";
+ return <div className="progressOverlay"><div className="progressModal"><div className="progressTop"><div><span className="badge"><Activity size={13}/> ANALYSIS IN PROGRESS</span><h3>{label}</h3></div><b>{Math.round(progress)}%</b></div><div className="progressTrack"><div className="progressBar" style={{width:`${Math.max(2,Math.min(100,progress))}%`}}/></div><p>{message||"분석 중입니다. 잠시만 기다려주세요."}</p><small>창을 닫거나 새로고침하지 마세요.</small></div></div>
 }
 function Dashboard({points,go}){let r=points.filter(p=>(p.human_result||p.ai_result)==="Residue").length;const hasData=points.length>0;return <div className="content"><section className="hero"><div><span className="badge"><Activity size={13}/> SEM / EDS ANALYSIS</span><h2>{hasData?<>Analysis Overview<br/><em>Current Dataset</em></>:<>SEM / EDS<br/><em>Residue Analysis</em></>}</h2><p>{hasData?"업로드된 실험 데이터를 기반으로 Point별 분석, 검토 및 결과 비교를 수행합니다.":"EDS 분석 데이터를 업로드하여 Point별 SEM/EDS 결과를 분석하고 검토하세요."}</p></div><button className="primary" onClick={()=>go("New Analysis")}><Upload size={15}/> New Analysis</button></section><div className="metrics"><Metric t="Points" v={points.length} s={hasData?"analyzed points":"no data"}/><Metric t="Residue" v={r} s={hasData?`${Math.round(r/points.length*100)}% of points`:"—"}/><Metric t="Human verified" v={points.filter(p=>p.human_result).length} s="reviewed"/><Metric t="Analysis" v={hasData?"Active":"Ready"} s={hasData?"dataset loaded":"awaiting upload"}/></div>{hasData?<section className="panel"><div className="panelHead"><b>Analysis Workflow</b><small>Current dataset</small></div><div className="pipeline">{["Source","Point Extraction","Image Analysis","AI Review","Human Review","Comparison","Report"].map((x,i)=><div key={x}><span>{i+1}</span><b>{x}</b></div>)}</div></section>:<section className="panel emptyPanel"><Database size={24}/><b>분석 데이터가 없습니다</b><small>EDS PDF를 업로드하면 분석 결과와 이미지가 이 대시보드에 표시됩니다.</small><button className="secondary" onClick={()=>go("New Analysis")}><Upload size={14}/> EDS 데이터 업로드</button></section>}</div>}
 function Empty({title,text,go}){return <div className="content"><section className="panel emptyPanel"><Database size={24}/><b>{title}</b><small>{text}</small>{go&&<button className="secondary" onClick={go}><Upload size={14}/> New Analysis</button>}</section></div>}

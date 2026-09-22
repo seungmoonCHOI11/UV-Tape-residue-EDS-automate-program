@@ -58,9 +58,18 @@ def condition_point_sequence(conditions):
     return seq
 
 
-def render_page(page, scale=1.5):
+def render_page(page, max_dim=1800):
+    """Render one page with a hard pixel-size cap to avoid RAM spikes."""
+    rect = page.rect
+    base_w = max(float(rect.width), 1.0)
+    base_h = max(float(rect.height), 1.0)
+    scale = min(1.25, float(max_dim) / max(base_w, base_h))
+    scale = max(scale, 0.35)
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    # Own the bytes so the Pixmap can be released immediately.
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+    del pix
+    return arr
 
 
 def crop_layout(img):
@@ -139,7 +148,7 @@ def residue_features(sem, c_map=None, o_map=None):
     }
 
 
-def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
+def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None):
     """Read PDFs in upload order and map every N pages to one Point.
 
     Memory-conscious implementation: source PDFs are opened one at a time and
@@ -187,36 +196,49 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
             pdir = output_dir / point_id
             pdir.mkdir(parents=True, exist_ok=True)
             paths = {}
-            rendered = []
             source_pages = []
+            first_page_path = None
 
+            # IMPORTANT: never keep all three full-page images in RAM.
+            # Render -> save -> release one page at a time.
             for local_no, (source_path, page_index) in enumerate(group, 1):
                 if open_doc is None or open_path != source_path:
                     if open_doc is not None:
                         open_doc.close()
+                        open_doc = None
                     open_doc = fitz.open(source_path)
                     open_path = source_path
                 page = open_doc.load_page(page_index)
                 img = render_page(page)
-                rendered.append(img)
                 source_pages.append({"file": source_path.name, "page": page_index + 1})
                 fp = pdir / f"page_{local_no}.jpg"
                 save_crop(img, fp)
                 paths[f"page_{local_no}"] = str(fp)
+                if local_no == 1:
+                    first_page_path = fp
+                del img
                 del page
+                gc.collect()
 
-            # Compatibility assets are generated from the first source page.
-            # The three original pages remain available as page_1..page_3.
-            if rendered:
-                c0 = crop_layout(rendered[0])
-                for key, crop in c0.items():
-                    fp = pdir / f"{key}.jpg"
-                    save_crop(crop, fp)
-                    paths[key] = str(fp)
-                feat = residue_features(c0["sem"], c0["element_maps"], c0["element_maps"])
-                del c0
+            # Generate compatibility assets only from the first source page.
+            # Source page_1..page_N remain untouched for exact inspection.
+            feat = {}
+            if first_page_path and first_page_path.exists():
+                first_img = cv2.imread(str(first_page_path), cv2.IMREAD_COLOR)
+                if first_img is not None:
+                    c0 = crop_layout(first_img)
+                    for key, crop in c0.items():
+                        fp = pdir / f"{key}.jpg"
+                        save_crop(crop, fp)
+                        paths[key] = str(fp)
+                    feat = residue_features(c0["sem"], c0["element_maps"], c0["element_maps"])
+                    del c0
+                    del first_img
+                else:
+                    feat = residue_features(np.zeros((100, 100), dtype=np.uint8))
             else:
                 feat = residue_features(np.zeros((100, 100), dtype=np.uint8))
+            gc.collect()
 
             rec = {
                 "id": point_id,
@@ -233,9 +255,10 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3):
                 "features": feat,
             }
             records.append(rec)
+            if progress_callback:
+                progress_callback(point_index + 1, len(sequence), "point_analysis")
 
-            # Explicitly release image arrays before moving to the next Point.
-            del rendered
+            # Explicitly release temporary objects before moving to the next Point.
             gc.collect()
 
         return records

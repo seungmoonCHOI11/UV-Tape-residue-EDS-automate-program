@@ -1,5 +1,5 @@
 
-import os, json, uuid, shutil, mimetypes
+import os, json, uuid, shutil, mimetypes, threading, traceback
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from dotenv import load_dotenv
 
-from .analysis import extract_pdfs
+from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
 from .ai import analyze_with_openai, ai_available
 from .reports import export_ppt, export_pdf
 from .r2_storage import r2
@@ -19,12 +19,23 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="4.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="5.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
 PROJECTS={}
 RECORDS={}
+JOBS={}
+JOB_LOCK=threading.Lock()
+
+def set_job(job_id, **updates):
+    with JOB_LOCK:
+        JOBS.setdefault(job_id, {}).update(updates)
+
+def get_job(job_id):
+    with JOB_LOCK:
+        return dict(JOBS.get(job_id, {}))
+
 
 def public_record(r: dict) -> dict:
     out=dict(r)
@@ -78,27 +89,80 @@ def health():
         "supabase_configured":db.configured(),
     }
 
+def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point):
+    """Background processor so the browser is not held open for the full PDF analysis."""
+    try:
+        normalized = normalize_conditions(conditions)
+        expected_points = len(condition_point_sequence(normalized))
+        set_job(job_id, status="processing", phase="analysis", progress=10, message="PDF 분석을 시작했습니다.", total=expected_points, completed=0)
+
+        def point_progress(done, total, phase):
+            # Analysis occupies roughly 10-75% of the visible progress bar.
+            pct = 10 + int((done / max(total, 1)) * 65)
+            set_job(job_id, phase="analysis", progress=min(75, pct), completed=done, total=total,
+                    message=f"Point 분석 중 · {done}/{total}")
+
+        all_records = extract_pdfs(
+            pdf_paths, pdir / "assets", conditions, pages_per_point,
+            progress_callback=point_progress,
+        )
+        if not all_records:
+            raise ValueError("No analyzable PDF points were found.")
+
+        set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
+        if db.configured():
+            db.create_project(project_id, "UV Tape Residue", f"Uploaded files: {', '.join(saved)}")
+
+        for i, r in enumerate(all_records, 1):
+            RECORDS[r["id"]] = r
+            if r2.configured:
+                assets = list(r.get("assets", {}).items())
+                for asset_type, local_path in assets:
+                    lp = Path(local_path)
+                    key = f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                    r2.upload_file(lp, key, "image/jpeg")
+                    r.setdefault("r2_assets", {})[asset_type] = key
+            if db.configured():
+                db.upsert_point(project_id, r)
+                db.upsert_analysis(r["id"], r.get("features", {}))
+                for asset_type, key in r.get("r2_assets", {}).items():
+                    db.upsert_asset(r["id"], asset_type, key)
+            pct = 76 + int((i / max(len(all_records), 1)) * 23)
+            set_job(job_id, phase="database", progress=min(99, pct), completed=i, total=len(all_records), message=f"데이터 저장 중 · {i}/{len(all_records)}")
+
+        PROJECTS[project_id] = {
+            "id": project_id,
+            "condition_count": len(conditions),
+            "conditions": conditions,
+            "pages_per_point": pages_per_point,
+            "files": saved,
+            "records": [r["id"] for r in all_records],
+        }
+        set_job(job_id, status="completed", phase="complete", progress=100, completed=len(all_records), total=len(all_records),
+                project_id=project_id, count=len(all_records), message="분석이 완료되었습니다.")
+    except Exception as e:
+        traceback.print_exc()
+        set_job(job_id, status="failed", phase="error", progress=0, error=str(e), message=f"분석 실패: {e}")
+
 @app.post("/api/upload")
 async def upload(
     files: list[UploadFile] = File(...),
     conditions_json: str = Form(...),
     pages_per_point: int = Form(3),
 ):
-    """Upload one or more EDS PDFs and map them sequentially into Points.
-
-    The frontend supplies the experimental condition order. Every N consecutive
-    PDF pages (N defaults to 3) become one Point.
-    """
+    """Receive source PDFs, validate mapping, then process them in the background."""
     try:
         conditions = json.loads(conditions_json)
         if not isinstance(conditions, list):
             raise ValueError("conditions_json must be a list")
+        normalized = normalize_conditions(conditions)
     except Exception as e:
         raise HTTPException(400, f"Invalid condition settings: {e}")
     if pages_per_point < 1:
         raise HTTPException(400, "pages_per_point must be at least 1")
 
     project_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
     pdir = UPLOAD / project_id
     pdir.mkdir(parents=True, exist_ok=True)
     pdf_paths = []
@@ -114,7 +178,6 @@ async def upload(
             shutil.copyfileobj(f.file, out, length=1024*1024)
         saved.append(safe_name)
         pdf_paths.append(target)
-
         if r2.configured:
             content_type = mimetypes.guess_type(safe_name)[0] or "application/pdf"
             r2.upload_file(target, f"projects/{project_id}/source/{safe_name}", content_type)
@@ -122,54 +185,49 @@ async def upload(
     if not pdf_paths:
         raise HTTPException(400, "PDF 파일을 하나 이상 업로드하세요.")
 
+    # Validate page count before starting background work. This is lightweight.
     try:
-        all_records = extract_pdfs(pdf_paths, pdir / "assets", conditions, pages_per_point)
+        import pymupdf as fitz
+        total_pages = 0
+        for path in pdf_paths:
+            with fitz.open(path) as doc:
+                total_pages += len(doc)
+        expected_pages = len(condition_point_sequence(normalized)) * pages_per_point
+        if total_pages != expected_pages:
+            raise ValueError(
+                f"Page count mismatch: expected {expected_pages} pages "
+                f"({len(condition_point_sequence(normalized))} points × {pages_per_point} pages/point), "
+                f"but received {total_pages} pages. Check condition order/count."
+            )
     except Exception as e:
         raise HTTPException(400, f"EDS PDF mapping failed: {e}")
 
-    if not all_records:
-        raise HTTPException(400, "No analyzable PDF points were found.")
+    set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
+            total=len(condition_point_sequence(normalized)), project_id=project_id,
+            message="파일 검증 완료 · 분석 대기 중")
+    threading.Thread(
+        target=process_upload_job,
+        args=(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point),
+        daemon=True,
+    ).start()
 
-    if db.configured():
-        try:
-            db.create_project(project_id, "UV Tape Residue", f"Uploaded files: {', '.join(saved)}")
-        except Exception as e:
-            raise HTTPException(500, f"Supabase project save failed: {e}")
-
-    for r in all_records:
-        RECORDS[r["id"]] = r
-        if r2.configured:
-            for asset_type, local_path in r.get("assets", {}).items():
-                lp = Path(local_path)
-                key = f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
-                r2.upload_file(lp, key, "image/jpeg")
-                r.setdefault("r2_assets", {})[asset_type] = key
-        if db.configured():
-            try:
-                db.upsert_point(project_id, r)
-                db.upsert_analysis(r["id"], r.get("features", {}))
-                for asset_type, key in r.get("r2_assets", {}).items():
-                    db.upsert_asset(r["id"], asset_type, key)
-            except Exception as e:
-                raise HTTPException(500, f"Supabase point save failed: {e}")
-
-    PROJECTS[project_id] = {
-        "id": project_id,
-        "condition_count": len(conditions),
-        "conditions": conditions,
-        "pages_per_point": pages_per_point,
-        "files": saved,
-        "records": [r["id"] for r in all_records],
-    }
     return {
+        "job_id": job_id,
         "project_id": project_id,
         "condition_count": len(conditions),
         "conditions": conditions,
         "pages_per_point": pages_per_point,
         "files": saved,
-        "points": [public_record(r) for r in all_records],
-        "count": len(all_records),
+        "expected_points": len(condition_point_sequence(normalized)),
+        "expected_pages": len(condition_point_sequence(normalized)) * pages_per_point,
     }
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return job
 
 @app.get("/api/projects/latest")
 def latest_project():
