@@ -156,8 +156,15 @@ def run(payload):
     # not yet parsed into separate validated C and O maps. Until that parser is
     # implemented, the combined panel is used only as a preliminary proxy.
     features = residue_features(crops["sem"], crops["element_maps"], crops["element_maps"])
+    # N is retained as comparison metadata. It is intentionally NOT used in the
+    # current C/O-based residue score until a validated vendor-specific N-map parser
+    # is available.
+    features["n_enrichment"] = None
+    features["n_coverage"] = None
+    features["n_note"] = "N stored for comparison; not used in current residue score."
+
     features["cv_note"] = (
-        "Preliminary CV only; C/O maps are not separately parsed from the vendor PDF in v9. "
+        "Preliminary CV only; C/O maps are not separately parsed from the vendor PDF in v10. "
         "The current C/O signals are a proxy from the combined Element Maps panel."
     )
 

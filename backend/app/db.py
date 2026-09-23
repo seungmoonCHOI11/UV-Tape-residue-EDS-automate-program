@@ -27,7 +27,7 @@ def upsert_point(project_id: str, r: dict):
     power = int(re_digits(r.get("power")))
     time_sec = int(re_digits(r.get("time")))
     payload={
-        "id": r["id"], "project_id": project_id, "power": power,
+        "project_id": project_id, "power": power,
         "time_sec": time_sec, "wafer": int(r["wafer"]), "point": int(r["point"]),
         "position": r.get("zone"), "human_result": r.get("human_result"),
         "human_confidence": r.get("human_confidence"),
@@ -35,7 +35,11 @@ def upsert_point(project_id: str, r: dict):
         "ai_confidence": r.get("ai_confidence") or r.get("confidence"),
         "ai_rationale": r.get("ai_rationale"),
     }
-    return get_client().table("points").upsert(payload, on_conflict="project_id,power,time_sec,wafer,point").execute()
+    response = get_client().table("points").upsert(payload, on_conflict="project_id,power,time_sec,wafer,point").execute()
+    rows = response.data or []
+    if not rows or not rows[0].get("id"):
+        raise RuntimeError("Supabase point upsert did not return the point UUID.")
+    return rows[0]
 
 def upsert_analysis(point_id: str, features: dict):
     client=get_client()

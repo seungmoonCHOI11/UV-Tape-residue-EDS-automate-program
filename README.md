@@ -56,3 +56,4 @@ The backend remains a Render Web Service for now. v8 is specifically intended to
 - Large NumPy/OpenCV arrays are explicitly released before result serialization.
 - One isolated subprocess is still used per Point so native PyMuPDF/OpenCV memory is returned to the OS after every Point.
 - The vendor PDF's combined Element Maps panel is still only a preliminary proxy; separate validated C/O map parsing remains a scientific TODO.
+\n\n## v10\n- Supabase UUID save bug fixed.\n- Wafer W1-W9 selector with W1/W4/W5 default.\n- Point P1-P9 selector.\n- MAIN/ANOTHER + substrate + treatment metadata.\n- Automatic Repeat number for identical condition/substrate sets.\n- N comparison fields retained without changing current C/O residue score.\n

@@ -1,0 +1,1 @@
+-- v10: no destructive migration required.\n-- points.id remains Supabase-generated UUID.\n-- Repeat/substrate/treatment metadata is stored in projects.description JSON.\n-- N comparison fields are stored in analysis_results.features JSON until a validated N-map parser is added.\n

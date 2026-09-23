@@ -15,8 +15,10 @@ class PointRecord(BaseModel):
     residue_score: float = 0.0
     c_enrichment: float = 0.0
     o_enrichment: float = 0.0
+    n_enrichment: float = 0.0
     c_coverage: float = 0.0
     o_coverage: float = 0.0
+    n_coverage: float = 0.0
     cluster_score: float = 0.0
     element_data: dict = Field(default_factory=dict)
     assets: dict = Field(default_factory=dict)

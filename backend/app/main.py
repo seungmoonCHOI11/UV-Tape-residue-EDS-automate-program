@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="9.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="10.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -54,6 +54,8 @@ def db_record(project_id: str, row: dict) -> dict:
             "o_enrichment":analysis.get("o_enrichment") or 0,
             "c_coverage":analysis.get("c_coverage") or 0,
             "o_coverage":analysis.get("o_coverage") or 0,
+            "n_enrichment":features.get("n_enrichment"),
+            "n_coverage":features.get("n_coverage"),
             "cluster_score":analysis.get("cluster_score") or 0,
             "result":analysis.get("cv_result"),
             "confidence":analysis.get("cv_confidence"),
@@ -88,7 +90,7 @@ def health():
         "supabase_configured":db.configured(),
     }
 
-def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point):
+def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no):
     """Background processor so the browser is not held open for the full PDF analysis."""
     try:
         normalized = normalize_conditions(conditions)
@@ -135,7 +137,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, p
 
         set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
         if db.configured():
-            db.create_project(project_id, "UV Tape Residue", f"Uploaded files: {', '.join(saved)}")
+            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "treatment": treatment, "repeat_no": repeat_no}, ensure_ascii=False))
 
         for i, r in enumerate(all_records, 1):
             RECORDS[r["id"]] = r
@@ -147,10 +149,12 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, p
                     r2.upload_file(lp, key, "image/jpeg")
                     r.setdefault("r2_assets", {})[asset_type] = key
             if db.configured():
-                db.upsert_point(project_id, r)
-                db.upsert_analysis(r["id"], r.get("features", {}))
+                db_row = db.upsert_point(project_id, r)
+                db_point_id = str(db_row["id"])
+                r["db_id"] = db_point_id
+                db.upsert_analysis(db_point_id, r.get("features", {}))
                 for asset_type, key in r.get("r2_assets", {}).items():
-                    db.upsert_asset(r["id"], asset_type, key)
+                    db.upsert_asset(db_point_id, asset_type, key)
             pct = 76 + int((i / max(len(all_records), 1)) * 23)
             set_job(job_id, phase="database", progress=min(99, pct), completed=i, total=len(all_records), message=f"데이터 저장 중 · {i}/{len(all_records)}")
 
@@ -173,6 +177,9 @@ async def upload(
     files: list[UploadFile] = File(...),
     conditions_json: str = Form(...),
     pages_per_point: int = Form(3),
+    substrate_type: str = Form("SiCN"),
+    sample_category: str = Form("MAIN"),
+    treatment: str = Form("CMP"),
 ):
     """Receive source PDFs, validate mapping, then process them in the background."""
     try:
@@ -212,12 +219,28 @@ async def upload(
     # to keep the connection open until the instance is killed.
     expected_points = len(condition_point_sequence(normalized))
     expected_pages = expected_points * pages_per_point
+
+    repeat_no = 1
+    if db.configured():
+        try:
+            existing = db.get_client().table("projects").select("description").execute().data or []
+            signature = json.dumps({"substrate_type": substrate_type, "conditions": normalized}, sort_keys=True, separators=(",", ":"))
+            for row in existing:
+                try:
+                    meta = json.loads(row.get("description") or "{}")
+                except Exception:
+                    continue
+                old_sig = json.dumps({"substrate_type": meta.get("substrate_type", "SiCN"), "conditions": meta.get("conditions", [])}, sort_keys=True, separators=(",", ":"))
+                if old_sig == signature:
+                    repeat_no = max(repeat_no, int(meta.get("repeat_no", 0) or 0) + 1)
+        except Exception as e:
+            print(f"[repeat] lookup failed: {e}")
     set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
             total=expected_points, project_id=project_id,
-            message="파일 업로드 완료 · 분석 대기 중")
+            message=f"파일 업로드 완료 · Repeat {repeat_no} · 분석 대기 중")
     threading.Thread(
         target=process_upload_job,
-        args=(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point),
+        args=(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no),
         daemon=True,
     ).start()
 
@@ -230,6 +253,10 @@ async def upload(
         "files": saved,
         "expected_points": expected_points,
         "expected_pages": expected_pages,
+        "repeat_no": repeat_no,
+        "substrate_type": substrate_type,
+        "sample_category": sample_category,
+        "treatment": treatment,
     }
 
 @app.get("/api/jobs/{job_id}")
