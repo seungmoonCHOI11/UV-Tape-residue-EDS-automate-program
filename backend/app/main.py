@@ -8,8 +8,7 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from dotenv import load_dotenv
 
 from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
-from .ai import analyze_with_openai, ai_available
-from .reports import export_ppt, export_pdf
+from .ai import ai_available
 from .r2_storage import r2
 from . import db
 
@@ -19,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="5.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="8.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -333,6 +332,7 @@ def human(point_id:str,result:str):
 def ai(point_id:str):
     if point_id not in RECORDS:
         point(point_id)
+    from .ai import analyze_with_openai
     result=analyze_with_openai(RECORDS[point_id], r2_storage=r2)
     if result.get("result"):
         RECORDS[point_id]["ai_result"]=result["result"]
@@ -373,6 +373,7 @@ def hydrate_records_for_export(project_id:str):
 def ppt(project_id:str):
     if project_id not in PROJECTS:
         project(project_id)
+    from .reports import export_ppt
     rec=hydrate_records_for_export(project_id)
     out=OUTPUT/f"{project_id}_point_report.pptx"; export_ppt(rec,out)
     if r2.configured():
@@ -383,6 +384,7 @@ def ppt(project_id:str):
 def pdf(project_id:str):
     if project_id not in PROJECTS:
         project(project_id)
+    from .reports import export_pdf
     rec=hydrate_records_for_export(project_id)
     out=OUTPUT/f"{project_id}_point_report.pdf"; export_pdf(rec,out)
     if r2.configured():
