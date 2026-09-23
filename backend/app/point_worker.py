@@ -41,17 +41,29 @@ def render_page_to_jpeg(page, quality=92):
     return data
 
 
-def crop_layout(img):
+def crop_page1_layout(img):
+    """Crop the SEM image and the large composite EDS map from vendor page 1."""
     h, w = img.shape[:2]
     return {
-        "sem": img[int(.10*h):int(.40*h), int(.02*w):int(.49*w)],
-        "spectrum": img[int(.10*h):int(.40*h), int(.51*w):int(.98*w)],
-        "eds_map": img[int(.42*h):int(.70*h), int(.02*w):int(.49*w)],
-        "element_maps": img[int(.42*h):int(.70*h), int(.51*w):int(.98*w)],
-        "data": img[int(.72*h):int(.97*h), int(.02*w):int(.60*w)],
-        "result": img[int(.72*h):int(.97*h), int(.62*w):int(.98*w)],
+        "sem": img[int(.10*h):int(.40*h), int(.07*w):int(.59*w)],
+        "eds_map": img[int(.45*h):int(.90*h), int(.07*w):int(.97*w)],
     }
 
+
+def crop_page2_element_maps(img):
+    """Extract the vendor's individual C/N/O/Si maps from page 2.
+
+    This layout matches the Bruker EDS PDF used for the current dataset:
+    C = upper-right, N = middle-left, O = middle-right, Si = lower-left.
+    """
+    h, w = img.shape[:2]
+    return {
+        "element_maps": img[int(.09*h):int(.79*h), int(.06*w):int(.96*w)],
+        "c_map": img[int(.09*h):int(.31*h), int(.52*w):int(.96*w)],
+        "n_map": img[int(.32*h):int(.55*h), int(.06*w):int(.50*w)],
+        "o_map": img[int(.32*h):int(.55*h), int(.52*w):int(.96*w)],
+        "si_map": img[int(.55*h):int(.79*h), int(.06*w):int(.50*w)],
+    }
 
 def save_crop(img, path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +71,7 @@ def save_crop(img, path):
     cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
 
-def residue_features(sem, c_map=None, o_map=None):
+def residue_features(sem, c_map=None, o_map=None, n_map=None):
     gray = cv2.cvtColor(sem, cv2.COLOR_BGR2GRAY) if len(sem.shape) == 3 else sem
     bg = cv2.GaussianBlur(gray, (0, 0), 9)
     top = cv2.normalize(cv2.absdiff(gray, bg), None, 0, 255, cv2.NORM_MINMAX)
@@ -92,6 +104,7 @@ def residue_features(sem, c_map=None, o_map=None):
 
     ce, cc = enrich(c_map)
     oe, oc = enrich(o_map)
+    ne, nc = enrich(n_map)
     morphology_score = float(np.clip(coverage * 8 + np.std(top) / 255.0, 0, 1))
     cscore = float(np.clip((ce + 1) / 2, 0, 1))
     oscore = float(np.clip((oe + 1) / 2, 0, 1))
@@ -112,6 +125,8 @@ def residue_features(sem, c_map=None, o_map=None):
         "o_enrichment": round(oe*100, 2),
         "c_coverage": round(cc*100, 2),
         "o_coverage": round(oc*100, 2),
+        "n_enrichment": round(ne*100, 2),
+        "n_coverage": round(nc*100, 2),
         "cluster_score": round(cluster, 4),
         "roi_area_px": roi_area,
         "candidate_coverage": round(coverage*100, 3),
@@ -138,38 +153,42 @@ def run(payload):
             del page
         gc.collect()
 
-    # Decode only page 1 for the current preliminary CV/crop stage.
-    # Pages 2 and 3 stay on disk and are not held in RAM.
+    # Page 1 contains the SEM and composite EDS map. Page 2 contains the
+    # individual C/N/O/Si elemental maps. Keep only one rendered page in RAM at a time.
     first_img = cv2.imread(paths["page_1"], cv2.IMREAD_COLOR)
     if first_img is None:
         raise RuntimeError("Unable to read rendered page_1.jpg")
-    crops = crop_layout(first_img)
+    page1_crops = crop_page1_layout(first_img)
     del first_img
     gc.collect()
 
+    second_img = cv2.imread(paths["page_2"], cv2.IMREAD_COLOR)
+    if second_img is None:
+        raise RuntimeError("Unable to read rendered page_2.jpg")
+    page2_crops = crop_page2_element_maps(second_img)
+    del second_img
+    gc.collect()
+
+    crops = {**page1_crops, **page2_crops}
     for key, crop in crops.items():
         fp = output_dir / f"{key}.jpg"
         save_crop(crop, fp)
         paths[key] = str(fp)
 
-    # SCIENTIFIC LIMITATION: the vendor PDF's combined Element Maps panel is
-    # not yet parsed into separate validated C and O maps. Until that parser is
-    # implemented, the combined panel is used only as a preliminary proxy.
-    features = residue_features(crops["sem"], crops["element_maps"], crops["element_maps"])
-    # N is retained as comparison metadata. It is intentionally NOT used in the
-    # current C/O-based residue score until a validated vendor-specific N-map parser
-    # is available.
-    features["n_enrichment"] = None
-    features["n_coverage"] = None
-    features["n_note"] = "N stored for comparison; not used in current residue score."
-
+    # C/O maps are now extracted from their individual vendor map panels.
+    # Pixel brightness is treated as a relative map signal, not as direct concentration.
+    features = residue_features(page1_crops["sem"], page2_crops["c_map"], page2_crops["o_map"], page2_crops["n_map"])
+    features["n_note"] = "N map extracted and stored as a relative signal; N is not used in the current residue score."
+    features["map_parser"] = "Bruker page-2 individual C/N/O/Si map crop"
+    features["page"] = record_page = payload["page"]
     features["cv_note"] = (
-        "Preliminary CV only; C/O maps are not separately parsed from the vendor PDF in v10. "
-        "The current C/O signals are a proxy from the combined Element Maps panel."
+        "C and O signals are extracted from their individual vendor EDS maps. "
+        "Map brightness is used only as a relative signal; it is not treated as direct concentration."
     )
 
     for key in list(crops):
         crops[key] = None
+    page1_crops.clear(); page2_crops.clear(); crops.clear()
     del crops
     gc.collect()
 

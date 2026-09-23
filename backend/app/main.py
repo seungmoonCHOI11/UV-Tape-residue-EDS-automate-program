@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="10.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="11.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -68,7 +68,7 @@ def db_record(project_id: str, row: dict) -> dict:
         "wafer":row["wafer"],
         "point":row["point"],
         "zone":row.get("position") or "Unknown",
-        "page":None,
+        "page":(features.get("page") if features.get("page") else None),
         "human_result":row.get("human_result"),
         "ai_result":row.get("ai_result"),
         "ai_confidence":row.get("ai_confidence"),
@@ -375,6 +375,14 @@ def ai(point_id:str):
                 ai_rationale=result.get("rationale",""),
             )
     return result
+
+@app.post("/api/projects/{project_id}/ai-analysis")
+def project_ai_analysis(project_id: str):
+    if project_id not in PROJECTS:
+        project(project_id)
+    rec=[RECORDS[x] for x in PROJECTS[project_id]["records"]]
+    from .ai import analyze_project_with_openai
+    return analyze_project_with_openai(rec)
 
 def hydrate_records_for_export(project_id:str):
     p=PROJECTS[project_id]
