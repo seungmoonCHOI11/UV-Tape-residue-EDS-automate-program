@@ -19,3 +19,7 @@ Set `OPENAI_API_KEY` in `.env` to enable the real OpenAI analysis endpoint.
 The code uses the official OpenAI Python SDK and the Responses API. Images are sent as base64 data URLs and the response is parsed into a Pydantic schema.
 
 Important: keep the API key only on the backend. Never expose it as `NEXT_PUBLIC_OPENAI_API_KEY`.
+
+
+### v9
+Memory optimization without intentional image downsampling: one-page-at-a-time PDF rendering and direct JPEG encoding in isolated Point subprocesses.

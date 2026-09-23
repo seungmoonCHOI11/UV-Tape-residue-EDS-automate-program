@@ -153,7 +153,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=180,
+                timeout=240,
                 check=False,
             )
             if proc.returncode != 0:

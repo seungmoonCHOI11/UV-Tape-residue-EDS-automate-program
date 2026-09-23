@@ -47,3 +47,12 @@ The existing Vercel frontend remains compatible with the `/api/upload` and `/api
 ### Deployment
 
 The backend remains a Render Web Service for now. v8 is specifically intended to test whether per-Point process isolation keeps the service below the 512 MB Free memory limit. If the real dataset still exceeds the limit, the next architectural step is a dedicated Render Background Worker with more memory rather than additional small patches.
+
+
+## v9 memory strategy
+- No intentional low-resolution downsampling is used for PDF analysis.
+- PDF pages are rendered one at a time directly to JPEG bytes, avoiding a full-page NumPy copy just to save the source page.
+- Only the first rendered page of a Point is decoded for the current preliminary CV crop stage; pages 2 and 3 remain on disk.
+- Large NumPy/OpenCV arrays are explicitly released before result serialization.
+- One isolated subprocess is still used per Point so native PyMuPDF/OpenCV memory is returned to the OS after every Point.
+- The vendor PDF's combined Element Maps panel is still only a preliminary proxy; separate validated C/O map parsing remains a scientific TODO.

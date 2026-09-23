@@ -1,8 +1,9 @@
-"""Isolated one-Point PDF/SEM/OpenCV worker for v8.
+"""Memory-minimal one-Point PDF/SEM/OpenCV worker for v9.
 
 This process intentionally exits after one Point so native PyMuPDF/OpenCV memory
 cannot accumulate across hundreds of Points inside the FastAPI process.
 """
+import gc
 import json
 import os
 import sys
@@ -27,18 +28,17 @@ except Exception:
     pass
 
 
-def render_page(page, max_dim=1400):
-    rect = page.rect
-    base_w = max(float(rect.width), 1.0)
-    base_h = max(float(rect.height), 1.0)
-    scale = min(1.0, float(max_dim) / max(base_w, base_h))
-    scale = max(scale, 0.30)
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+def render_page_to_jpeg(page, quality=92):
+    """Render directly to JPEG bytes without a full-page NumPy copy.
+
+    Matrix 1.0 is intentional: v9 does not downsample the PDF for analysis.
+    """
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
     try:
-        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+        data = pix.tobytes("jpeg", jpg_quality=quality)
     finally:
         del pix
-    return arr
+    return data
 
 
 def crop_layout(img):
@@ -122,39 +122,49 @@ def run(payload):
     output_dir = Path(payload["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
-    source_pages = payload["source_pages"]
 
-    # Open only the source PDF needed for this page, render one page at a time,
-    # then close it immediately. The largest temporary array is never retained
-    # alongside the next page's full render.
+    # Render one source page at a time. The PDF pixmap is encoded directly to
+    # JPEG bytes, so there is no full-page NumPy array just for file output.
     for local_no, page_info in enumerate(payload["pages"], 1):
         source_path = Path(page_info["path"])
         page_index = int(page_info["index"])
         with fitz.open(source_path) as doc:
             page = doc.load_page(page_index)
-            img = render_page(page)
-            fp = output_dir / f"page_{local_no}.jpg"
-            save_crop(img, fp)
-            paths[f"page_{local_no}"] = str(fp)
-            del img
+            jpeg_bytes = render_page_to_jpeg(page)
+            out = output_dir / f"page_{local_no}.jpg"
+            out.write_bytes(jpeg_bytes)
+            paths[f"page_{local_no}"] = str(out)
+            del jpeg_bytes
             del page
+        gc.collect()
 
-    # Compatibility crops / preliminary CV features use only page 1.
-    first_path = Path(paths["page_1"])
-    first_img = cv2.imread(str(first_path), cv2.IMREAD_COLOR)
+    # Decode only page 1 for the current preliminary CV/crop stage.
+    # Pages 2 and 3 stay on disk and are not held in RAM.
+    first_img = cv2.imread(paths["page_1"], cv2.IMREAD_COLOR)
     if first_img is None:
         raise RuntimeError("Unable to read rendered page_1.jpg")
     crops = crop_layout(first_img)
+    del first_img
+    gc.collect()
+
     for key, crop in crops.items():
         fp = output_dir / f"{key}.jpg"
         save_crop(crop, fp)
         paths[key] = str(fp)
 
-    # IMPORTANT SCIENTIFIC LIMITATION: the current PDF crop is a combined
-    # Element Maps panel. It is not a validated separate C-map/O-map extraction.
-    # Keep this as a preliminary CV signal until vendor map exports are parsed.
+    # SCIENTIFIC LIMITATION: the vendor PDF's combined Element Maps panel is
+    # not yet parsed into separate validated C and O maps. Until that parser is
+    # implemented, the combined panel is used only as a preliminary proxy.
     features = residue_features(crops["sem"], crops["element_maps"], crops["element_maps"])
-    features["cv_note"] = "Preliminary CV only; C/O maps are not separately parsed from the vendor PDF in v8."
+    features["cv_note"] = (
+        "Preliminary CV only; C/O maps are not separately parsed from the vendor PDF in v9. "
+        "The current C/O signals are a proxy from the combined Element Maps panel."
+    )
+
+    for key in list(crops):
+        crops[key] = None
+    del crops
+    gc.collect()
 
     record = {
         "id": payload["id"],
@@ -166,11 +176,13 @@ def run(payload):
         "condition": payload["condition"],
         "page": payload["page"],
         "pages_per_point": payload["pages_per_point"],
-        "source_pages": source_pages,
+        "source_pages": payload["source_pages"],
         "assets": paths,
         "features": features,
     }
-    Path(payload["result_path"]).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    Path(payload["result_path"]).write_text(
+        json.dumps(record, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
