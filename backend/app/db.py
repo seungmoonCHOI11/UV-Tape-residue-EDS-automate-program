@@ -82,6 +82,12 @@ def get_latest_project():
 def get_points(project_id: str):
     return get_client().table("points").select("*").eq("project_id", project_id).order("created_at").execute().data or []
 
+def get_point_by_key(project_id: str, power: int, time_sec: int, wafer: int, point: int):
+    rows = (get_client().table("points").select("*")
+            .eq("project_id", project_id).eq("power", power).eq("time_sec", time_sec)
+            .eq("wafer", wafer).eq("point", point).limit(1).execute().data or [])
+    return rows[0] if rows else None
+
 def get_analysis(point_id: str):
     rows=get_client().table("analysis_results").select("*").eq("point_id",point_id).order("created_at",desc=True).limit(1).execute().data or []
     return rows[0] if rows else None

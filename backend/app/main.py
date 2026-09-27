@@ -1,5 +1,5 @@
 
-import os, json, uuid, shutil, mimetypes, threading, traceback
+import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="11.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="12.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -90,7 +90,7 @@ def health():
         "supabase_configured":db.configured(),
     }
 
-def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no):
+def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no):
     """Background processor so the browser is not held open for the full PDF analysis."""
     try:
         normalized = normalize_conditions(conditions)
@@ -99,11 +99,19 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, p
 
         # Persist the original source PDF outside the Render filesystem. This is
         # intentionally done after the HTTP request has returned.
+        source_keys = {}
         if r2.configured:
             set_job(job_id, phase="storage", progress=7, message="원본 PDF를 저장하고 있습니다.", total=expected_points, completed=0)
             for path in pdf_paths:
+                if path.name in source_reuse:
+                    source_keys[path.name] = source_reuse[path.name]
+                    continue
                 content_type = mimetypes.guess_type(path.name)[0] or "application/pdf"
-                r2.upload_file(path, f"projects/{project_id}/source/{path.name}", content_type)
+                key = f"projects/{project_id}/source/{path.name}"
+                r2.upload_file(path, key, content_type)
+                source_keys[path.name] = key
+        else:
+            source_keys = {}
 
         # Validate page count in the background, so a large PDF never blocks the
         # upload HTTP request.
@@ -137,7 +145,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, conditions, p
 
         set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
         if db.configured():
-            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "treatment": treatment, "repeat_no": repeat_no}, ensure_ascii=False))
+            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "treatment": treatment, "repeat_no": repeat_no, "pages_per_point": pages_per_point, "source_hashes": source_hashes, "source_keys": source_keys}, ensure_ascii=False))
 
         for i, r in enumerate(all_records, 1):
             RECORDS[r["id"]] = r
@@ -198,6 +206,7 @@ async def upload(
     pdir.mkdir(parents=True, exist_ok=True)
     pdf_paths = []
     saved = []
+    source_hashes = {}
 
     for f in files:
         ext = Path(f.filename or "").suffix.lower()
@@ -205,8 +214,15 @@ async def upload(
             continue
         safe_name = Path(f.filename or "upload.pdf").name
         target = pdir / safe_name
+        sha = hashlib.sha256()
         with target.open("wb") as out:
-            shutil.copyfileobj(f.file, out, length=1024*1024)
+            while True:
+                chunk = f.file.read(1024*1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                sha.update(chunk)
+        source_hashes[safe_name] = sha.hexdigest()
         saved.append(safe_name)
         pdf_paths.append(target)
 
@@ -221,9 +237,10 @@ async def upload(
     expected_pages = expected_points * pages_per_point
 
     repeat_no = 1
+    source_reuse = {}
     if db.configured():
         try:
-            existing = db.get_client().table("projects").select("description").execute().data or []
+            existing = db.get_client().table("projects").select("id,description").execute().data or []
             signature = json.dumps({"substrate_type": substrate_type, "conditions": normalized}, sort_keys=True, separators=(",", ":"))
             for row in existing:
                 try:
@@ -233,6 +250,11 @@ async def upload(
                 old_sig = json.dumps({"substrate_type": meta.get("substrate_type", "SiCN"), "conditions": meta.get("conditions", [])}, sort_keys=True, separators=(",", ":"))
                 if old_sig == signature:
                     repeat_no = max(repeat_no, int(meta.get("repeat_no", 0) or 0) + 1)
+                    old_hashes = meta.get("source_hashes") or {}
+                    old_keys = meta.get("source_keys") or {}
+                    for name, sha in source_hashes.items():
+                        if old_hashes.get(name) == sha and old_keys.get(name):
+                            source_reuse[name] = old_keys[name]
         except Exception as e:
             print(f"[repeat] lookup failed: {e}")
     set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
@@ -240,7 +262,7 @@ async def upload(
             message=f"파일 업로드 완료 · Repeat {repeat_no} · 분석 대기 중")
     threading.Thread(
         target=process_upload_job,
-        args=(job_id, project_id, pdir, pdf_paths, saved, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no),
+        args=(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no),
         daemon=True,
     ).start()
 
@@ -265,6 +287,57 @@ def job_status(job_id: str):
     if not job:
         raise HTTPException(404, "job not found")
     return job
+
+def _r2_client():
+    import boto3
+    client=boto3.client("s3",endpoint_url=os.getenv("R2_ENDPOINT_URL"),aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),region_name="auto")
+    return client,os.getenv("R2_BUCKET_NAME")
+
+def _download_r2_source(key: str, destination: Path):
+    client,bucket=_r2_client(); destination.parent.mkdir(parents=True,exist_ok=True); client.download_file(bucket,key,str(destination))
+
+def process_reanalysis_job(job_id,project_id,meta):
+    try:
+        conditions=meta.get("conditions") or []; pages_per_point=int(meta.get("pages_per_point",3) or 3); files=meta.get("files") or []; keys=meta.get("source_keys") or {}
+        if not files: raise ValueError("Stored source PDF metadata was not found.")
+        temp=UPLOAD/"_reanalyze"/project_id
+        if temp.exists(): shutil.rmtree(temp)
+        temp.mkdir(parents=True,exist_ok=True)
+        pdf_paths=[]
+        for name in files:
+            key=keys.get(name) or f"projects/{project_id}/source/{name}"; local=temp/Path(name).name; _download_r2_source(key,local); pdf_paths.append(local)
+        expected=len(condition_point_sequence(normalize_conditions(conditions)))
+        set_job(job_id,status="processing",phase="analysis",progress=10,completed=0,total=expected,message="R2 원본 PDF로 재분석 중입니다.")
+        def point_progress(done,total,phase): set_job(job_id,phase="analysis",progress=min(75,10+int(done/max(total,1)*65)),completed=done,total=total,message=f"재분석 중 · {done}/{total}")
+        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress)
+        set_job(job_id,phase="database",progress=76,completed=0,total=len(records),message="재분석 결과를 기존 Point에 반영하고 있습니다.")
+        for i,r in enumerate(records,1):
+            if r2.configured:
+                for asset_type,local_path in list(r.get("assets",{}).items()):
+                    lp=Path(local_path); key=f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"; r2.upload_file(lp,key,"image/jpeg"); r.setdefault("r2_assets",{})[asset_type]=key
+            if db.configured():
+                pm=re.search(r"\d+",r["power"]); tm=re.search(r"\d+",r["time"])
+                row=db.get_point_by_key(project_id,int(pm.group()),int(tm.group()),int(r["wafer"]),int(r["point"])) if pm and tm else None
+                if not row: row=db.upsert_point(project_id,r)
+                r["db_id"]=str(row["id"]); db.upsert_analysis(r["db_id"],r.get("features",{}))
+                for asset_type,key in r.get("r2_assets",{}).items(): db.upsert_asset(r["db_id"],asset_type,key)
+            RECORDS[r["id"]]=r; set_job(job_id,phase="database",progress=min(99,76+int(i/max(len(records),1)*23)),completed=i,total=len(records),message=f"재분석 결과 저장 중 · {i}/{len(records)}")
+        shutil.rmtree(temp,ignore_errors=True); set_job(job_id,status="completed",phase="complete",progress=100,completed=len(records),total=len(records),project_id=project_id,count=len(records),message="기존 데이터 재분석이 완료되었습니다.")
+    except Exception as e:
+        traceback.print_exc(); set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"재분석 실패: {e}")
+
+@app.post("/api/projects/{project_id}/reanalyze")
+def reanalyze_project(project_id: str):
+    if not db.configured() or not r2.configured: raise HTTPException(503,"Supabase/R2 is not configured.")
+    try: p=db.get_project(project_id)
+    except Exception: raise HTTPException(404,"project not found")
+    try: meta=json.loads(p.get("description") or "{}")
+    except Exception: meta={}
+    if not meta.get("files"): raise HTTPException(400,"Stored source PDF metadata was not found for this project.")
+    job_id=str(uuid.uuid4()); expected=len(condition_point_sequence(normalize_conditions(meta.get("conditions") or [])))
+    set_job(job_id,status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
+    threading.Thread(target=process_reanalysis_job,args=(job_id,project_id,meta),daemon=True).start()
+    return {"job_id":job_id,"project_id":project_id,"expected_points":expected}
 
 @app.get("/api/projects/latest")
 def latest_project():
