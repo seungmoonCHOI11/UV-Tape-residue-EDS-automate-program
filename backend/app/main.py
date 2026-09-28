@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="13.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="13.6.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -42,43 +42,43 @@ def public_record(r: dict) -> dict:
     out.pop("r2_assets", None)
     return out
 
-def db_record(project_id: str, row: dict) -> dict:
-    analysis=db.get_analysis(row["id"]) if db.configured() else None
-    assets=db.get_assets(row["id"]) if db.configured() else []
-    asset_map={a["asset_type"]:a["storage_path"] for a in assets}
-    features=(analysis or {}).get("features") or {}
+def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: dict = None) -> dict:
+    analysis = analysis_row if analysis_row is not None else (db.get_analysis(row["id"]) if db.configured() else None)
+    assets = asset_map if asset_map is not None else ({a["asset_type"]: a["storage_path"] for a in db.get_assets(row["id"])} if db.configured() else {})
+    features = (analysis or {}).get("features") or {}
     if analysis:
-        features={**features,
-            "residue_score":analysis.get("residue_score") or 0,
-            "c_enrichment":analysis.get("c_enrichment") or 0,
-            "o_enrichment":analysis.get("o_enrichment") or 0,
-            "c_coverage":analysis.get("c_coverage") or 0,
-            "o_coverage":analysis.get("o_coverage") or 0,
-            "n_enrichment":features.get("n_enrichment"),
-            "n_coverage":features.get("n_coverage"),
-            "cluster_score":analysis.get("cluster_score") or 0,
-            "result":analysis.get("cv_result"),
-            "confidence":analysis.get("cv_confidence"),
+        features = {**features,
+            "residue_score": analysis.get("residue_score") if analysis.get("residue_score") is not None else 0,
+            "c_enrichment": analysis.get("c_enrichment") if analysis.get("c_enrichment") is not None else 0,
+            "o_enrichment": analysis.get("o_enrichment") if analysis.get("o_enrichment") is not None else 0,
+            "c_coverage": analysis.get("c_coverage") if analysis.get("c_coverage") is not None else 0,
+            "o_coverage": analysis.get("o_coverage") if analysis.get("o_coverage") is not None else 0,
+            "n_enrichment": features.get("n_enrichment"),
+            "n_coverage": features.get("n_coverage"),
+            "cluster_score": analysis.get("cluster_score") if analysis.get("cluster_score") is not None else 0,
+            "result": analysis.get("cv_result"),
+            "confidence": analysis.get("cv_confidence"),
         }
-    rid=str(row["id"])
+    rid = str(row["id"])
     return {
-        "id":rid,
-        "power":f"{row['power']}W",
-        "time":f"{row['time_sec']}s",
-        "wafer":row["wafer"],
-        "point":row["point"],
-        "zone":row.get("position") or "Unknown",
-        "page":(features.get("page") if features.get("page") else None),
-        "human_result":row.get("human_result"),
-        "human_verified_at":row.get("human_verified_at"),
-        "ai_result":row.get("ai_result"),
-        "ai_confidence":row.get("ai_confidence"),
-        "ai_rationale":row.get("ai_rationale"),
-        "confidence":features.get("confidence"),
-        "residue_score":features.get("residue_score",0),
-        "features":features,
-        "assets":asset_map,
-        "r2_assets":asset_map,
+        "id": rid,
+        "power": f"{row['power']}W",
+        "time": f"{row['time_sec']}s",
+        "wafer": row["wafer"],
+        "point": row["point"],
+        "zone": row.get("position") or "Unknown",
+        "page": features.get("page"),
+        "human_result": row.get("human_result"),
+        "human_verified_at": row.get("human_verified_at"),
+        "human_updated_at": row.get("human_updated_at"),
+        "ai_result": row.get("ai_result"),
+        "ai_confidence": row.get("ai_confidence"),
+        "ai_rationale": row.get("ai_rationale"),
+        "confidence": features.get("confidence"),
+        "residue_score": features.get("residue_score", 0),
+        "features": features,
+        "assets": assets,
+        "r2_assets": assets,
     }
 
 @app.get("/health")
@@ -322,8 +322,21 @@ def process_reanalysis_job(job_id,project_id,meta):
             if db.configured():
                 pm=re.search(r"\d+",r["power"]); tm=re.search(r"\d+",r["time"])
                 row=db.get_point_by_key(project_id,int(pm.group()),int(tm.group()),int(r["wafer"]),int(r["point"])) if pm and tm else None
-                if not row: row=db.upsert_point(project_id,r)
-                r["db_id"]=str(row["id"]); r["id"]=str(row["id"]); db.upsert_analysis(r["db_id"],r.get("features",{}))
+                if not row:
+                    # Only a genuinely missing point is inserted. Existing points are
+                    # never upserted here, so Human verification/AI metadata cannot be
+                    # accidentally reset by a re-analysis.
+                    row=db.upsert_point(project_id,r)
+                else:
+                    r["human_result"]=row.get("human_result")
+                    r["human_confidence"]=row.get("human_confidence")
+                    r["human_verified_at"]=row.get("human_verified_at")
+                    r["human_updated_at"]=row.get("human_updated_at")
+                    r["ai_result"]=row.get("ai_result")
+                    r["ai_confidence"]=row.get("ai_confidence")
+                    r["ai_rationale"]=row.get("ai_rationale")
+                r["db_id"]=str(row["id"]); r["id"]=str(row["id"])
+                db.upsert_analysis(r["db_id"],r.get("features",{}))
                 for asset_type,key in r.get("r2_assets",{}).items(): db.upsert_asset(r["db_id"],asset_type,key)
             RECORDS[r["id"]]=r; set_job(job_id,phase="database",progress=min(99,76+int(i/max(len(records),1)*23)),completed=i,total=len(records),message=f"재분석 결과 저장 중 · {i}/{len(records)}")
         shutil.rmtree(temp,ignore_errors=True); set_job(job_id,status="completed",phase="complete",progress=100,completed=len(records),total=len(records),project_id=project_id,count=len(records),message="기존 데이터 재분석이 완료되었습니다.")
@@ -352,11 +365,11 @@ def latest_project():
         if not p:
             return {"project_id": None, "points": []}
         project_id = p["id"]
-        rows = db.get_points(project_id)
+        packed = db.get_points_with_data(project_id)
     except Exception as e:
         print(f"[latest_project] Supabase lookup failed: {type(e).__name__}: {e}")
         raise HTTPException(503, "Project data could not be loaded.")
-    recs = [db_record(project_id, row) for row in rows]
+    recs = [db_record(project_id, row, analysis, assets) for row, analysis, assets in packed]
     for r in recs:
         RECORDS[r["id"]] = r
     PROJECTS[project_id] = {
@@ -376,10 +389,10 @@ def project(project_id:str):
         raise HTTPException(404,"project not found")
     try:
         p=db.get_project(project_id)
-        rows=db.get_points(project_id)
+        packed=db.get_points_with_data(project_id)
     except Exception:
         raise HTTPException(404,"project not found")
-    recs=[db_record(project_id,row) for row in rows]
+    recs=[db_record(project_id,row,analysis,assets) for row,analysis,assets in packed]
     for r in recs:
         RECORDS[r["id"]]=r
     PROJECTS[project_id]={"id":project_id,"condition_count":None,"files":[],"records":[r["id"] for r in recs]}
@@ -404,18 +417,38 @@ def point(point_id:str):
 def asset(point_id:str,asset_type:str):
     r=RECORDS.get(point_id)
     key=None
+    db_assets=[]
     if r:
         key=(r.get("r2_assets") or {}).get(asset_type)
         local=(r.get("assets") or {}).get(asset_type)
         if local and Path(local).exists():
             return FileResponse(local,media_type="image/jpeg")
-    if not key and db.configured():
-        assets=db.get_assets(point_id)
-        for a in assets:
-            if a["asset_type"]==asset_type:
-                key=a["storage_path"]; break
+    if db.configured():
+        db_assets=db.get_assets(point_id)
+        if not key:
+            for a in db_assets:
+                if a["asset_type"]==asset_type:
+                    key=a["storage_path"]
+                    break
+        if not key:
+            aliases = {
+                "sem_residue_overlay": ["sem"],
+                "element_maps_enhanced": ["element_maps", "eds_map"],
+                "c_map_enhanced_overlay": ["c_map"],
+                "n_map_enhanced_overlay": ["n_map"],
+                "o_map_enhanced_overlay": ["o_map"],
+                "si_map_enhanced_overlay": ["si_map"],
+            }
+            for fallback in aliases.get(asset_type, []):
+                match=next((a for a in db_assets if a["asset_type"]==fallback),None)
+                if match:
+                    key=match["storage_path"]
+                    break
     if key and r2.configured:
-        return RedirectResponse(r2.presigned_url(key,expires=900))
+        return RedirectResponse(
+            r2.presigned_url(key,expires=900),
+            headers={"Cache-Control":"no-store, max-age=0"},
+        )
     raise HTTPException(404,"asset not found")
 
 @app.post("/api/points/{point_id}/human")

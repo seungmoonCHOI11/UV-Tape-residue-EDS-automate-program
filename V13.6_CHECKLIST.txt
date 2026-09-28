@@ -1,0 +1,12 @@
+v13.6 checklist
+1 New Analysis client exception: dynamic ssr:false removed; AppClient imported directly.
+2 C/N/O/Si overlay: enhanced -> raw fallback in Verification and Gallery Lightbox.
+3 Score display: NN / 100.
+4 Gallery Lightbox: all images use the same resilient loader.
+5 Missing enhanced images: raw image fallback; backend endpoint aliases also fallback.
+6 Re-analyze: complete raw + enhanced C/N/O/Si assets uploaded to R2.
+7 New analysis: same point_worker asset set.
+8 Existing Point rows are preserved; re-analysis does not upsert existing point rows, so Human/AI metadata stays.
+9 Project loading: bulk/chunked Supabase data loading + Render cold-start retries.
+10 SEM/EDS crops widened to retain metadata and right-edge content.
+Backend Python syntax checked. Next.js production build was not run in this environment because npm dependency installation timed out; Vercel should run the final build.

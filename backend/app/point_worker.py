@@ -18,14 +18,19 @@ def crop_page1_layout(img):
     return {
         # Keep the SEM information block below the micrograph; the previous crop
         # ended at 40% of the page and cut the Name/Date/HV/Mag/WD information.
-        "sem":img[int(.08*h):int(.52*h),int(.05*w):int(.62*w)],
-        # Preserve the full EDS map width and its lower legend/scale information.
-        "eds_map":img[int(.43*h):int(.96*h),int(.04*w):int(.99*w)]
+        # Include the SEM micrograph and the complete Name/Date/Time/HV/Mag/WD
+        # metadata block. The crop is intentionally generous so different Bruker
+        # export page heights do not cut the metadata off.
+        "sem":img[int(.06*h):int(.67*h),int(.04*w):int(.64*w)],
+        # Preserve the complete EDS composite including both left/right edges.
+        "eds_map":img[int(.39*h):int(.985*h),int(.02*w):int(.995*w)]
     }
 
 def crop_page2_element_maps(img):
     h,w=img.shape[:2]
-    x0,xmid,x1=int(.06*w),int(.50*w),int(.96*w); y0,y1,y2,y3=int(.09*h),int(.31*h),int(.55*h),int(.79*h)
+    # Keep a small page margin but do not trim the right edge of the element
+    # panels. The five map panels are the coordinate reference for ROI overlays.
+    x0,xmid,x1=int(.055*w),int(.50*w),int(.985*w); y0,y1,y2,y3=int(.085*h),int(.34*h),int(.60*h),int(.84*h)
     return {"se_map":img[y0:y1,x0:xmid],"c_map":img[y0:y1,xmid:x1],"n_map":img[y1:y2,x0:xmid],"o_map":img[y1:y2,xmid:x1],"si_map":img[y2:y3,x0:xmid]}
 
 def save_crop(img,path,quality=90):
