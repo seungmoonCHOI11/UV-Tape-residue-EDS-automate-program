@@ -414,7 +414,7 @@ def asset(point_id:str,asset_type:str):
         for a in assets:
             if a["asset_type"]==asset_type:
                 key=a["storage_path"]; break
-    if key and r2.configured():
+    if key and r2.configured:
         return RedirectResponse(r2.presigned_url(key,expires=900))
     raise HTTPException(404,"asset not found")
 
@@ -482,7 +482,7 @@ def hydrate_records_for_export(project_id:str):
                 for a in db.get_assets(r["id"]):
                     if a["asset_type"]==key:
                         r2key=a["storage_path"]; break
-            if r2key and r2.configured():
+            if r2key and r2.configured:
                 dest=temp/r["id"]/f"{key}.jpg"
                 r2.download_file(r2key,dest)
                 r.setdefault("assets",{})[key]=str(dest)
@@ -495,7 +495,7 @@ def ppt(project_id:str):
     from .reports import export_ppt
     rec=hydrate_records_for_export(project_id)
     out=OUTPUT/f"{project_id}_point_report.pptx"; export_ppt(rec,out)
-    if r2.configured():
+    if r2.configured:
         r2.upload_file(out,f"projects/{project_id}/reports/{out.name}","application/vnd.openxmlformats-officedocument.presentationml.presentation")
     return FileResponse(out,filename=out.name,media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
@@ -506,7 +506,7 @@ def pdf(project_id:str):
     from .reports import export_pdf
     rec=hydrate_records_for_export(project_id)
     out=OUTPUT/f"{project_id}_point_report.pdf"; export_pdf(rec,out)
-    if r2.configured():
+    if r2.configured:
         r2.upload_file(out,f"projects/{project_id}/reports/{out.name}","application/pdf")
     return FileResponse(out,filename=out.name,media_type="application/pdf")
 
@@ -517,6 +517,6 @@ def json_export(project_id:str):
     rec=[RECORDS[x] for x in PROJECTS[project_id]["records"]]
     out=OUTPUT/f"{project_id}_analysis.json"
     out.write_text(json.dumps([public_record(r) for r in rec],ensure_ascii=False,indent=2),encoding="utf-8")
-    if r2.configured():
+    if r2.configured:
         r2.upload_file(out,f"projects/{project_id}/reports/{out.name}","application/json")
     return FileResponse(out,filename=out.name,media_type="application/json")
