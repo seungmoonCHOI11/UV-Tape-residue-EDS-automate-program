@@ -15,7 +15,13 @@ def render_page_to_jpeg(page, quality=92):
 
 def crop_page1_layout(img):
     h,w=img.shape[:2]
-    return {"sem":img[int(.10*h):int(.40*h),int(.07*w):int(.59*w)],"eds_map":img[int(.45*h):int(.90*h),int(.07*w):int(.97*w)]}
+    return {
+        # Keep the SEM information block below the micrograph; the previous crop
+        # ended at 40% of the page and cut the Name/Date/HV/Mag/WD information.
+        "sem":img[int(.08*h):int(.52*h),int(.05*w):int(.62*w)],
+        # Preserve the full EDS map width and its lower legend/scale information.
+        "eds_map":img[int(.43*h):int(.96*h),int(.04*w):int(.99*w)]
+    }
 
 def crop_page2_element_maps(img):
     h,w=img.shape[:2]
