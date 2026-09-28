@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="12.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="13.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -70,6 +70,7 @@ def db_record(project_id: str, row: dict) -> dict:
         "zone":row.get("position") or "Unknown",
         "page":(features.get("page") if features.get("page") else None),
         "human_result":row.get("human_result"),
+        "human_verified_at":row.get("human_verified_at"),
         "ai_result":row.get("ai_result"),
         "ai_confidence":row.get("ai_confidence"),
         "ai_rationale":row.get("ai_rationale"),
@@ -145,24 +146,26 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
 
         set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
         if db.configured():
-            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "treatment": treatment, "repeat_no": repeat_no, "pages_per_point": pages_per_point, "source_hashes": source_hashes, "source_keys": source_keys}, ensure_ascii=False))
+            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "repeat_no": repeat_no, "pages_per_point": pages_per_point, "source_hashes": source_hashes, "source_keys": source_keys}, ensure_ascii=False))
 
         for i, r in enumerate(all_records, 1):
-            RECORDS[r["id"]] = r
+            source_point_id = r["id"]
             if r2.configured:
                 assets = list(r.get("assets", {}).items())
                 for asset_type, local_path in assets:
                     lp = Path(local_path)
-                    key = f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                    key = f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"
                     r2.upload_file(lp, key, "image/jpeg")
                     r.setdefault("r2_assets", {})[asset_type] = key
             if db.configured():
                 db_row = db.upsert_point(project_id, r)
                 db_point_id = str(db_row["id"])
                 r["db_id"] = db_point_id
+                r["id"] = db_point_id
                 db.upsert_analysis(db_point_id, r.get("features", {}))
                 for asset_type, key in r.get("r2_assets", {}).items():
                     db.upsert_asset(db_point_id, asset_type, key)
+            RECORDS[r["id"]] = r
             pct = 76 + int((i / max(len(all_records), 1)) * 23)
             set_job(job_id, phase="database", progress=min(99, pct), completed=i, total=len(all_records), message=f"데이터 저장 중 · {i}/{len(all_records)}")
 
@@ -312,14 +315,15 @@ def process_reanalysis_job(job_id,project_id,meta):
         records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress)
         set_job(job_id,phase="database",progress=76,completed=0,total=len(records),message="재분석 결과를 기존 Point에 반영하고 있습니다.")
         for i,r in enumerate(records,1):
+            source_point_id=r["id"]
             if r2.configured:
                 for asset_type,local_path in list(r.get("assets",{}).items()):
-                    lp=Path(local_path); key=f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"; r2.upload_file(lp,key,"image/jpeg"); r.setdefault("r2_assets",{})[asset_type]=key
+                    lp=Path(local_path); key=f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"; r2.upload_file(lp,key,"image/jpeg"); r.setdefault("r2_assets",{})[asset_type]=key
             if db.configured():
                 pm=re.search(r"\d+",r["power"]); tm=re.search(r"\d+",r["time"])
                 row=db.get_point_by_key(project_id,int(pm.group()),int(tm.group()),int(r["wafer"]),int(r["point"])) if pm and tm else None
                 if not row: row=db.upsert_point(project_id,r)
-                r["db_id"]=str(row["id"]); db.upsert_analysis(r["db_id"],r.get("features",{}))
+                r["db_id"]=str(row["id"]); r["id"]=str(row["id"]); db.upsert_analysis(r["db_id"],r.get("features",{}))
                 for asset_type,key in r.get("r2_assets",{}).items(): db.upsert_asset(r["db_id"],asset_type,key)
             RECORDS[r["id"]]=r; set_job(job_id,phase="database",progress=min(99,76+int(i/max(len(records),1)*23)),completed=i,total=len(records),message=f"재분석 결과 저장 중 · {i}/{len(records)}")
         shutil.rmtree(temp,ignore_errors=True); set_job(job_id,status="completed",phase="complete",progress=100,completed=len(records),total=len(records),project_id=project_id,count=len(records),message="기존 데이터 재분석이 완료되었습니다.")
@@ -351,9 +355,7 @@ def latest_project():
         rows = db.get_points(project_id)
     except Exception as e:
         print(f"[latest_project] Supabase lookup failed: {type(e).__name__}: {e}")
-        # Keep the dashboard usable when the database has no readable project yet.
-        # The exact Supabase error remains visible in Render logs for diagnosis.
-        return {"project_id": None, "points": [], "warning": str(e)}
+        raise HTTPException(503, "Project data could not be loaded.")
     recs = [db_record(project_id, row) for row in rows]
     for r in recs:
         RECORDS[r["id"]] = r
@@ -423,9 +425,18 @@ def human(point_id:str,result:str):
     if result not in {"Residue","Non-residue","Review","Skip"}:
         raise HTTPException(400,"invalid result")
     value=None if result=="Skip" else result
+    previous=RECORDS[point_id].get("human_result")
     RECORDS[point_id]["human_result"]=value
     if db.configured():
-        db.update_point(point_id,human_result=value)
+        from datetime import datetime, timezone
+        verified_at=None if result=="Skip" else datetime.now(timezone.utc).isoformat()
+        db.update_point(point_id,human_result=value,human_verified_at=verified_at,human_updated_at=verified_at)
+        if result!="Skip":
+            try: db.add_review_history(point_id, previous, value)
+            except Exception as e: print(f"[review_history] {e}")
+        else:
+            # A skip deliberately remains unverified.
+            pass
     return public_record(RECORDS[point_id])
 
 @app.post("/api/points/{point_id}/ai")

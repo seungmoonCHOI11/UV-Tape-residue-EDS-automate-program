@@ -98,3 +98,17 @@ def get_assets(point_id: str):
 def re_digits(value: Any) -> str:
     m=re.search(r"\d+",str(value or ""))
     return m.group(0) if m else "0"
+
+
+def get_first_unverified_point(project_id: str):
+    rows = (get_client().table("points").select("*")
+            .eq("project_id", project_id)
+            .is_("human_result", "null")
+            .order("power").order("time_sec").order("wafer").order("point")
+            .limit(1).execute().data or [])
+    return rows[0] if rows else None
+
+def add_review_history(point_id: str, previous_result, new_result, reviewer_note=None):
+    payload={"point_id":point_id,"previous_human_result":previous_result,
+             "new_human_result":new_result,"reviewer_note":reviewer_note}
+    return get_client().table("point_review_history").insert(payload).execute()
