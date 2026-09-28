@@ -48,3 +48,10 @@ F5 또는 재접속
 - CV 결과는 OpenAI 개별 분류가 아니다.
 - Human 결과는 CV 결과를 덮어쓰지 않는다.
 - Skip은 Non-residue가 아니다.
+
+
+## V13.1 hotfix
+- Client hydration-safe boot: browser-only project restoration is deferred until after the initial render.
+- localStorage access is guarded for SSR/build-time rendering.
+- Existing project data is still restored from Supabase after mount.
+- First unverified Point is selected after project data is loaded.

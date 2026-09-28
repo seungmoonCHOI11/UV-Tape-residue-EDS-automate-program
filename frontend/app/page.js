@@ -6,12 +6,12 @@ const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-bac
 const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5",points:"1-9"};
 
 export default function App(){
- const [page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),input=useRef();
+ const [mounted,setMounted]=useState(false),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),input=useRef();
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadData(preferredId=null){
    try{
-     const savedId=preferredId||localStorage.getItem("uvtape:selectedProject");
+     const savedId=preferredId||(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);
      let r=savedId?await fetch(`${API}/api/projects/${savedId}`):await fetch(`${API}/api/projects/latest`);
      if(!r.ok && savedId) r=await fetch(`${API}/api/projects/latest`);
      if(!r.ok){notify("프로젝트 데이터를 불러오지 못했습니다.");return []}
@@ -19,13 +19,13 @@ export default function App(){
      if(j?.project_id || j?.id){
        const pid=j.project_id||j.id;
        const arr=(j.points||[]).map(x=>({...x,human_result:x.human_result||null}));
-       setProject(pid);setPoints(arr);localStorage.setItem("uvtape:selectedProject",pid);
+       setProject(pid);setPoints(arr);setIdx(arr.findIndex(z=>!z.human_result)>=0?arr.findIndex(z=>!z.human_result):0);if(typeof window!=="undefined")localStorage.setItem("uvtape:selectedProject",pid);
        return arr;
      }
      setProject(null);setPoints([]);return [];
    }catch(e){notify("프로젝트 데이터를 불러오지 못했습니다.");return []}
  }
- useEffect(()=>{loadData()},[]);
+ useEffect(()=>{setMounted(true);loadData()},[]);
  function parseSelection(value){
  const out=[];
  String(value||"").split(",").forEach(part=>{
@@ -69,7 +69,7 @@ function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toL
        if(st.status==="completed"){
          done=true;
          const pr=await fetch(`${API}/api/projects/${st.project_id}`);const pj=await pr.json();
-         setProject(st.project_id);localStorage.setItem("uvtape:selectedProject",st.project_id);const loaded=(pj.points||[]).map(x=>({...x,human_result:x.human_result||null}));setPoints(loaded);setIdx(nextUnverified(0)>=0?nextUnverified(0):0);setPage("Dashboard");setVerificationOpen(true);notify(`${st.count||loaded.length||n} points 분석 완료`);
+         setProject(st.project_id);if(typeof window!=="undefined")localStorage.setItem("uvtape:selectedProject",st.project_id);const loaded=(pj.points||[]).map(x=>({...x,human_result:x.human_result||null}));setPoints(loaded);setIdx(nextUnverified(0)>=0?nextUnverified(0):0);setPage("Dashboard");setVerificationOpen(true);notify(`${st.count||loaded.length||n} points 분석 완료`);
        }else if(st.status==="failed")throw new Error(st.error||st.message||"분석에 실패했습니다.");
      }
    }catch(e){notify(`Backend 오류: ${e?.message||"network error"}`)}finally{setBusy(false);setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},700)}
@@ -80,7 +80,7 @@ function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toL
      const r=await fetch(`${API}/api/points/${p.id}/human?result=${encodeURIComponent(v)}`,{method:"POST"});
      if(!r.ok) throw new Error("검증 결과 저장 실패");
      const j=await r.json();
-     const updated=points.map(z=>z.id===p.id?j:z); setPoints(updated);localStorage.setItem("uvtape:lastPointId", p.id);
+     const updated=points.map(z=>z.id===p.id?j:z); setPoints(updated);if(typeof window!=="undefined")localStorage.setItem("uvtape:lastPointId", p.id);
      if(v==="Skip"){setIdx(Math.min(updated.length-1,idx+1));return;}
      const ni=updated.findIndex((z,i)=>i>idx&&!z.human_result);
      if(ni>=0){setIdx(ni);return;}
@@ -99,6 +99,7 @@ async function reanalyzeProject(){if(!project)return notify("현재 프로젝트
 }
 function goNav(n){if(n==="Verification"){openVerification();return}setPage(n)}
  async function exportFile(kind){if(!project)return notify("먼저 실제 PDF를 업로드해 project를 생성하세요.");const r=await fetch(`${API}/api/projects/${project}/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=`point_report.${kind==="ppt"?"pptx":kind}`;a.click();URL.revokeObjectURL(u);notify(`${kind.toUpperCase()} export 완료`)}
+ if(!mounted)return <div className="app"><main><div className="content"><section className="panel emptyPanel"><b>Loading</b><small>Project data is being loaded.</small></section></div></main></div>;
  const p=points[idx],filtered=points.filter(x=>(result==="All"||(x.human_result||x.features?.result)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
  return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div><div className="project"><small>PROJECT</small><strong>{project?"UV Tape Residue":"No project selected"}</strong><span>{points.length} points</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition Compare",GitCompare],["Reports",FileText]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={setPage}/>}
