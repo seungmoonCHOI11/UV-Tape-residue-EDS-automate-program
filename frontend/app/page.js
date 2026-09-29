@@ -72,8 +72,8 @@ function Review({p,idx,total,prev,next,human}){
  const f=p.features||{}; const roi=f.roi||{}; const c=f.c_metrics||{},o=f.o_metrics||{};
  return <div className="content"><div className="intro"><div><label>HUMAN-IN-THE-LOOP</label><h2>Residue Verification</h2><p>{p.power} / {p.time} · W{p.wafer} / P{p.point} · {p.zone} · PDF pages {p.page?.start}-{p.page?.end}</p></div><span>{idx+1} / {total}</span></div>
   <div className="reviewGrid sourcePages topEvidence">
-   <Img title="SEM / Residue Overlay" src={A.sem_residue_overlay||A.sem}/ kind="semVisual"/>
-   <Img title="Full EDS Map" src={A.eds_map}/ kind="edsVisual"/>
+   <Img title="SEM / Residue Overlay" src={A.sem_residue_overlay||A.sem} kind="semVisual"/>
+   <Img title="Full EDS Map" src={A.eds_map} kind="edsVisual"/>
   </div>
   <div className="reviewGrid elementEvidence">
    <Img title="SE" src={A.se_roi_overlay||A.se_map}/><Img title="C" src={A.c_roi_overlay||A.c_map}/><Img title="N" src={A.n_roi_overlay||A.n_map}/><Img title="O" src={A.o_roi_overlay||A.o_map}/><Img title="Si" src={A.si_roi_overlay||A.si_map}/>
