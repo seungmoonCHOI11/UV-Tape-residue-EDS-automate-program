@@ -11,7 +11,6 @@ class PointRecord(BaseModel):
     page: int
     ai_result: Optional[str] = None
     human_result: Optional[str] = None
-    human_verified_at: Optional[str] = None
     confidence: Optional[str] = None
     residue_score: float = 0.0
     c_enrichment: float = 0.0

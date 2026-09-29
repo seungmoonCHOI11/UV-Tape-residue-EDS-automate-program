@@ -1,187 +1,427 @@
-"""Memory-minimal one-Point PDF/SEM/EDS worker for v12."""
-import gc, json, os, sys
+"""One-Point PDF -> SEM/EDS crop + residue ROI analysis worker.
+
+Design rules:
+- PDF CROP coordinates are fixed to the vendor page layout (scaled to the
+  actual rendered page size). These are image extraction coordinates, not ROI.
+- Residue ROI is detected independently from each Point's SEM crop.
+- The detected SEM ROI is projected by normalized coordinates to the SE/C/N/O/Si
+  panels, so the same physical field is compared across maps.
+- Local Ring is used as the background reference for C/O evidence.
+- Final CV result is binary: Residue / Non-residue. Confidence is separate.
+- OpenAI is not used for point-level classification.
+"""
+import gc
+import json
+import os
+import sys
 from pathlib import Path
-os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
-import cv2, numpy as np, pymupdf as fitz
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
+
+import cv2
+import numpy as np
+import pymupdf as fitz
+
 cv2.setNumThreads(1)
-try: cv2.ocl.setUseOpenCL(False)
-except Exception: pass
+try:
+    cv2.ocl.setUseOpenCL(False)
+except Exception:
+    pass
+
+# Coordinates measured from the actual 1240 x 1754 vendor pages used in the
+# current dataset. They are deliberately pixel-based for PDF CROP, then scaled
+# if a PDF page is rendered at another size.
+PAGE1_BASE = (1240, 1754)
+PAGE1_CROPS = {
+    "sem": (98, 207, 628, 418),
+    "eds_map": (101, 818, 1102, 734),
+}
+PAGE2_BASE = (1240, 1754)
+PAGE2_CROPS = {
+    "se_map": (101, 190, 542, 362),
+    "c_map": (658, 190, 542, 362),
+    "n_map": (101, 566, 542, 362),
+    "o_map": (658, 566, 542, 362),
+    "si_map": (101, 943, 542, 362),
+}
+
 
 def render_page_to_jpeg(page, quality=92):
-    pix=page.get_pixmap(matrix=fitz.Matrix(1,1),alpha=False)
-    try: data=pix.tobytes("jpeg",jpg_quality=quality)
-    finally: del pix
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    try:
+        data = pix.tobytes("jpeg", jpg_quality=quality)
+    finally:
+        del pix
     return data
 
-def crop_page1_layout(img):
-    # Bruker page-1 layout is stable at 1240x1754 render size.
-    # Keep the SEM micrograph itself and the full color EDS map as separate raw assets.
-    h,w=img.shape[:2]
-    sx,sy=w/1240.0,h/1754.0
-    box=lambda x0,y0,x1,y1: img[max(0,int(y0*sy)):min(h,int(y1*sy)),max(0,int(x0*sx)):min(w,int(x1*sx))]
-    return {
-        "sem":box(100,205,640,625),
-        "eds_map":box(100,815,1200,1295),
-    }
 
-def crop_page2_element_maps(img):
-    # Exact panel coordinates verified against the supplied 1240x1754 Bruker PDF.
-    h,w=img.shape[:2]
-    sx,sy=w/1240.0,h/1754.0
-    box=lambda x0,y0,x1,y1: img[max(0,int(y0*sy)):min(h,int(y1*sy)),max(0,int(x0*sx)):min(w,int(x1*sx))]
-    return {
-        "full_element_maps":box(100,190,1200,1310),
-        "se_map":box(100,190,640,550),
-        "c_map":box(660,190,1200,550),
-        "n_map":box(100,570,640,930),
-        "o_map":box(660,570,1200,930),
-        "si_map":box(100,950,640,1310),
-    }
+def crop_fixed(img, rect, base_size):
+    """Pixel-coordinate crop, scaled from the measured vendor page size."""
+    bw, bh = base_size
+    h, w = img.shape[:2]
+    x, y, cw, ch = rect
+    sx, sy = w / bw, h / bh
+    x0 = max(0, min(w - 1, int(round(x * sx))))
+    y0 = max(0, min(h - 1, int(round(y * sy))))
+    x1 = max(x0 + 1, min(w, int(round((x + cw) * sx))))
+    y1 = max(y0 + 1, min(h, int(round((y + ch) * sy))))
+    return img[y0:y1, x0:x1].copy()
 
-def save_crop(img,path,quality=90):
-    path.parent.mkdir(parents=True,exist_ok=True); cv2.imwrite(str(path),img,[int(cv2.IMWRITE_JPEG_QUALITY),quality])
 
-def resize_like(im,shape):
-    h,w=shape[:2]
-    return im if im.shape[:2]==(h,w) else cv2.resize(im,(w,h),interpolation=cv2.INTER_AREA)
+def save_crop(img, path, quality=90):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
-def signal_channel(im,element):
-    b,g,r=cv2.split(im)
-    if element=="C": return r
-    if element=="N": return g
-    if element=="O": return b
-    if element=="Si": return cv2.max(g,b)
-    return cv2.cvtColor(im,cv2.COLOR_BGR2GRAY)
 
-def detect_residue_mask(se):
-    """Detect meaningful bright residue candidates from the Page-2 SE reference.
+def _draw_box(img, box, color, thickness=3):
+    x, y, w, h = [int(v) for v in box]
+    out = img.copy()
+    cv2.rectangle(out, (x, y), (x + w, y + h), color, thickness, lineType=cv2.LINE_AA)
+    return out
 
-    A white top-hat is used instead of a global/adaptive threshold so the
-    fine EDS/SE speckle background does not become thousands of tiny ROIs.
-    The largest few meaningful connected components are retained.
+
+def project_box(norm_box, shape):
+    h, w = shape[:2]
+    nx, ny, nw, nh = norm_box
+    x = int(round(nx * w)); y = int(round(ny * h))
+    rw = int(round(nw * w)); rh = int(round(nh * h))
+    x = max(0, min(w - 2, x)); y = max(0, min(h - 2, y))
+    rw = max(2, min(w - x, rw)); rh = max(2, min(h - y, rh))
+    return x, y, rw, rh
+
+
+def _valid_mask(shape, bottom_exclusion=0.12):
+    h, w = shape[:2]
+    valid = np.ones((h, w), np.uint8)
+    valid[int(h * (1 - bottom_exclusion)):, :] = 0
+    return valid
+
+
+def detect_residue_roi(sem):
+    """Detect a residue candidate from the SEM image itself.
+
+    The algorithm looks for locally bright/contrasting connected objects in the
+    usable SEM field, filters out tiny noise, then merges nearby pieces belonging
+    to the same visible residue. No fixed ROI coordinates are used.
     """
-    gray=cv2.cvtColor(se,cv2.COLOR_BGR2GRAY) if len(se.shape)==3 else se
-    clahe=cv2.createCLAHE(clipLimit=1.8,tileGridSize=(8,8)).apply(gray)
-    kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(31,31))
-    top=cv2.morphologyEx(clahe,cv2.MORPH_TOPHAT,kernel)
-    top=cv2.GaussianBlur(top,(3,3),0)
-    _,mask=cv2.threshold(top,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-    mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
-    mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((7,7),np.uint8))
-    h,w=mask.shape[:2]
-    # Exclude Bruker label / scale-bar bands from residue candidate detection.
-    mask[:max(1,int(h*0.06)),:]=0
-    mask[int(h*0.84):,:]=0
-    total=h*w; n,labels,stats,_=cv2.connectedComponentsWithStats(mask); out=np.zeros_like(mask)
-    min_area=max(30,int(total*0.00030)); max_area=int(total*0.20)
-    candidates=[]
-    for i in range(1,n):
-        x,y,ww,hh,area=stats[i]
-        if area<min_area or area>max_area or x<=1 or y<=1 or x+ww>=w-1 or y+hh>=h-1: continue
-        aspect=max(ww/max(hh,1),hh/max(ww,1))
-        if aspect>35 and area<total*0.002: continue
-        candidates.append((int(area),i))
-    # Keep up to five strongest physical candidates, which also handles multiple
-    # residue fragments without admitting the fine speckle field.
-    for area,i in sorted(candidates,reverse=True)[:5]: out[labels==i]=255
-    if cv2.countNonZero(out)==0 and n>1:
-        idx=1+int(np.argmax(stats[1:,cv2.CC_STAT_AREA])); out[labels==idx]=255
+    gray = cv2.cvtColor(sem, cv2.COLOR_BGR2GRAY) if sem.ndim == 3 else sem.copy()
+    h, w = gray.shape[:2]
+    usable_h = max(10, int(h * 0.88))  # exclude scale-bar / acquisition text area
+    work = gray[:usable_h, :]
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(work)
+    background = cv2.GaussianBlur(clahe, (0, 0), 10)
+    top_hat = cv2.subtract(clahe, background)
+
+    # High local-contrast objects are candidates. Percentile + robust spread keeps
+    # the threshold adaptive to different SEM brightness levels.
+    p98 = float(np.percentile(top_hat, 98.0))
+    med = float(np.median(top_hat))
+    mad = float(np.median(np.abs(top_hat - med)))
+    robust_threshold = med + 3.5 * 1.4826 * mad
+    threshold = max(p98, robust_threshold)
+    mask = (top_hat >= threshold).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    candidates = []
+    min_area = max(20, int(0.00005 * work.size))
+    max_area = int(0.08 * work.size)
+    for i in range(1, n):
+        x, y, cw, ch, area = [int(v) for v in stats[i]]
+        if min_area <= area <= max_area:
+            candidates.append({"i": i, "x": x, "y": y, "w": cw, "h": ch, "area": area})
+    candidates.sort(key=lambda c: c["area"], reverse=True)
+
+    if not candidates:
+        # No reliable candidate: return a tiny center ROI with low confidence so
+        # the point remains reviewable rather than silently crashing.
+        rw, rh = max(20, int(w * 0.08)), max(20, int(h * 0.08))
+        x, y = (w - rw) // 2, (usable_h - rh) // 2
+        return {
+            "bbox": (x, y, rw, rh),
+            "normalized_bbox": (x / w, y / h, rw / w, rh / h),
+            "candidate_count": 0,
+            "candidate_area_ratio": 0.0,
+            "morphology_confidence": 0.0,
+            "mask": np.zeros((h, w), np.uint8),
+        }
+
+    # Start from the strongest candidate and include spatially adjacent bright
+    # fragments that are close enough to plausibly belong to the same residue.
+    selected = [candidates[0]]
+    for c in candidates[1:]:
+        x0 = selected[0]["x"]
+        y0 = selected[0]["y"]
+        x1 = x0 + selected[0]["w"]
+        y1 = y0 + selected[0]["h"]
+        dx = max(x0 - c["x"], c["x"] + c["w"] - x1, 0)
+        dy = max(y0 - c["y"], c["y"] + c["h"] - y1, 0)
+        if dx <= max(35, int(0.06 * w)) and dy <= max(35, int(0.06 * h)):
+            selected.append(c)
+            # Update aggregate bounds so a chain of nearby pieces can merge.
+            x0 = min(s["x"] for s in selected); y0 = min(s["y"] for s in selected)
+            x1 = max(s["x"] + s["w"] for s in selected); y1 = max(s["y"] + s["h"] for s in selected)
+            selected[0]["x"], selected[0]["y"] = x0, y0
+            selected[0]["w"], selected[0]["h"] = x1 - x0, y1 - y0
+
+    x0 = min(c["x"] for c in selected); y0 = min(c["y"] for c in selected)
+    x1 = max(c["x"] + c["w"] for c in selected); y1 = max(c["y"] + c["h"] for c in selected)
+    pad_x = max(12, int(0.03 * w)); pad_y = max(12, int(0.03 * h))
+    x0 = max(0, x0 - pad_x); y0 = max(0, y0 - pad_y)
+    x1 = min(w, x1 + pad_x); y1 = min(usable_h, y1 + pad_y)
+    rw, rh = x1 - x0, y1 - y0
+
+    roi_mask = np.zeros((h, w), np.uint8)
+    for c in selected:
+        roi_mask[:usable_h, :][labels == c.get("i", -1)] = 255
+
+    candidate_area = float(sum(c["area"] for c in selected))
+    roi_ratio = candidate_area / max(work.size, 1)
+    # Morphology confidence is deliberately based on SEM evidence only.
+    area_term = np.clip(np.log10(candidate_area + 1) / 4.0, 0, 1)
+    contrast = float(np.mean(top_hat[roi_mask[:usable_h] > 0])) if np.any(roi_mask[:usable_h] > 0) else 0.0
+    contrast_term = float(np.clip(contrast / 80.0, 0, 1))
+    morphology_conf = float(np.clip(0.55 * area_term + 0.45 * contrast_term, 0, 1))
+
+    return {
+        "bbox": (x0, y0, rw, rh),
+        "normalized_bbox": (x0 / w, y0 / h, rw / w, rh / h),
+        "candidate_count": len(selected),
+        "candidate_area_ratio": roi_ratio,
+        "morphology_confidence": morphology_conf,
+        "mask": roi_mask,
+    }
+
+
+def local_map_metrics(img, norm_box):
+    """Compare ROI against a local ring; signal is relative map intensity only."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
+    h, w = gray.shape[:2]
+    x, y, rw, rh = project_box(norm_box, gray.shape)
+    roi = np.zeros((h, w), np.uint8)
+    roi[y:y + rh, x:x + rw] = 1
+    dilated = cv2.dilate(roi, np.ones((31, 31), np.uint8), iterations=1)
+    ring = ((dilated > 0) & (roi == 0) & (_valid_mask(gray.shape) > 0))
+    # Exclude the map's bottom acquisition labels/scale-bar region from both
+    # background and coverage statistics.
+    valid = _valid_mask(gray.shape) > 0
+    inside = gray[(roi > 0) & valid].astype(float)
+    outside = gray[ring].astype(float)
+    if len(inside) == 0 or len(outside) < 20:
+        return {"roi_box": (x, y, rw, rh), "background": 0, "roi_median": 0, "contrast_pct": 0, "z_score": 0, "coverage_pct": 0}
+    bg_median = float(np.median(outside))
+    roi_median = float(np.median(inside))
+    mad = float(np.median(np.abs(outside - bg_median)))
+    robust_sd = max(1.4826 * mad, 1.0)
+    z = (roi_median - bg_median) / robust_sd
+    p90 = float(np.percentile(gray[valid], 90))
+    coverage = float(np.mean(inside >= p90) * 100.0)
+    contrast = (roi_median - bg_median) / max(abs(bg_median), 1.0) * 100.0
+    return {
+        "roi_box": (x, y, rw, rh),
+        "background": round(bg_median, 4),
+        "roi_median": round(roi_median, 4),
+        "contrast_pct": round(float(contrast), 4),
+        "z_score": round(float(z), 4),
+        "coverage_pct": round(coverage, 4),
+    }
+
+
+def _evidence(metric, z_min, contrast_min):
+    return bool(metric["z_score"] >= z_min and metric["contrast_pct"] >= contrast_min)
+
+
+def classify_residue(morphology_conf, c, o):
+    """Binary point classification from SEM residue + local C/O evidence.
+
+    The SEM is the spatial gate: there must first be a visible residue candidate.
+    Tape-residue evidence then requires C and O enrichment at that same ROI.
+    Confidence records how strongly the evidence agrees; it does not create a
+    third user-facing class.
+    """
+    sem_strong = morphology_conf >= 0.42
+    c_strong = _evidence(c, 0.45, 20.0)
+    o_strong = _evidence(o, 0.20, 12.0)
+    c_support = _evidence(c, 0.20, 8.0)
+    o_support = _evidence(o, 0.05, 5.0)
+
+    if sem_strong and c_strong and o_strong:
+        result = "Residue"
+        confidence = "High"
+    elif sem_strong and c_strong and o_support:
+        result = "Residue"
+        confidence = "Medium"
+    elif sem_strong and c_support and o_strong:
+        result = "Residue"
+        confidence = "Medium"
+    else:
+        result = "Non-residue"
+        if sem_strong and (c_support or o_support):
+            confidence = "Low"
+        elif sem_strong:
+            confidence = "Medium"
+        else:
+            confidence = "High" if not (c_support or o_support) else "Low"
+
+    score = (
+        0.45 * float(np.clip(morphology_conf, 0, 1))
+        + 0.30 * float(np.clip((c["z_score"] - 0.1) / 1.2, 0, 1))
+        + 0.25 * float(np.clip((o["z_score"] - 0.05) / 0.8, 0, 1))
+    )
+    reasons = []
+    if not sem_strong: reasons.append("SEM_residue_candidate_weak")
+    if not c_strong: reasons.append("C_evidence_below_strong_threshold")
+    if not o_strong: reasons.append("O_evidence_below_strong_threshold")
+    return result, confidence, float(np.clip(score, 0, 1)), reasons
+
+
+def make_overlay(img, box, color, ring=True):
+    out = img.copy()
+    x, y, rw, rh = [int(v) for v in box]
+    # Local Ring is rendered as a yellow dashed rectangle around the ROI.
+    if ring:
+        pad = max(10, int(round(min(img.shape[:2]) * 0.035)))
+        rx0, ry0 = max(0, x - pad), max(0, y - pad)
+        rx1, ry1 = min(img.shape[1] - 1, x + rw + pad), min(img.shape[0] - 1, y + rh + pad)
+        for xx in range(rx0, rx1, 14):
+            cv2.line(out, (xx, ry0), (min(xx + 7, rx1), ry0), (0, 220, 255), 2, cv2.LINE_AA)
+            cv2.line(out, (xx, ry1), (min(xx + 7, rx1), ry1), (0, 220, 255), 2, cv2.LINE_AA)
+        for yy in range(ry0, ry1, 14):
+            cv2.line(out, (rx0, yy), (rx0, min(yy + 7, ry1)), (0, 220, 255), 2, cv2.LINE_AA)
+            cv2.line(out, (rx1, yy), (rx1, min(yy + 7, ry1)), (0, 220, 255), 2, cv2.LINE_AA)
+    cv2.rectangle(out, (x, y), (x + rw, y + rh), color, 3, cv2.LINE_AA)
     return out
 
-def local_element_metrics(element_img,roi,element):
-    sig=resize_like(signal_channel(element_img,element),roi.shape); rb=roi>0
-    if not np.any(rb): return {"contrast_pct":0,"log2_ratio":0,"zscore":0,"coverage":0,"overlap":0,"roi_mean":0,"bg_mean":0}
-    dil=cv2.dilate(roi,np.ones((17,17),np.uint8)); ring=(dil>0)&(~rb)
-    if int(ring.sum())<30:
-        dil=cv2.dilate(roi,np.ones((31,31),np.uint8)); ring=(dil>0)&(~rb)
-    inside=sig[rb].astype(np.float32); bg=sig[ring].astype(np.float32); whole=sig.astype(np.float32)
-    if inside.size==0 or bg.size==0: return {"contrast_pct":0,"log2_ratio":0,"zscore":0,"coverage":0,"overlap":0,"roi_mean":float(np.mean(inside)) if inside.size else 0,"bg_mean":float(np.mean(bg)) if bg.size else 0}
-    roi_mean=float(np.median(inside)); bg_mean=float(np.median(bg)); bg_std=float(np.std(bg)); eps=1.0
-    ratio=(roi_mean+eps)/(bg_mean+eps); contrast=(roi_mean-bg_mean)/(bg_mean+eps)*100; log2=float(np.log2(ratio)); z=(roi_mean-bg_mean)/max(bg_std,1.0)
-    p85=float(np.percentile(whole,85)); high=sig>=p85
-    return {"contrast_pct":round(float(np.clip(contrast,-1000,1000)),2),"log2_ratio":round(log2,4),"zscore":round(float(np.clip(z,-20,20)),3),"coverage":round(float(np.mean(inside>=p85))*100,2),"overlap":round(float(np.sum(rb&high)/max(np.sum(rb),1))*100,2),"roi_mean":round(roi_mean,3),"bg_mean":round(bg_mean,3)}
-
-def sigmoid(x): return 1/(1+np.exp(-np.clip(x,-20,20)))
-
-def roi_ring_mask(roi):
-    base=(roi>0).astype(np.uint8)*255
-    # Local Ring is the immediate annulus used as the background reference.
-    k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(25,25))
-    dil=cv2.dilate(base,k)
-    ring=cv2.subtract(dil,base)
-    return base,ring
-
-def make_overlay(base,mask,title=None):
-    out=base.copy()
-    roi,ring=roi_ring_mask(mask)
-    ring_contours,_=cv2.findContours(ring.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-    roi_contours,_=cv2.findContours(roi.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out,ring_contours,-1,(0,220,255),2)
-    cv2.drawContours(out,roi_contours,-1,(0,0,255),2)
-    if title:
-        cv2.rectangle(out,(8,8),(230,38),(20,20,20),-1); cv2.putText(out,title,(16,29),cv2.FONT_HERSHEY_SIMPLEX,.48,(255,255,255),1,cv2.LINE_AA)
-    return out
-
-def enhance_element_map(im,element):
-    ch=signal_channel(im,element); p2,p98=np.percentile(ch,[2,98]); norm=np.clip((ch.astype(np.float32)-p2)*255/max(p98-p2,1),0,255).astype(np.uint8); norm=cv2.createCLAHE(clipLimit=2.2,tileGridSize=(8,8)).apply(norm)
-    if element=="C": return cv2.merge([np.zeros_like(norm),np.zeros_like(norm),norm])
-    if element=="N": return cv2.merge([np.zeros_like(norm),norm,np.zeros_like(norm)])
-    if element=="O": return cv2.merge([norm,np.zeros_like(norm),np.zeros_like(norm)])
-    if element=="Si": return cv2.merge([norm,norm,np.zeros_like(norm)])
-    return cv2.cvtColor(norm,cv2.COLOR_GRAY2BGR)
-
-def make_element_overview(maps,roi):
-    items=[("C",maps["c_map"]),("N",maps["n_map"]),("O",maps["o_map"]),("Si",maps["si_map"])]
-    th=min(im.shape[0] for _,im in items); tw=min(im.shape[1] for _,im in items); cells=[]
-    for label,im in items:
-        enh=cv2.resize(enhance_element_map(im,label),(tw,th),interpolation=cv2.INTER_AREA); r=cv2.resize(roi,(tw,th),interpolation=cv2.INTER_NEAREST); cells.append(make_overlay(enh,r,label))
-    return np.vstack([np.hstack([cells[0],cells[1]]),np.hstack([cells[2],cells[3]])])
-
-def residue_features(se_ref,c_map,o_map,n_map,si_map):
-    roi=detect_residue_mask(se_ref); roi_area=int(cv2.countNonZero(roi)); coverage=roi_area/max(roi.size,1)
-    gray=cv2.cvtColor(se_ref,cv2.COLOR_BGR2GRAY); bg=cv2.GaussianBlur(gray,(0,0),7); contrast=cv2.absdiff(gray,bg); morph_contrast=float(np.mean(contrast[roi>0]))/255 if roi_area else 0
-    morphology_score=float(np.clip(.55*np.clip(coverage/.06,0,1)+.45*min(morph_contrast*3,1),0,1))
-    cm=local_element_metrics(c_map,roi,"C"); om=local_element_metrics(o_map,roi,"O"); nm=local_element_metrics(n_map,roi,"N"); sm=local_element_metrics(si_map,roi,"Si")
-    ce=float(sigmoid((cm["zscore"]-.5)/1.5)); oe=float(sigmoid((om["zscore"]-.5)/1.5)); spatial=.5*np.clip(cm["overlap"]/100,0,1)+.5*np.clip(om["overlap"]/100,0,1)
-    score=float(np.clip(.45*morphology_score+.20*ce+.20*oe+.15*spatial,0,1)); result="Residue" if score>=.50 else "Non-residue"; margin=abs(score-.50); agreement=(ce+oe)/2
-    conf="High" if margin>=.22 and agreement>=.62 else "Medium" if margin>=.12 else "Low"
-    reasons=[]
-    if margin<.12: reasons.append("low_score_margin")
-    if morphology_score>.60 and agreement<.40: reasons.append("SEM_strong_but_C_O_weak")
-    if morphology_score<.25 and agreement>.70: reasons.append("C_O_signal_without_strong_SEM_candidate")
-    return {"result":result,"confidence":conf,"residue_score":round(score,4),"c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],"c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],"spatial_overlap":round(spatial*100,2),"n_enrichment":nm["contrast_pct"],"n_log2_ratio":nm["log2_ratio"],"n_zscore":nm["zscore"],"n_coverage":nm["coverage"],"si_enrichment":sm["contrast_pct"],"si_zscore":sm["zscore"],"morphology_score":round(morphology_score,4),"cluster_score":round(spatial,4),"roi_area_px":roi_area,"candidate_coverage":round(coverage*100,3),"review_reasons":reasons,"n_note":"N is extracted as a relative map signal and is not used in the current residue score.","si_note":"Si is stored as a relative map signal and is not used in the current residue score.","classification_note":"Binary CV classification uses Page-2 SE morphology plus local C/O signal and spatial overlap. Percent contrast is a relative image metric, not wt%/at%."},roi
 
 def run(payload):
-    outdir=Path(payload["output_dir"]); outdir.mkdir(parents=True,exist_ok=True); paths={}
-    for local_no,info in enumerate(payload["pages"],1):
-        with fitz.open(Path(info["path"])) as doc:
-            page=doc.load_page(int(info["index"])); data=render_page_to_jpeg(page); out=outdir/f"page_{local_no}.jpg"; out.write_bytes(data); paths[f"page_{local_no}"]=str(out); del data,page
-        gc.collect()
-    first=cv2.imread(paths["page_1"],cv2.IMREAD_COLOR); second=cv2.imread(paths["page_2"],cv2.IMREAD_COLOR)
-    if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
-    p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()
-    features,roi=residue_features(p2["se_map"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"])
-    raw={"sem":p1["sem"],"eds_map":p1["eds_map"],"full_element_maps":p2["full_element_maps"],"se_map":p2["se_map"],"c_map":p2["c_map"],"n_map":p2["n_map"],"o_map":p2["o_map"],"si_map":p2["si_map"]}
-    for key,im in raw.items(): fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
-    # Backward-compatible report aliases.
-    paths["element_maps"]=paths["full_element_maps"]
-    paths["spectrum"]=paths["page_3"]
-    # Viewer assets: exact source maps with the same normalized ROI and a visible Local Ring.
-    roi_sem=cv2.resize(roi,(p1["sem"].shape[1],p1["sem"].shape[0]),interpolation=cv2.INTER_NEAREST)
-    fp=outdir/"sem_roi_overlay.jpg"; save_crop(make_overlay(p1["sem"],roi_sem,"ROI red / Local Ring yellow"),fp,92); paths["sem_roi_overlay"]=str(fp)
-    # Keep a backward-compatible alias, but the frontend prefers the exact full assets above.
-    paths["sem_residue_overlay"]=paths["sem_roi_overlay"]
-    fp=outdir/"element_maps_enhanced.jpg"; save_crop(p2["full_element_maps"],fp,92); paths["element_maps_enhanced"]=str(fp)
-    for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
-        rr=cv2.resize(roi,(p2[key].shape[1],p2[key].shape[0]),interpolation=cv2.INTER_NEAREST)
-        fp=outdir/f"{key}_roi_overlay.jpg"; save_crop(make_overlay(p2[key],rr,f"{label} / ROI red / Local Ring yellow"),fp,92); paths[f"{key}_roi_overlay"]=str(fp)
-        # Backward-compatible names retained for old clients.
-        fp_old=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_overlay(enhance_element_map(p2[key],label) if label!="SE" else p2[key],rr,f"{label} / ROI"),fp_old,92); paths[f"{key}_enhanced_overlay"]=str(fp_old)
-    features.update({"map_parser":"Bruker page-2 SE-referenced individual C/N/O/Si panels","page":payload["page"],"cv_version":"v14-exact-bruker-crop-local-ring-spatial","viewer_note":"Enhanced/overlay images are visualization assets only; raw maps remain stored separately."})
-    del roi; p1.clear(); p2.clear(); raw.clear(); gc.collect()
-    rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
-    Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")
+    output_dir = Path(payload["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
 
-if __name__=="__main__":
-    if len(sys.argv)!=2: raise SystemExit("Usage: python point_worker.py <point_input.json>")
-    run(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")))
+    for local_no, page_info in enumerate(payload["pages"], 1):
+        source_path = Path(page_info["path"])
+        page_index = int(page_info["index"])
+        with fitz.open(source_path) as doc:
+            page = doc.load_page(page_index)
+            jpeg_bytes = render_page_to_jpeg(page)
+            out = output_dir / f"page_{local_no}.jpg"
+            out.write_bytes(jpeg_bytes)
+            paths[f"page_{local_no}"] = str(out)
+            del jpeg_bytes, page
+        gc.collect()
+
+    # Exact, fixed PDF CROP stage.
+    p1 = cv2.imread(paths["page_1"], cv2.IMREAD_COLOR)
+    p2 = cv2.imread(paths["page_2"], cv2.IMREAD_COLOR)
+    if p1 is None or p2 is None:
+        raise RuntimeError("Unable to read rendered PDF pages.")
+    page1 = {k: crop_fixed(p1, r, PAGE1_BASE) for k, r in PAGE1_CROPS.items()}
+    page2 = {k: crop_fixed(p2, r, PAGE2_BASE) for k, r in PAGE2_CROPS.items()}
+    del p1, p2
+    gc.collect()
+
+    # SEM-driven dynamic ROI stage.
+    detection = detect_residue_roi(page1["sem"])
+    norm_box = detection["normalized_bbox"]
+    sem_box = detection["bbox"]
+    se_box = project_box(norm_box, page2["se_map"].shape)
+    c_box = project_box(norm_box, page2["c_map"].shape)
+    n_box = project_box(norm_box, page2["n_map"].shape)
+    o_box = project_box(norm_box, page2["o_map"].shape)
+    si_box = project_box(norm_box, page2["si_map"].shape)
+
+    c_metrics = local_map_metrics(page2["c_map"], norm_box)
+    o_metrics = local_map_metrics(page2["o_map"], norm_box)
+    n_metrics = local_map_metrics(page2["n_map"], norm_box)
+    si_metrics = local_map_metrics(page2["si_map"], norm_box)
+    result, confidence, score, reasons = classify_residue(
+        detection["morphology_confidence"], c_metrics, o_metrics
+    )
+
+    # Raw/source-derived assets.
+    asset_defs = {
+        "sem": page1["sem"],
+        "eds_map": page1["eds_map"],
+        "se_map": page2["se_map"],
+        "c_map": page2["c_map"],
+        "n_map": page2["n_map"],
+        "o_map": page2["o_map"],
+        "si_map": page2["si_map"],
+    }
+    for key, img in asset_defs.items():
+        fp = output_dir / f"{key}.jpg"
+        save_crop(img, fp)
+        paths[key] = str(fp)
+
+    # Viewer overlays. SEM = red ROI; SE/C/N/O/Si = white ROI + yellow Local Ring.
+    overlays = {
+        "sem_residue_overlay": make_overlay(page1["sem"], sem_box, (0, 0, 255), ring=False),
+        "se_roi_overlay": make_overlay(page2["se_map"], se_box, (255, 255, 255), ring=True),
+        "c_roi_overlay": make_overlay(page2["c_map"], c_box, (255, 255, 255), ring=True),
+        "n_roi_overlay": make_overlay(page2["n_map"], n_box, (255, 255, 255), ring=True),
+        "o_roi_overlay": make_overlay(page2["o_map"], o_box, (255, 255, 255), ring=True),
+        "si_roi_overlay": make_overlay(page2["si_map"], si_box, (255, 255, 255), ring=True),
+    }
+    for key, img in overlays.items():
+        fp = output_dir / f"{key}.jpg"
+        save_crop(img, fp)
+        paths[key] = str(fp)
+
+    features = {
+        "result": result,
+        "confidence": confidence,
+        "residue_score": round(score, 4),
+        "roi": {
+            "source": "SEM residue candidate detection",
+            "normalized_bbox": [round(float(v), 6) for v in norm_box],
+            "sem_bbox_px": list(map(int, sem_box)),
+            "se_bbox_px": list(map(int, se_box)),
+            "c_bbox_px": list(map(int, c_box)),
+            "n_bbox_px": list(map(int, n_box)),
+            "o_bbox_px": list(map(int, o_box)),
+            "si_bbox_px": list(map(int, si_box)),
+            "candidate_count": detection["candidate_count"],
+            "candidate_area_ratio": round(float(detection["candidate_area_ratio"]), 6),
+            "morphology_confidence": round(float(detection["morphology_confidence"]), 4),
+        },
+        "c_metrics": c_metrics,
+        "o_metrics": o_metrics,
+        "n_metrics": n_metrics,
+        "si_metrics": si_metrics,
+        "c_enrichment": round(float(c_metrics["contrast_pct"]), 2),
+        "o_enrichment": round(float(o_metrics["contrast_pct"]), 2),
+        "c_coverage": round(float(c_metrics["coverage_pct"]), 2),
+        "o_coverage": round(float(o_metrics["coverage_pct"]), 2),
+        "n_enrichment": round(float(n_metrics["contrast_pct"]), 2),
+        "n_coverage": round(float(n_metrics["coverage_pct"]), 2),
+        "cluster_score": round(float(detection["morphology_confidence"]), 4),
+        "local_ring": "Applied",
+        "review_reasons": reasons,
+        "map_signal_note": "EDS map brightness is treated as a relative X-ray count/intensity signal, not direct concentration.",
+        "crop_note": "PDF CROP uses fixed vendor-page pixel coordinates; ROI is detected dynamically from the SEM crop for each Point.",
+        "classifier": "SEM residue candidate + local C/O evidence",
+        "openai_point_classification": False,
+        "page": {"start": payload["page"]["start"], "end": payload["page"]["end"]},
+    }
+
+    record = {
+        "id": payload["id"], "power": payload["power"], "time": payload["time"],
+        "wafer": payload["wafer"], "point": payload["point"], "zone": payload["zone"],
+        "condition": payload["condition"], "page": payload["page"],
+        "pages_per_point": payload["pages_per_point"], "source_pages": payload["source_pages"],
+        "assets": paths, "features": features,
+    }
+    Path(payload["result_path"]).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python point_worker.py <point_input.json>")
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    run(payload)
