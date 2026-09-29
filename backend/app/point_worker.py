@@ -1,4 +1,4 @@
-"""Memory-minimal one-Point PDF/SEM/EDS worker for v12."""
+"""Memory-minimal one-Point PDF/SEM/EDS worker for v14."""
 import gc, json, os, sys
 from pathlib import Path
 os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
@@ -28,10 +28,20 @@ def crop_page1_layout(img):
 
 def crop_page2_element_maps(img):
     h,w=img.shape[:2]
-    # Keep a small page margin but do not trim the right edge of the element
-    # panels. The five map panels are the coordinate reference for ROI overlays.
-    x0,xmid,x1=int(.055*w),int(.50*w),int(.985*w); y0,y1,y2,y3=int(.085*h),int(.34*h),int(.60*h),int(.84*h)
-    return {"se_map":img[y0:y1,x0:xmid],"c_map":img[y0:y1,xmid:x1],"n_map":img[y1:y2,x0:xmid],"o_map":img[y1:y2,xmid:x1],"si_map":img[y2:y3,x0:xmid]}
+    # Page-2 is the coordinate reference. Keep the original full panel crop
+    # separately; never reconstruct this "Full Element Maps" view from the
+    # individual crops because that can change aspect ratios and clip Si/right
+    # edges. The five individual panels below are used for ROI projection.
+    x0,xmid,x1=int(.055*w),int(.50*w),int(.985*w)
+    y0,y1,y2,y3=int(.085*h),int(.34*h),int(.60*h),int(.84*h)
+    return {
+        "full_element_maps_original": img[y0:y3,x0:x1],
+        "se_map":img[y0:y1,x0:xmid],
+        "c_map":img[y0:y1,xmid:x1],
+        "n_map":img[y1:y2,x0:xmid],
+        "o_map":img[y1:y2,xmid:x1],
+        "si_map":img[y2:y3,x0:xmid],
+    }
 
 def save_crop(img,path,quality=90):
     path.parent.mkdir(parents=True,exist_ok=True); cv2.imwrite(str(path),img,[int(cv2.IMWRITE_JPEG_QUALITY),quality])
@@ -100,6 +110,26 @@ def make_overlay(base,mask,title=None):
         cv2.rectangle(out,(8,8),(210,38),(20,20,20),-1); cv2.putText(out,title,(16,29),cv2.FONT_HERSHEY_SIMPLEX,.55,(255,255,255),1,cv2.LINE_AA)
     return out
 
+def make_roi_ring_overlay(base, roi, roi_color=(0,0,255), ring_color=(0,220,255)):
+    """Viewer-only overlay: red ROI + yellow Local Ring.
+
+    Local Ring is the dilated ROI minus the ROI itself. It is only a
+    visualization of the comparison background and is not added to the
+    residue score as an independent signal.
+    """
+    out=base.copy()
+    if len(out.shape)==2:
+        out=cv2.cvtColor(out,cv2.COLOR_GRAY2BGR)
+    roi_u=(roi>0).astype(np.uint8)
+    kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(31,31))
+    dil=cv2.dilate(roi_u,kernel)
+    ring=((dil>0)&(roi_u==0)).astype(np.uint8)*255
+    contours,_=cv2.findContours(ring.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out,contours,-1,ring_color,2)
+    contours,_=cv2.findContours((roi_u*255).copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out,contours,-1,roi_color,2)
+    return out
+
 def enhance_element_map(im,element):
     ch=signal_channel(im,element); p2,p98=np.percentile(ch,[2,98]); norm=np.clip((ch.astype(np.float32)-p2)*255/max(p98-p2,1),0,255).astype(np.uint8); norm=cv2.createCLAHE(clipLimit=2.2,tileGridSize=(8,8)).apply(norm)
     if element=="C": return cv2.merge([np.zeros_like(norm),np.zeros_like(norm),norm])
@@ -139,13 +169,44 @@ def run(payload):
     if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
     p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()
     features,roi=residue_features(p2["se_map"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"])
-    raw={"sem":p1["sem"],"eds_map":p1["eds_map"],"se_map":p2["se_map"],"c_map":p2["c_map"],"n_map":p2["n_map"],"o_map":p2["o_map"],"si_map":p2["si_map"]}
-    for key,im in raw.items(): fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
-    # viewer-only enhanced/overlay assets
-    roi_sem=cv2.resize(roi,(p1["sem"].shape[1],p1["sem"].shape[0]),interpolation=cv2.INTER_NEAREST); fp=outdir/"sem_residue_overlay.jpg"; save_crop(make_overlay(p1["sem"],roi_sem,"Residue candidate"),fp,92); paths["sem_residue_overlay"]=str(fp)
-    fp=outdir/"element_maps_enhanced.jpg"; save_crop(make_element_overview(p2,roi),fp,92); paths["element_maps_enhanced"]=str(fp)
-    for label,key in [("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
-        enh=enhance_element_map(p2[key],label); rr=cv2.resize(roi,(enh.shape[1],enh.shape[0]),interpolation=cv2.INTER_NEAREST); fp=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_overlay(enh,rr,f"{label} / residue ROI"),fp,92); paths[f"{key}_enhanced_overlay"]=str(fp)
+    raw={
+        "sem":p1["sem"], "eds_map":p1["eds_map"],
+        "full_element_maps_original":p2["full_element_maps_original"],
+        "se_map":p2["se_map"], "c_map":p2["c_map"], "n_map":p2["n_map"],
+        "o_map":p2["o_map"], "si_map":p2["si_map"]
+    }
+    for key,im in raw.items():
+        fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
+
+    # Viewer-only overlays. The original Full Element Maps image above is
+    # preserved exactly as a single crop; the derived enhanced overview is
+    # separate and never replaces it.
+    roi_sem=cv2.resize(roi,(p1["sem"].shape[1],p1["sem"].shape[0]),interpolation=cv2.INTER_NEAREST)
+    fp=outdir/"sem_residue_overlay.jpg"
+    save_crop(make_overlay(p1["sem"],roi_sem,"Residue candidate"),fp,92)
+    paths["sem_residue_overlay"]=str(fp)
+
+    fp=outdir/"sem_roi_ring_overlay.jpg"
+    save_crop(make_roi_ring_overlay(p1["sem"],roi_sem),fp,92)
+    paths["sem_roi_ring_overlay"]=str(fp)
+
+    fp=outdir/"element_maps_enhanced.jpg"
+    save_crop(make_element_overview(p2,roi),fp,92)
+    paths["element_maps_enhanced"]=str(fp)
+
+    # Individual maps: each file contains only its own element panel. The
+    # same ROI and Local Ring are projected with identical normalized
+    # coordinates. Enhanced overlays remain optional viewer assets.
+    for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
+        rr=cv2.resize(roi,(p2[key].shape[1],p2[key].shape[0]),interpolation=cv2.INTER_NEAREST)
+        fp=outdir/f"{key}_roi_ring.jpg"
+        save_crop(make_roi_ring_overlay(p2[key],rr),fp,92)
+        paths[f"{key}_roi_ring"]=str(fp)
+        if label!="SE":
+            enh=enhance_element_map(p2[key],label)
+            fp=outdir/f"{key}_enhanced_overlay.jpg"
+            save_crop(make_overlay(enh,rr,f"{label} / residue ROI"),fp,92)
+            paths[f"{key}_enhanced_overlay"]=str(fp)
     features.update({"map_parser":"Bruker page-2 SE-referenced individual C/N/O/Si panels","page":payload["page"],"cv_version":"v12-local-ring-spatial","viewer_note":"Enhanced/overlay images are visualization assets only; raw maps remain stored separately."})
     del roi; p1.clear(); p2.clear(); raw.clear(); gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
