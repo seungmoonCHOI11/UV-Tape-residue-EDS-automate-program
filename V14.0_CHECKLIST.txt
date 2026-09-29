@@ -1,0 +1,28 @@
+V14.0 CHECKLIST
+
+[backend]
+- Exact Bruker Page-2 element crops
+- Page-1 SEM-only crop
+- Page-1 Full EDS Map crop
+- Full Element Maps original panel crop
+- Same ROI projection to SE/C/N/O/Si
+- Local Ring visual overlay
+- Raw vs viewer assets separated
+- CV remains non-OpenAI
+
+[frontend]
+- Full EDS Map card
+- Full Element Maps original panel card
+- Independent SE/C/N/O/Si cards
+- Same ROI + Local Ring labels
+- Analytical image contain/no clipping
+- Residue feature breakdown
+- Current-project condition dashboard
+- Representative results only
+
+[deployment]
+1. Replace GitHub repository files with this release.
+2. Deploy Render backend and Vercel frontend.
+3. Open the existing project.
+4. Click Re-analyze once for each existing source-backed project to regenerate v14 assets.
+5. Confirm Point 1 before mass review.

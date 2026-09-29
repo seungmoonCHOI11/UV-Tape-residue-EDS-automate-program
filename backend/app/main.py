@@ -506,7 +506,7 @@ def hydrate_records_for_export(project_id:str):
     rec=[RECORDS[x] for x in p["records"]]
     temp=OUTPUT/"_export_assets"/project_id
     for r in rec:
-        for key in ("sem","spectrum","eds_map","element_maps"):
+        for key in ("sem","spectrum","eds_map","full_element_maps","element_maps"):
             local=(r.get("assets") or {}).get(key)
             if local and Path(local).exists():
                 continue

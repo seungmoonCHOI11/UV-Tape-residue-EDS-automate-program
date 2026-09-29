@@ -1,4 +1,4 @@
-"""Memory-minimal one-Point PDF/SEM/EDS worker for v14."""
+"""Memory-minimal one-Point PDF/SEM/EDS worker for v12."""
 import gc, json, os, sys
 from pathlib import Path
 os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
@@ -14,33 +14,28 @@ def render_page_to_jpeg(page, quality=92):
     return data
 
 def crop_page1_layout(img):
+    # Bruker page-1 layout is stable at 1240x1754 render size.
+    # Keep the SEM micrograph itself and the full color EDS map as separate raw assets.
     h,w=img.shape[:2]
+    sx,sy=w/1240.0,h/1754.0
+    box=lambda x0,y0,x1,y1: img[max(0,int(y0*sy)):min(h,int(y1*sy)),max(0,int(x0*sx)):min(w,int(x1*sx))]
     return {
-        # Keep the SEM information block below the micrograph; the previous crop
-        # ended at 40% of the page and cut the Name/Date/HV/Mag/WD information.
-        # Include the SEM micrograph and the complete Name/Date/Time/HV/Mag/WD
-        # metadata block. The crop is intentionally generous so different Bruker
-        # export page heights do not cut the metadata off.
-        "sem":img[int(.06*h):int(.67*h),int(.04*w):int(.64*w)],
-        # Preserve the complete EDS composite including both left/right edges.
-        "eds_map":img[int(.39*h):int(.985*h),int(.02*w):int(.995*w)]
+        "sem":box(100,205,640,625),
+        "eds_map":box(100,815,1200,1295),
     }
 
 def crop_page2_element_maps(img):
+    # Exact panel coordinates verified against the supplied 1240x1754 Bruker PDF.
     h,w=img.shape[:2]
-    # Page-2 is the coordinate reference. Keep the original full panel crop
-    # separately; never reconstruct this "Full Element Maps" view from the
-    # individual crops because that can change aspect ratios and clip Si/right
-    # edges. The five individual panels below are used for ROI projection.
-    x0,xmid,x1=int(.055*w),int(.50*w),int(.985*w)
-    y0,y1,y2,y3=int(.085*h),int(.34*h),int(.60*h),int(.84*h)
+    sx,sy=w/1240.0,h/1754.0
+    box=lambda x0,y0,x1,y1: img[max(0,int(y0*sy)):min(h,int(y1*sy)),max(0,int(x0*sx)):min(w,int(x1*sx))]
     return {
-        "full_element_maps_original": img[y0:y3,x0:x1],
-        "se_map":img[y0:y1,x0:xmid],
-        "c_map":img[y0:y1,xmid:x1],
-        "n_map":img[y1:y2,x0:xmid],
-        "o_map":img[y1:y2,xmid:x1],
-        "si_map":img[y2:y3,x0:xmid],
+        "full_element_maps":box(100,190,1200,1310),
+        "se_map":box(100,190,640,550),
+        "c_map":box(660,190,1200,550),
+        "n_map":box(100,570,640,930),
+        "o_map":box(660,570,1200,930),
+        "si_map":box(100,950,640,1310),
     }
 
 def save_crop(img,path,quality=90):
@@ -73,7 +68,11 @@ def detect_residue_mask(se):
     _,mask=cv2.threshold(top,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
     mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
     mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((7,7),np.uint8))
-    h,w=mask.shape[:2]; total=h*w; n,labels,stats,_=cv2.connectedComponentsWithStats(mask); out=np.zeros_like(mask)
+    h,w=mask.shape[:2]
+    # Exclude Bruker label / scale-bar bands from residue candidate detection.
+    mask[:max(1,int(h*0.06)),:]=0
+    mask[int(h*0.84):,:]=0
+    total=h*w; n,labels,stats,_=cv2.connectedComponentsWithStats(mask); out=np.zeros_like(mask)
     min_area=max(30,int(total*0.00030)); max_area=int(total*0.20)
     candidates=[]
     for i in range(1,n):
@@ -104,30 +103,23 @@ def local_element_metrics(element_img,roi,element):
 
 def sigmoid(x): return 1/(1+np.exp(-np.clip(x,-20,20)))
 
+def roi_ring_mask(roi):
+    base=(roi>0).astype(np.uint8)*255
+    # Local Ring is the immediate annulus used as the background reference.
+    k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(25,25))
+    dil=cv2.dilate(base,k)
+    ring=cv2.subtract(dil,base)
+    return base,ring
+
 def make_overlay(base,mask,title=None):
-    out=base.copy(); contours,_=cv2.findContours(mask.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE); cv2.drawContours(out,contours,-1,(255,255,255),3); cv2.drawContours(out,contours,-1,(0,0,255),1)
-    if title:
-        cv2.rectangle(out,(8,8),(210,38),(20,20,20),-1); cv2.putText(out,title,(16,29),cv2.FONT_HERSHEY_SIMPLEX,.55,(255,255,255),1,cv2.LINE_AA)
-    return out
-
-def make_roi_ring_overlay(base, roi, roi_color=(0,0,255), ring_color=(0,220,255)):
-    """Viewer-only overlay: red ROI + yellow Local Ring.
-
-    Local Ring is the dilated ROI minus the ROI itself. It is only a
-    visualization of the comparison background and is not added to the
-    residue score as an independent signal.
-    """
     out=base.copy()
-    if len(out.shape)==2:
-        out=cv2.cvtColor(out,cv2.COLOR_GRAY2BGR)
-    roi_u=(roi>0).astype(np.uint8)
-    kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(31,31))
-    dil=cv2.dilate(roi_u,kernel)
-    ring=((dil>0)&(roi_u==0)).astype(np.uint8)*255
-    contours,_=cv2.findContours(ring.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out,contours,-1,ring_color,2)
-    contours,_=cv2.findContours((roi_u*255).copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out,contours,-1,roi_color,2)
+    roi,ring=roi_ring_mask(mask)
+    ring_contours,_=cv2.findContours(ring.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    roi_contours,_=cv2.findContours(roi.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out,ring_contours,-1,(0,220,255),2)
+    cv2.drawContours(out,roi_contours,-1,(0,0,255),2)
+    if title:
+        cv2.rectangle(out,(8,8),(230,38),(20,20,20),-1); cv2.putText(out,title,(16,29),cv2.FONT_HERSHEY_SIMPLEX,.48,(255,255,255),1,cv2.LINE_AA)
     return out
 
 def enhance_element_map(im,element):
@@ -169,45 +161,23 @@ def run(payload):
     if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
     p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()
     features,roi=residue_features(p2["se_map"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"])
-    raw={
-        "sem":p1["sem"], "eds_map":p1["eds_map"],
-        "full_element_maps_original":p2["full_element_maps_original"],
-        "se_map":p2["se_map"], "c_map":p2["c_map"], "n_map":p2["n_map"],
-        "o_map":p2["o_map"], "si_map":p2["si_map"]
-    }
-    for key,im in raw.items():
-        fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
-
-    # Viewer-only overlays. The original Full Element Maps image above is
-    # preserved exactly as a single crop; the derived enhanced overview is
-    # separate and never replaces it.
+    raw={"sem":p1["sem"],"eds_map":p1["eds_map"],"full_element_maps":p2["full_element_maps"],"se_map":p2["se_map"],"c_map":p2["c_map"],"n_map":p2["n_map"],"o_map":p2["o_map"],"si_map":p2["si_map"]}
+    for key,im in raw.items(): fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
+    # Backward-compatible report aliases.
+    paths["element_maps"]=paths["full_element_maps"]
+    paths["spectrum"]=paths["page_3"]
+    # Viewer assets: exact source maps with the same normalized ROI and a visible Local Ring.
     roi_sem=cv2.resize(roi,(p1["sem"].shape[1],p1["sem"].shape[0]),interpolation=cv2.INTER_NEAREST)
-    fp=outdir/"sem_residue_overlay.jpg"
-    save_crop(make_overlay(p1["sem"],roi_sem,"Residue candidate"),fp,92)
-    paths["sem_residue_overlay"]=str(fp)
-
-    fp=outdir/"sem_roi_ring_overlay.jpg"
-    save_crop(make_roi_ring_overlay(p1["sem"],roi_sem),fp,92)
-    paths["sem_roi_ring_overlay"]=str(fp)
-
-    fp=outdir/"element_maps_enhanced.jpg"
-    save_crop(make_element_overview(p2,roi),fp,92)
-    paths["element_maps_enhanced"]=str(fp)
-
-    # Individual maps: each file contains only its own element panel. The
-    # same ROI and Local Ring are projected with identical normalized
-    # coordinates. Enhanced overlays remain optional viewer assets.
+    fp=outdir/"sem_roi_overlay.jpg"; save_crop(make_overlay(p1["sem"],roi_sem,"ROI red / Local Ring yellow"),fp,92); paths["sem_roi_overlay"]=str(fp)
+    # Keep a backward-compatible alias, but the frontend prefers the exact full assets above.
+    paths["sem_residue_overlay"]=paths["sem_roi_overlay"]
+    fp=outdir/"element_maps_enhanced.jpg"; save_crop(p2["full_element_maps"],fp,92); paths["element_maps_enhanced"]=str(fp)
     for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
         rr=cv2.resize(roi,(p2[key].shape[1],p2[key].shape[0]),interpolation=cv2.INTER_NEAREST)
-        fp=outdir/f"{key}_roi_ring.jpg"
-        save_crop(make_roi_ring_overlay(p2[key],rr),fp,92)
-        paths[f"{key}_roi_ring"]=str(fp)
-        if label!="SE":
-            enh=enhance_element_map(p2[key],label)
-            fp=outdir/f"{key}_enhanced_overlay.jpg"
-            save_crop(make_overlay(enh,rr,f"{label} / residue ROI"),fp,92)
-            paths[f"{key}_enhanced_overlay"]=str(fp)
-    features.update({"map_parser":"Bruker page-2 SE-referenced individual C/N/O/Si panels","page":payload["page"],"cv_version":"v12-local-ring-spatial","viewer_note":"Enhanced/overlay images are visualization assets only; raw maps remain stored separately."})
+        fp=outdir/f"{key}_roi_overlay.jpg"; save_crop(make_overlay(p2[key],rr,f"{label} / ROI red / Local Ring yellow"),fp,92); paths[f"{key}_roi_overlay"]=str(fp)
+        # Backward-compatible names retained for old clients.
+        fp_old=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_overlay(enhance_element_map(p2[key],label) if label!="SE" else p2[key],rr,f"{label} / ROI"),fp_old,92); paths[f"{key}_enhanced_overlay"]=str(fp_old)
+    features.update({"map_parser":"Bruker page-2 SE-referenced individual C/N/O/Si panels","page":payload["page"],"cv_version":"v14-exact-bruker-crop-local-ring-spatial","viewer_note":"Enhanced/overlay images are visualization assets only; raw maps remain stored separately."})
     del roi; p1.clear(); p2.clear(); raw.clear(); gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
     Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")
