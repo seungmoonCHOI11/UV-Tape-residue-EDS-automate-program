@@ -92,3 +92,10 @@ def get_assets(point_id: str):
 def re_digits(value: Any) -> str:
     m=re.search(r"\d+",str(value or ""))
     return m.group(0) if m else "0"
+
+
+def get_point_by_key(project_id: str, power: int, time_sec: int, wafer: int, point: int):
+    rows = (get_client().table("points").select("*")
+            .eq("project_id", project_id).eq("power", int(power)).eq("time_sec", int(time_sec))
+            .eq("wafer", int(wafer)).eq("point", int(point)).limit(1).execute().data or [])
+    return rows[0] if rows else None

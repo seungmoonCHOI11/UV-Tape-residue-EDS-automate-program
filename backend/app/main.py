@@ -266,6 +266,82 @@ def job_status(job_id: str):
         raise HTTPException(404, "job not found")
     return job
 
+
+def process_reanalysis_job(job_id, project_id, project_meta):
+    """Re-run the current CV/Crop/ROI pipeline against source PDFs already stored in R2.
+    Existing human verification fields are preserved; only derived analysis/assets are replaced.
+    """
+    try:
+        if not r2.configured:
+            raise RuntimeError("R2 is not configured; original source PDFs are unavailable.")
+        conditions = project_meta.get("conditions") or []
+        pages_per_point = int(project_meta.get("pages_per_point") or 3)
+        saved = project_meta.get("files") or []
+        if not conditions or not saved:
+            raise RuntimeError("This project does not contain enough source metadata for re-analysis.")
+        pdir = UPLOAD / f"reanalyze_{project_id}_{job_id}"
+        pdir.mkdir(parents=True, exist_ok=True)
+        pdf_paths = []
+        set_job(job_id, status="processing", phase="download", progress=5, message="R2에서 원본 PDF를 불러오는 중...")
+        for i, name in enumerate(saved):
+            safe = Path(str(name)).name
+            local = pdir / safe
+            r2.download_file(f"projects/{project_id}/source/{safe}", local)
+            pdf_paths.append(local)
+        set_job(job_id, phase="analysis", progress=10, message="최신 ROI / Residue 알고리즘으로 재분석 중...")
+        def cb(done,total,phase):
+            pct = 10 + int(done/max(total,1)*80)
+            set_job(job_id, phase=phase, progress=min(90,pct), completed=done, total=total, message=f"재분석 중 · {done}/{total}")
+        records = extract_pdfs(pdf_paths, pdir / "assets", conditions, pages_per_point, progress_callback=cb)
+        if not records:
+            raise RuntimeError("재분석 가능한 Point가 없습니다.")
+        # Preserve existing human labels by key and update derived DB/assets only.
+        existing_rows = db.get_points(project_id) if db.configured() else []
+        by_key = {(int(x["power"]),int(x["time_sec"]),int(x["wafer"]),int(x["point"])): x for x in existing_rows}
+        set_job(job_id, phase="database", progress=92, completed=0, total=len(records), message="재분석 결과를 저장하는 중...")
+        for i,r in enumerate(records,1):
+            key=(int(db.re_digits(r.get("power"))),int(db.re_digits(r.get("time"))),int(r["wafer"]),int(r["point"]))
+            old=by_key.get(key)
+            if not old:
+                continue
+            r["human_result"]=old.get("human_result")
+            r["human_confidence"]=old.get("human_confidence")
+            r["db_id"]=str(old["id"])
+            RECORDS[r["id"]]=r
+            if db.configured():
+                db.upsert_analysis(str(old["id"]), r.get("features",{}))
+                if r2.configured:
+                    for asset_type, local_path in (r.get("assets") or {}).items():
+                        lp=Path(local_path)
+                        r2key=f"projects/{project_id}/points/{r['id']}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                        r2.upload_file(lp,r2key,"image/jpeg")
+                        db.upsert_asset(str(old["id"]),asset_type,r2key)
+            pct=92+int(i/max(len(records),1)*7)
+            set_job(job_id, phase="database", progress=min(99,pct), completed=i, total=len(records), message=f"결과 저장 중 · {i}/{len(records)}")
+        set_job(job_id,status="completed",phase="complete",progress=100,completed=len(records),total=len(records),project_id=project_id,count=len(records),message="재분석이 완료되었습니다.")
+    except Exception as e:
+        traceback.print_exc()
+        set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"재분석 실패: {e}")
+
+@app.post("/api/projects/{project_id}/reanalyze")
+def reanalyze_project(project_id: str):
+    if not db.configured():
+        raise HTTPException(503,"Supabase is not configured.")
+    try:
+        row=db.get_project(project_id)
+    except Exception:
+        raise HTTPException(404,"project not found")
+    try:
+        meta=json.loads(row.get("description") or "{}")
+    except Exception:
+        meta={}
+    if not meta.get("files") or not meta.get("conditions"):
+        raise HTTPException(400,"This project has no stored source PDF metadata for re-analysis.")
+    job_id=str(uuid.uuid4())
+    set_job(job_id,status="queued",phase="queued",progress=1,completed=0,total=0,project_id=project_id,message="재분석 대기 중...")
+    threading.Thread(target=process_reanalysis_job,args=(job_id,project_id,meta),daemon=True).start()
+    return {"job_id":job_id,"project_id":project_id}
+
 @app.get("/api/projects/latest")
 def latest_project():
     if not db.configured():
