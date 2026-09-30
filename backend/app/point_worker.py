@@ -617,7 +617,7 @@ def run(payload):
     for key,im in raw.items():
         fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
     roi_sem=roi
-    fp=outdir/"sem_residue_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255),ring_color=(0,220,255)),fp,92); paths["sem_residue_overlay"]=str(fp)
+    fp=outdir/"sem_residue_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_residue_overlay"]=str(fp)
     # Backward-compatible asset name: it now contains the contour-only overlay.
     fp=outdir/"sem_roi_ring_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_roi_ring_overlay"]=str(fp)
     fp=outdir/"eds_co_overlay.jpg"; save_crop(make_co_overlay(p2["c_map"],p2["o_map"],roi),fp,92); paths["eds_co_overlay"]=str(fp)

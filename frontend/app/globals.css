@@ -180,3 +180,36 @@
 .verificationButtons button{min-width:145px}
 @media(max-width:1050px){.verificationLayout{grid-template-columns:1fr}.analysisResultCard{display:grid;grid-template-columns:1fr 1fr;gap:10px}.analysisResultHead,.bigScore,.confidenceText,.metricBars,.ratioList,.roiInfo,.v21Rule{grid-column:1/-1}.metricBars{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px}.verificationImages .visual img,.v21ElementStrip img{height:300px}}
 @media(max-width:700px){.verificationModal{width:99vw}.verificationImages,.v21ElementStrip{grid-template-columns:1fr}.verificationImages .visual img,.v21ElementStrip img{height:260px}.analysisResultCard{display:block}.metricBars{display:block}.verificationButtons{flex-wrap:wrap}.verificationButtons button{min-width:110px;flex:1}.v21Info{align-items:flex-start}}
+
+/* V21.2 reference UI: two image rows on the left, Analysis Result fixed on the right. */
+.verificationModal{width:min(1120px,96vw);max-height:96vh}
+.verificationPanel{padding:12px 14px 14px}
+.verificationLayout{display:grid;grid-template-columns:minmax(0,1fr) 285px;gap:12px;align-items:stretch}
+.verificationVisualColumn{min-width:0}
+.verificationImages{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.verificationImages .visual{min-width:0;border-radius:8px;overflow:hidden}
+.verificationImages .visual img{height:235px;object-fit:contain;background:#171b22}
+.v21ElementStrip{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}
+.v21ElementStrip .focusPanel{min-width:0;border:1px solid #e1e5eb;border-radius:8px;overflow:hidden;background:#171b22}
+.v21ElementStrip .focusPanel>b{display:block;background:#fff;padding:7px 9px;font-size:9px;color:#27344a}
+.v21ElementStrip .focusPanel img{display:block;width:100%;height:235px;object-fit:contain;background:#171b22}
+.analysisResultCard{height:100%;box-sizing:border-box;background:#fff;border:1px solid #e0e5ec;border-radius:9px;padding:12px 13px;box-shadow:none}
+.analysisResultHead{margin-bottom:2px}
+.bigScore{font-size:50px;margin-top:10px}
+.metricBars{padding-top:7px}
+.barMetric{margin:7px 0}
+.ratioList>div{padding:5px 0}
+.ratioList b{white-space:nowrap}
+.roiInfo>div{padding:4px 0}
+.roiInfo strong.good{color:#24a66a}
+.v21Rule{margin-top:2px}
+.v21Info{margin-top:9px}
+@media(max-width:760px){
+ .verificationLayout{grid-template-columns:1fr}
+ .verificationImages,.v21ElementStrip{grid-template-columns:1fr 1fr}
+ .analysisResultCard{height:auto}
+}
+@media(max-width:560px){
+ .verificationImages,.v21ElementStrip{grid-template-columns:1fr}
+ .verificationImages .visual img,.v21ElementStrip .focusPanel img{height:240px}
+}

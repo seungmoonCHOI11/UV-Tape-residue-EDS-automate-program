@@ -180,8 +180,8 @@ function metricValue(v){return Math.round(v*100)}
 function Review({p,idx,total,prev,next,human}){
  const f=p.features||{};
  const score=displayScore(p);
- const roiQuality=typeof f.roi_quality==="number"?Math.round(f.roi_quality*100):null;
- const rawScore=typeof f.raw_residue_score==="number"?Math.round(f.raw_residue_score*100):null;
+ const coverage=typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
+ const maskQuality=typeof f.roi_quality==='number'?f.roi_quality:null;
  const autoResult=f.result||"Ambiguous";
  const resultLabel=autoResult==="Review"?"Ambiguous":autoResult;
  const confidence=f.confidence||"-";
@@ -191,7 +191,10 @@ function Review({p,idx,total,prev,next,human}){
    c:[p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
    o:[p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
- const metric=(v)=>typeof v==="number"?Math.round(v*100):"-";
+ const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
+ const cRatio=ratio(f.c_roi_mean,f.c_global_mean), oRatio=ratio(f.o_roi_mean,f.o_global_mean);
+ const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
+ const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
  return <div className="verificationPanel">
   <div className="verificationTop v21Top">
    <div><b>Point {idx+1} / {total}</b><span>{p.power} · {p.time} · W{p.wafer} · P{p.point}</span></div>
@@ -200,7 +203,7 @@ function Review({p,idx,total,prev,next,human}){
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
     <div className="verificationImages"><Visual title="SEM / Residue ROI" sources={maps.sem}/><Visual title="Full EDS Map (C + O)" sources={maps.eds}/></div>
-    <div className="elementStripThree v21ElementStrip">
+    <div className="v21ElementStrip">
       <div className="focusPanel"><b>C Map (ROI)</b><ImageWithFallback sources={maps.c} alt="C map with ROI"/></div>
       <div className="focusPanel"><b>O Map (ROI)</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
     </div>
@@ -216,14 +219,14 @@ function Review({p,idx,total,prev,next,human}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)}`:'-'}</b></div>
-      <div><span>O ROI / Global</span><b>{typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)}`:'-'}</b></div>
+      <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}{cRatio==null?'-':`(${fmtRatio(cRatio)})`}</b></div>
+      <div><span>O ROI / Global</span><b>{typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}{oRatio==null?'-':`(${fmtRatio(oRatio)})`}</b></div>
     </div>
-    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{f.roi_area_px?`${f.roi_area_px.toLocaleString()} px²`:"-"}</strong></div><div><span>ROI Coverage</span><strong>{roiQuality==null?"-":`${roiQuality}%`}</strong></div><div><span>Mask Quality</span><strong>{roiQuality==null?"-":(roiQuality/100).toFixed(2)}</strong></div><div><span>Detected as</span><strong>{f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?"":"s"}`:"-"}</strong></div></div>
+    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{f.roi_area_px?`${f.roi_area_px.toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong className={coverage!=null&&coverage>=80?'good':''}>{coverage==null?'-':`${coverage}%${coverage>=80?'  (Good)':''}`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
     <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>0–100 calibrated score. Low ROI quality cannot force an automatic Residue decision.</small></div>
    </aside>
   </div>
-  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>SEM에서 검출된 실제 residue mask를 기준으로 C/O EDS 영역에 동일한 contour를 표시합니다. N, Si는 Verification에서 표시하지 않습니다. 기존 분석 결과의 Local Ring은 Re-analysis 전까지 남을 수 있으며, 새 분석/재분석 결과에는 생성되지 않습니다.</span></div>
+  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>SEM에서 검출된 실제 residue mask를 기준으로 C/O EDS 영역에 동일한 contour를 표시합니다. N, Si는 Verification에서 표시하지 않습니다. 새 Analysis / Re-analysis에서는 Local Ring을 생성하거나 판정 기준으로 사용하지 않습니다.</span></div>
   <div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>NON-RESIDUE (N)</button><button className="approve" onClick={()=>human("Residue")}>RESIDUE (R)</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> SKIP (S)</button></div>
   <div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> Previous</button><button className="secondary" onClick={next}>Next <ChevronRight size={14}/></button></div>
  </div>
