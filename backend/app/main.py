@@ -5,6 +5,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
+import cv2, numpy as np
 from dotenv import load_dotenv
 
 from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
@@ -422,6 +423,123 @@ def point(point_id:str):
     RECORDS[point_id]=r
     return public_record(r)
 
+
+def _collect_asset_keys(point_id: str) -> dict:
+    """Return all known raw/R2 assets for a point, including older projects."""
+    keys = {}
+    r = RECORDS.get(point_id)
+    if r:
+        keys.update(r.get("r2_assets") or {})
+        # Some legacy in-memory records keep storage keys only in assets.
+        for k, v in (r.get("assets") or {}).items():
+            if isinstance(v, str) and not v.startswith("/") and not v.startswith("http"):
+                keys.setdefault(k, v)
+    if db.configured():
+        try:
+            for a in db.get_assets(point_id):
+                keys.setdefault(a["asset_type"], a["storage_path"])
+        except Exception:
+            pass
+    return keys
+
+
+def _dynamic_asset(point_id: str, asset_type: str):
+    """Generate a no-Local-Ring overlay for legacy points that lack v21 assets.
+
+    This is a compatibility path only. New uploads/re-analysis still write the
+    normal permanent assets to R2. The generated files are cached on the backend
+    so opening Verification does not rerun CV for every request.
+    """
+    if not r2.configured:
+        return None
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(point_id))
+    outdir = OUTPUT / "_dynamic_assets" / safe_id
+    outdir.mkdir(parents=True, exist_ok=True)
+    name_map = {
+        "sem_residue_overlay": "sem_dynamic_overlay.jpg",
+        "eds_co_overlay": "eds_dynamic_overlay.jpg",
+        "c_map_enhanced_overlay": "c_dynamic_overlay.jpg",
+        "o_map_enhanced_overlay": "o_dynamic_overlay.jpg",
+    }
+    filename = name_map.get(asset_type)
+    if not filename:
+        return None
+    target = outdir / filename
+    if target.exists() and target.stat().st_size > 500:
+        return str(target)
+
+    keys = _collect_asset_keys(point_id)
+    # Never use an old overlay as the SEM source; use the original SEM whenever available.
+    def load(label, aliases=()):
+        key = keys.get(label)
+        if not key:
+            for a in aliases:
+                if keys.get(a):
+                    key = keys[a]; break
+        if not key:
+            return None
+        cache = outdir / f"raw_{label}.jpg"
+        try:
+            if not cache.exists():
+                r2.download_file(key, cache)
+            im = cv2.imread(str(cache), cv2.IMREAD_COLOR)
+            return im if im is not None and im.size else None
+        except Exception:
+            return None
+
+    sem = load("sem")
+    if sem is None:
+        # A legacy project may only have the previous overlay. It is still better to
+        # show the image than a blank Verification panel.
+        sem = load("sem_residue_overlay")
+    if sem is None:
+        return None
+
+    # Import lazily so the normal FastAPI startup remains lightweight.
+    from .point_worker import (
+        residue_features, detect_residue_candidates, make_box_overlay,
+        make_co_overlay, enhance_element_map, analytical_mask,
+    )
+
+    c = load("c_map")
+    o = load("o_map")
+    n = load("n_map")
+    si = load("si_map")
+
+    if c is not None and o is not None and n is not None and si is not None:
+        try:
+            features, roi = residue_features(sem, c, o, n, si)
+        except Exception:
+            features, roi = None, None
+    else:
+        candidates = detect_residue_candidates(sem, 8)
+        roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
+
+    if roi is None:
+        return None
+
+    if asset_type == "sem_residue_overlay":
+        out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
+    elif asset_type == "eds_co_overlay":
+        if c is None or o is None:
+            out = load("eds_map", ("eds_co_overlay", "element_maps_enhanced"))
+            if out is None:
+                return None
+        else:
+            out = make_co_overlay(c, o, roi)
+    else:
+        src = c if asset_type == "c_map_enhanced_overlay" else o
+        label = "C" if asset_type == "c_map_enhanced_overlay" else "O"
+        if src is None:
+            return None
+        rr = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+        out = make_box_overlay(enhance_element_map(src, label), rr, roi_color=(255, 255, 255))
+    if out is None:
+        return None
+    cv2.imwrite(str(target), out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    return str(target) if target.exists() else None
+
+
 @app.get("/api/assets/{point_id}/{asset_type}")
 def asset(point_id:str,asset_type:str):
     r=RECORDS.get(point_id)
@@ -439,10 +557,18 @@ def asset(point_id:str,asset_type:str):
                 if a["asset_type"]==asset_type:
                     key=a["storage_path"]
                     break
+        # For v21 overlay requests, prefer a fresh CV-generated visual when the
+        # exact overlay is absent. This fixes legacy points without requiring an
+        # immediate Re-analysis just to make Verification visible.
+        if not key and asset_type in {"sem_residue_overlay","eds_co_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay"}:
+            local_dynamic=_dynamic_asset(point_id, asset_type)
+            if local_dynamic:
+                return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
         if not key:
             aliases = {
                 "sem_residue_overlay": ["sem"],
-                "element_maps_enhanced": ["element_maps", "eds_map"],
+                "eds_co_overlay": ["eds_map", "element_maps_enhanced", "full_element_maps_original"],
+                "eds_map": ["eds_co_overlay", "element_maps_enhanced", "full_element_maps_original"],
                 "c_map_enhanced_overlay": ["c_map"],
                 "n_map_enhanced_overlay": ["n_map"],
                 "o_map_enhanced_overlay": ["o_map"],
@@ -458,6 +584,13 @@ def asset(point_id:str,asset_type:str):
             r2.presigned_url(key,expires=900),
             headers={"Cache-Control":"no-store, max-age=0"},
         )
+
+    # Compatibility for old points: regenerate the requested v21 visual from the
+    # original SEM/C/O maps instead of leaving a blank image until Re-analysis.
+    dynamic_type = asset_type
+    local = _dynamic_asset(point_id, dynamic_type)
+    if local:
+        return FileResponse(local, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
     raise HTTPException(404,"asset not found")
 
 @app.post("/api/points/{point_id}/human")

@@ -161,10 +161,11 @@ def detect_residue_candidates(sem, max_candidates=8):
         area_term=np.clip(np.log1p(area)/9.0,0,1); fill_term=np.clip(fill/.55,0,1); contrast_term=np.clip((contrast+.3)/3.5,0,1); edge_term=np.clip(edge/.35,0,1)
         morph_rank=.48*area_term+.27*contrast_term+.15*fill_term+.10*edge_term
         cm=np.zeros_like(gray,np.uint8); cm[ys,xs]=255
-        cand.append({"label":i,"score":float(morph_rank),"area":int(area),"bbox":(int(x),int(y),int(ww),int(hh)),"mask":cm})
+        cand.append({"label":i,"score":float(morph_rank),"area":int(area),"bbox":(int(x),int(y),int(ww),int(hh)),"mask":cm,"polarity":1})
     # Add direct signed-background components separately. These are especially important
     # for large bright/dark residues whose interior is not a top-hat edge.
-    for dc in direct_cues:
+    for dc_idx,dc in enumerate(direct_cues):
+        direct_polarity=1 if dc_idx==0 else -1
         n2,l2,st2,_=cv2.connectedComponentsWithStats(dc)
         for i in range(1,n2):
             x,y,ww,hh,area=[int(v) for v in st2[i]]
@@ -178,7 +179,7 @@ def detect_residue_candidates(sem, max_candidates=8):
             area_term=np.clip(np.log1p(area)/9.0,0,1); fill_term=np.clip(fill/.55,0,1); contrast_term=np.clip((abs(contrast)+.3)/3.5,0,1); edge_term=np.clip(edge/.35,0,1)
             morph_rank=.40*area_term+.34*contrast_term+.18*fill_term+.08*edge_term
             cm=np.zeros_like(gray,np.uint8); cm[ys,xs]=255
-            cand.append({"label":20000+i,"score":float(morph_rank),"area":int(area),"bbox":(int(x),int(y),int(ww),int(hh)),"mask":cm,"direct_background":True})
+            cand.append({"label":20000+i,"score":float(morph_rank),"area":int(area),"bbox":(int(x),int(y),int(ww),int(hh)),"mask":cm,"direct_background":True,"polarity":direct_polarity})
     cand.sort(key=lambda z:z["score"],reverse=True)
     # Merge fragments that are close enough to plausibly belong to the same physical
     # residue. This fixes large/irregular residues being split into tiny candidates.
@@ -187,6 +188,8 @@ def detect_residue_candidates(sem, max_candidates=8):
         placed=False
         x,y,ww,hh=c["bbox"]
         for d in merged:
+            if d.get("polarity") in (1,-1) and c.get("polarity") in (1,-1) and d.get("polarity") != c.get("polarity"):
+                continue
             dx,dy,dw,dh=d["bbox"]
             gap_x=max(dx-x, x-(dx+dw), 0)
             gap_y=max(dy-y, y-(dy+dh), 0)
@@ -370,46 +373,100 @@ def _ai_guided_mask(sem, boxes):
         if int(stats[i,cv2.CC_STAT_AREA])>=min_total: clean[lab==i]=255
     return clean
 
-def refine_candidate_mask(sem_ref, candidate_mask):
-    """Refine a candidate into the physical residue mask while rejecting broad shadow."""
+def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
+    """Turn a coarse candidate into a smooth physical residue mask.
+
+    v21.4 uses hysteresis-style local-background segmentation instead of a fixed
+    rectangular expansion. A strong core seeds a weaker connected region so a large
+    residue is recovered as one contour, while isolated background grain and broad
+    shadows are not promoted into the ROI.
+    """
     gray=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY).astype(np.float32)
     am=analytical_mask(gray.shape)>0
     cand=(candidate_mask>0)&am
     if not np.any(cand): return np.zeros_like(candidate_mask)
-    bg=cv2.GaussianBlur(gray,(0,0),17)
+
+    # Smooth background follows illumination/shading but not the physical object.
+    bg=cv2.GaussianBlur(gray,(0,0),13)
     signed=gray-bg
     vals=signed[cand]
     if vals.size<20: return candidate_mask.copy()
-    # Determine whether this candidate is physically bright or dark relative to its
-    # smoothly varying background. Shadow usually has the opposite polarity and is
-    # therefore removed instead of being absorbed into the residue mask.
-    polarity=1.0 if float(np.median(vals))>=0 else -1.0
+    med=float(np.median(vals))
+    polarity=float(polarity_hint) if polarity_hint in (1,-1) else (1.0 if med>=0 else -1.0)
     signal=signed*polarity
     sigvals=signal[cand]
-    # Robust threshold: keep the stronger half of the candidate's signed contrast,
-    # but do not require an extreme contrast for dark/faint residues.
-    p35=float(np.percentile(sigvals,35)); p55=float(np.percentile(sigvals,55))
-    spread=float(np.median(np.abs(sigvals-np.median(sigvals))))*1.4826
-    threshold=max(2.0,p35*0.72,p55-spread*0.55)
-    core=((cand)&(signal>=threshold)).astype(np.uint8)*255
-    core=cv2.morphologyEx(core,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9,9)))
+
+    # Strong core: robust enough to reject ordinary background fluctuations.
+    mad=float(np.median(np.abs(sigvals-np.median(sigvals))))*1.4826
+    p55=float(np.percentile(sigvals,55)); p75=float(np.percentile(sigvals,75))
+    strong=max(2.2, p55+0.30*mad, p75*0.72)
+    weak=max(0.75, strong*0.34)
+
+    # Seed from the candidate itself, but retain only its strongest physical part.
+    core=((cand)&(signal>=strong)).astype(np.uint8)*255
+    core=cv2.morphologyEx(core,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))
     core=cv2.morphologyEx(core,cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)))
-    # Controlled fill of narrow gaps within the same physical object.
     n,lab,stats,_=cv2.connectedComponentsWithStats(core)
     if n>1:
-        best=max(range(1,n),key=lambda i:int(stats[i,cv2.CC_STAT_AREA]))
-        core=(lab==best).astype(np.uint8)*255
-    # Recover adjacent residue edge pixels of the same polarity, but never pixels
-    # whose signed contrast has crossed into the shadow/background side.
-    grown=cv2.dilate(core,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)),iterations=1)
-    edge_threshold=max(0.8,threshold*0.42)
-    refined=((grown>0)&cand&(signal>=edge_threshold)).astype(np.uint8)*255
-    refined=cv2.morphologyEx(refined,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))
-    refined=cv2.morphologyEx(refined,cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)))
-    if cv2.countNonZero(refined)<max(20,int(cv2.countNonZero(core)*0.45)):
-        refined=core
-    return refined
+        # Keep all strong pieces close to the original candidate; do not arbitrarily
+        # choose one corner of a large irregular residue.
+        keep=np.zeros_like(core)
+        ys0,xs0=np.where(cand)
+        cx0=float(np.mean(xs0)); cy0=float(np.mean(ys0))
+        for i in range(1,n):
+            yy,xx=np.where(lab==i)
+            if len(xx)==0: continue
+            cx=float(np.mean(xx)); cy=float(np.mean(yy))
+            if np.hypot(cx-cx0,cy-cy0)<=max(gray.shape)*0.20:
+                keep[lab==i]=255
+        core=keep if cv2.countNonZero(keep)>0 else core
+    if cv2.countNonZero(core)<12:
+        core=cand.astype(np.uint8)*255
 
+    # Weak mask is allowed to grow beyond the coarse detector. Hysteresis keeps only
+    # weak regions connected to the strong core, which recovers long/tapered residue
+    # bodies without drawing a rectangular ROI around the shadow.
+    weak_mask=((signal>=weak)&am).astype(np.uint8)*255
+    weak_mask=cv2.morphologyEx(weak_mask,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)))
+    n,lab,stats,_=cv2.connectedComponentsWithStats(weak_mask)
+    grown=np.zeros_like(weak_mask)
+    core_dil=cv2.dilate(core,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)),iterations=1)
+    for i in range(1,n):
+        comp=(lab==i).astype(np.uint8)*255
+        if cv2.countNonZero(cv2.bitwise_and(comp,core_dil)):
+            grown[lab==i]=255
+
+    # Limit expansion to a padded candidate neighborhood. This is deliberately
+    # generous for large residues but prevents a global illumination gradient from
+    # becoming one connected ROI.
+    ys,xs=np.where(cand)
+    if len(xs):
+        x0,x1=int(xs.min()),int(xs.max()); y0,y1=int(ys.min()),int(ys.max())
+        px=max(14,int((x1-x0+1)*0.30)); py=max(14,int((y1-y0+1)*0.30))
+        region=np.zeros_like(grown)
+        cv2.rectangle(region,(max(4,x0-px),max(4,y0-py)),
+                      (min(gray.shape[1]-5,x1+px),min(int(gray.shape[0]*.84)-2,y1+py)),255,-1)
+        grown=cv2.bitwise_and(grown,region)
+
+    # Keep the connected physical body, smooth small holes, and reject tiny fragments.
+    grown=cv2.bitwise_or(grown,core)
+    grown=cv2.morphologyEx(grown,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9,9)))
+    n,lab,stats,_=cv2.connectedComponentsWithStats(grown)
+    clean=np.zeros_like(grown)
+    core_count=cv2.countNonZero(core)
+    for i in range(1,n):
+        area=int(stats[i,cv2.CC_STAT_AREA])
+        comp=(lab==i).astype(np.uint8)*255
+        if area>=max(20,int(core_count*0.18)) and cv2.countNonZero(cv2.bitwise_and(comp,cv2.dilate(core,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)))))>0:
+            clean[lab==i]=255
+
+    # Final polarity/contrast guard. This removes smooth shadow halos that can be
+    # connected to a residue but have weak physical contrast.
+    if cv2.countNonZero(clean)>0:
+        cvals=signal[clean>0]
+        if float(np.median(cvals)) < max(0.8, weak*0.80):
+            return core
+    return clean if cv2.countNonZero(clean)>=max(20,int(core_count*0.45)) else core
 
 def roi_quality_metrics(sem_ref, roi, selected_count=1):
     """Estimate whether the irregular mask plausibly covers a physical residue.
@@ -475,7 +532,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         candidates=ded
     # Refine each candidate before scoring so broad shadow regions do not become the ROI.
     for c in candidates:
-        c["mask"]=refine_candidate_mask(sem_ref,c["mask"])
+        c["mask"]=refine_candidate_mask(sem_ref,c["mask"],c.get("polarity"))
         ys,xs=np.where(c["mask"]>0)
         if len(xs):
             c["bbox"]=(int(xs.min()),int(ys.min()),int(xs.max()-xs.min()+1),int(ys.max()-ys.min()+1))
@@ -505,8 +562,19 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
             .18*np.clip(local_contrast/18.0,0,1)+
             .12*np.clip(np.sqrt(area_fraction)*16,0,1),0,1))
         spatial=float(np.clip(min(cm["coverage"],om["coverage"])/55.0,0,1))
-        ai_bonus=0.08 if c.get("ai_guided") else 0.0
-        selection=float(np.clip(.34*morphology_score+.28*cm["score"]+.26*om["score"]+.07*spatial+ai_bonus,0,1))
+        # Selection is intentionally SEM-first. C/O are supporting evidence only.
+        # A tiny bright speck can have a strong EDS signal; it must not outrank a
+        # visually obvious physical residue simply because its C/O ratio is high.
+        ai_bonus=0.0  # OpenAI is not authoritative for point-level ROI/classification.
+        max_area_seen=max([int(x.get("area",0)) for x in candidates] or [1])
+        rel_area=float(np.clip(np.sqrt(max(int(c.get("area",0))/max_area_seen,0.0)),0,1))
+        size_bonus=0.10*rel_area
+        visual_selection=float(np.clip(.50*morphology_score+.10*rel_area+size_bonus,0,1))
+        selection=float(np.clip(.60*visual_selection+.18*cm["score"]+.15*om["score"]+.07*spatial+ai_bonus,0,1))
+        # When a much larger, coherent SEM object exists, strongly penalize a tiny
+        # candidate unless the larger object has essentially no physical contrast.
+        if max_area_seen>0 and int(c.get("area",0)) < max_area_seen*0.12 and morphology_score<0.78:
+            selection*=0.72
         scored.append((selection,c,cm,om,morphology_score,morph_z,spatial))
     if not scored:
         roi=np.zeros((h,w),np.uint8)
@@ -517,6 +585,18 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
                 "review_reasons":["no_reliable_SEM_candidate"],"classification_note":"No defensible SEM candidate was detected; point requires human review."},roi
 
     scored.sort(key=lambda z:z[0],reverse=True)
+    # Final SEM sanity check: if the top-ranked candidate is a tiny speck but a
+    # substantially larger coherent object has a reasonable morphology score, use
+    # the larger object. This prevents the old "small red mark far from the residue"
+    # failure mode seen in Verification.
+    top=scored[0]
+    top_area=max(int(top[1].get("area",0)),1)
+    visual_alts=[z for z in scored[1:] if int(z[1].get("area",0))>=top_area*2.5 and z[4]>=max(0.48,top[4]*0.72)]
+    if visual_alts:
+        alt=max(visual_alts,key=lambda z:(int(z[1].get("area",0))*max(z[4],0.01),z[4]))
+        if alt[0] >= top[0]*0.72 or top_area < max(int(sem_ref.shape[0]*sem_ref.shape[1]*0.0012),25):
+            scored.remove(alt)
+            scored.insert(0,alt)
     best_score=scored[0][0]
     # Select one primary physical residue. Fragmented pieces belonging to that residue
     # are merged earlier; separate distant particles should not dilute the main ROI.
@@ -585,7 +665,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],

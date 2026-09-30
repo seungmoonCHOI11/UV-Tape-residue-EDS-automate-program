@@ -176,7 +176,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                     f.get("candidate_coverage", 100) < 18 or
                     (f.get("morphology_score", 1) < 0.46 and f.get("result") != "Non-residue")
                 )
-                use_ai = ai_available() and ai_mode in {"uncertain", "all"} and (ai_mode == "all" or uncertain)
+                use_ai = ai_available() and ai_mode in {"assist", "all"} and (ai_mode == "all" or uncertain)
                 if use_ai and record.get("assets", {}).get("sem"):
                     ai_hint = analyze_roi_boxes_with_openai(record["assets"]["sem"], f)
                     boxes = ai_hint.get("boxes") or []
