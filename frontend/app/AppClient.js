@@ -5,6 +5,16 @@ import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
 const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5",points:"1-9"};
 
+// Shared by App and the module-level UploadPage component.
+// Keep this outside App so New Analysis can render without a ReferenceError.
+function parseSelection(value){
+ const out=[];
+ String(value||"").split(",").forEach(part=>{
+   const t=part.trim(); if(!t)return;
+   if(t.includes("-")){const [a,b]=t.split("-").map(Number);if(Number.isFinite(a)&&Number.isFinite(b)){for(let n=Math.min(a,b);n<=Math.max(a,b);n++)out.push(n)}} else {const n=Number(t);if(Number.isFinite(n))out.push(n)}
+ });
+ return [...new Set(out)].sort((a,b)=>a-b);
+}
 
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),input=useRef();
@@ -46,15 +56,7 @@ export default function App(){
  }
  useEffect(()=>{setMounted(true);loadData()},[]);
  useEffect(()=>{const h=e=>{if(typeof e.detail?.index!=="number")return;setIdx(e.detail.index);setVerificationOpen(true)};window.addEventListener("uvtape:open-point",h);return()=>window.removeEventListener("uvtape:open-point",h)},[]);
- function parseSelection(value){
- const out=[];
- String(value||"").split(",").forEach(part=>{
-   const t=part.trim(); if(!t)return;
-   if(t.includes("-")){const [a,b]=t.split("-").map(Number);if(Number.isFinite(a)&&Number.isFinite(b)){for(let n=Math.min(a,b);n<=Math.max(a,b);n++)out.push(n)}} else {const n=Number(t);if(Number.isFinite(n))out.push(n)}
- });
- return [...new Set(out)].sort((a,b)=>a-b);
-}
-function nextUnverified(start=0){
+ function nextUnverified(start=0){
  for(let i=Math.max(0,start);i<points.length;i++) if(!points[i].human_result) return i;
  return -1;
 }
