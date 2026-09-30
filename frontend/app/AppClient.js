@@ -171,6 +171,12 @@ function displayScore(p){
  return Math.max(0,Math.min(100,Math.round(raw*100-15)));
 }
 function scoreClass(score){return score==null?"unknown":score>=70?"high":score>=60?"review":"low"}
+
+function MetricBar({label,value,color}){
+ const pct=typeof value==="number"?Math.max(0,Math.min(100,metricValue(value))):0;
+ return <div className="barMetric"><div><span>{label}</span><b>{typeof value==="number"?metricValue(value):"-"}</b></div><i className={color}><em style={{width:pct+"%"}} /></i></div>;
+}
+function metricValue(v){return Math.round(v*100)}
 function Review({p,idx,total,prev,next,human}){
  const f=p.features||{};
  const score=displayScore(p);
@@ -181,7 +187,7 @@ function Review({p,idx,total,prev,next,human}){
  const confidence=f.confidence||"-";
  const maps={
    sem:[p.assets?.sem_residue_overlay,p.assets?.sem],
-   eds:[p.assets?.eds_map],
+   eds:[p.assets?.eds_co_overlay,p.assets?.eds_map],
    c:[p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
    o:[p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
@@ -204,7 +210,10 @@ function Review({p,idx,total,prev,next,human}){
     <div className={`bigScore ${scoreClass(score)}`}>{score==null?"—":score}<span>/ 100</span></div>
     <div className="confidenceText">{confidence} confidence</div>
     <div className="metricBars">
-      {[['SEM Morphology',f.morphology_score,'blue'],['C Score',f.c_score,'red'],['O Score',f.o_score,'green'],['Spatial Overlap',typeof f.spatial_overlap==='number'?f.spatial_overlap/100:null,'purple']].map(([label,v,color])=><div className="barMetric" key={label}><div><span>{label}</span><b>{typeof v==='number'?metric(v):'-'}</b></div><i className={color}><em style={{width:`${typeof v==='number'?Math.max(0,Math.min(100,metric(v))):0}%`}}/></div>)}
+      <MetricBar label="SEM Morphology" value={f.morphology_score} color="blue" />
+      <MetricBar label="C Score" value={f.c_score} color="red" />
+      <MetricBar label="O Score" value={f.o_score} color="green" />
+      <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
       <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)}`:'-'}</b></div>

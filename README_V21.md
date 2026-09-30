@@ -1,4 +1,4 @@
-# V21 Release Notes
+# V21.1 Release Notes
 
 - Verification UI redesigned to a reference-style layout: SEM + Full EDS on top, larger C/O maps below, Analysis Result panel on the right.
 - Verification hides N/Si panels while preserving backend data fields.

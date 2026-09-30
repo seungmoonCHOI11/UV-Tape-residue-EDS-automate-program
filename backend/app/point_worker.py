@@ -282,6 +282,26 @@ def enhance_element_map(im,element):
     return cv2.cvtColor(norm,cv2.COLOR_GRAY2BGR)
 
 
+def make_co_overlay(c_map,o_map,roi=None):
+    """Create the Verification Full EDS C+O overlay used in the V21.1 UI."""
+    c=signal_channel(c_map,"C").astype(np.float32)
+    o=signal_channel(o_map,"O").astype(np.float32)
+    def norm(a):
+        p2,p98=np.percentile(a,[2,98])
+        return np.clip((a-p2)*255/max(p98-p2,1),0,255)
+    cn=norm(c); on=norm(o)
+    out=np.zeros((cn.shape[0],cn.shape[1],3),np.uint8)
+    # BGR: C=red, O=green, with a small blue component for readable overlap.
+    out[:,:,2]=cn.astype(np.uint8)
+    out[:,:,1]=on.astype(np.uint8)
+    out[:,:,0]=np.clip((cn+on)*0.18,0,255).astype(np.uint8)
+    if roi is not None:
+        rr=cv2.resize(roi,(out.shape[1],out.shape[0]),interpolation=cv2.INTER_NEAREST)
+        contours,_=cv2.findContours((rr>0).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        if contours: cv2.drawContours(out,contours,-1,(255,255,255),3)
+    return out
+
+
 def make_element_overview(maps,roi):
     items=[("C",maps["c_map"]),("N",maps["n_map"]),("O",maps["o_map"]),("Si",maps["si_map"])]
     th=min(im.shape[0] for _,im in items); tw=min(im.shape[1] for _,im in items); cells=[]
@@ -600,6 +620,7 @@ def run(payload):
     fp=outdir/"sem_residue_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255),ring_color=(0,220,255)),fp,92); paths["sem_residue_overlay"]=str(fp)
     # Backward-compatible asset name: it now contains the contour-only overlay.
     fp=outdir/"sem_roi_ring_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_roi_ring_overlay"]=str(fp)
+    fp=outdir/"eds_co_overlay.jpg"; save_crop(make_co_overlay(p2["c_map"],p2["o_map"],roi),fp,92); paths["eds_co_overlay"]=str(fp)
     fp=outdir/"element_maps_enhanced.jpg"; save_crop(make_element_overview(p2,roi),fp,92); paths["element_maps_enhanced"]=str(fp)
     for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
         rr=cv2.resize(roi,(p2[key].shape[1],p2[key].shape[0]),interpolation=cv2.INTER_NEAREST)
