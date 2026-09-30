@@ -490,7 +490,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         scored.append((selection,c,cm,om,morphology_score,morph_z,spatial))
     if not scored:
         roi=np.zeros((h,w),np.uint8)
-        return {"result":"Review","confidence":"Low","residue_score":0.0,"c_enrichment":0.0,"o_enrichment":0.0,
+        return {"result":"Ambiguous","confidence":"Low","residue_score":0.0,"c_enrichment":0.0,"o_enrichment":0.0,
                 "c_log2_ratio":0.0,"o_log2_ratio":0.0,"c_zscore":0.0,"o_zscore":0.0,"c_score":0.0,"o_score":0.0,
                 "c_coverage":0.0,"o_coverage":0.0,"c_spatial_overlap":0.0,"o_spatial_overlap":0.0,"spatial_overlap":0.0,
                 "morphology_score":0.0,"cluster_score":0.0,"roi_area_px":0,"candidate_area_px":0,"candidate_coverage":0.0,
@@ -535,23 +535,37 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         score=float(np.clip(raw_score*(0.70/0.85),0,0.70))
     else:
         score=float(np.clip(0.70+(raw_score-0.85)*(0.30/0.15),0.70,1.0))
+    # V21 decision bands requested for production review:
+    #   >= 70 : Residue, but only when the ROI is sufficiently defensible
+    #   60-69: Ambiguous (human Verification)
+    #   < 60 : Non-residue
+    # A high score with a poor/partial mask is deliberately downgraded to Ambiguous.
     residue_gate=(score>=0.70 and rq["roi_quality"]>=0.55 and (element_max>=0.45 or morph>=0.90))
-    non_gate=(score<0.40 and morph<0.34 and element_max<0.55)
-    if residue_gate: result="Residue"
-    elif non_gate: result="Non-residue"
-    else: result="Review"
-    margin=abs(score-0.70 if result=="Residue" else score-0.40)
-    conf="High" if result in {"Residue","Non-residue"} and margin>=.20 else "Medium" if result in {"Residue","Non-residue"} and margin>=.10 else "Low"
+    if residue_gate:
+        result="Residue"
+    elif score>=0.60:
+        result="Ambiguous"
+    else:
+        result="Non-residue"
+    if result=="Residue":
+        margin=score-0.70
+        conf="High" if margin>=.20 else "Medium" if margin>=.10 else "Low"
+    elif result=="Non-residue":
+        margin=0.60-score
+        conf="High" if margin>=.20 else "Medium" if margin>=.10 else "Low"
+    else:
+        conf="Low" if score<0.70 else "Medium"
     reasons=[]
     if ce<.55 or oe<.55: reasons.append("weak_C_or_O_global_evidence")
     if abs(ce-oe)>.30: reasons.append("C_O_disagreement")
     if spatial<.08: reasons.append("weak_C_O_high_signal_overlap")
     if rq["roi_quality"]<.55: reasons.append("low_roi_quality_or_partial_mask")
     if score>=.70 and rq["roi_quality"]<.55: reasons.append("high_score_but_roi_quality_low")
+    if 0.60<=score<0.70: reasons.append("score_in_ambiguous_band")
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],
@@ -566,7 +580,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"The irregular ROI mask is compared with the whole analytical image after excluding the bottom metadata/scale-bar region. The Local Ring is removed and is not used as a baseline. The displayed score remains a true 0-100 score: previous 0 maps to 0, previous 85 maps to 70, and previous 100 maps to 100 using a piecewise calibration. Low ROI quality forces REVIEW even when the signal score is high."
+        "classification_note":"The irregular ROI mask is compared with the whole analytical image after excluding the bottom metadata/scale-bar region. The Local Ring is removed and is not used as a baseline. The displayed score remains a true 0-100 score: previous 0 maps to 0, previous 85 maps to 70, and previous 100 maps to 100 using a piecewise calibration. Decision bands are Residue >=70, Ambiguous 60-69, and Non-residue <60; a high score with poor ROI quality remains Ambiguous."
     },roi
 
 def run(payload):
@@ -593,7 +607,7 @@ def run(payload):
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_box_overlay(p2[key],rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":
             enh=enhance_element_map(p2[key],label); fp=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_box_overlay(enh,rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_enhanced_overlay"]=str(fp)
-    features.update({"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v20-irregular-mask-merge-shadow-filter-piecewise-score-calibrated","viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask, with nearby fragments merged and shadow/background filtered. Red/white contours show the actual ROI. No Local Ring is displayed or used. Score remains 0-100 with piecewise calibration: previous 85 -> new 70 and previous 100 -> new 100."})
+    features.update({"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v21-irregular-mask-merge-shadow-filter-piecewise-score-calibrated-70-60-bands","viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask, with nearby fragments merged and shadow/background filtered. Red/white contours show the actual ROI. No Local Ring is displayed or used for new analysis. Score remains 0-100 with piecewise calibration: previous 85 -> new 70 and previous 100 -> new 100. Decision bands: Residue >=70, Ambiguous 60-69, Non-residue <60."})
     del roi,p1,p2,raw; gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
     Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")

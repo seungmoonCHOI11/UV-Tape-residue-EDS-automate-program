@@ -464,7 +464,7 @@ def asset(point_id:str,asset_type:str):
 def human(point_id:str,result:str):
     if point_id not in RECORDS:
         point(point_id)
-    if result not in {"Residue","Non-residue","Review","Skip"}:
+    if result not in {"Residue","Non-residue","Ambiguous","Review","Skip"}:
         raise HTTPException(400,"invalid result")
     value=None if result=="Skip" else result
     previous=RECORDS[point_id].get("human_result")

@@ -41,7 +41,7 @@ def export_ppt(records, out):
         t.text_frame.paragraphs[0].font.size=Pt(9)
         _add_box(s,8.15,5.84,4.3,1.25,"Result")
         t=s.shapes.add_textbox(Inches(8.35),Inches(6.3),Inches(3.9),Inches(.45))
-        t.text_frame.paragraphs[0].text=p.get("human_result") or p.get("ai_result") or "Review"
+        t.text_frame.paragraphs[0].text=p.get("human_result") or p.get("ai_result") or "Ambiguous"
         t.text_frame.paragraphs[0].font.size=Pt(21); t.text_frame.paragraphs[0].font.bold=True
         t.text_frame.paragraphs[0].alignment=2
     prs.save(out)
@@ -67,7 +67,7 @@ def export_pdf(records,out):
         c.setFont("Helvetica",7); c.drawString(28,92,f"C enrichment: {f.get('c_enrichment',0)}%   O enrichment: {f.get('o_enrichment',0)}%")
         c.drawString(28,78,f"C coverage: {f.get('c_coverage',0)}%   O coverage: {f.get('o_coverage',0)}%   W{p['wafer']} / P{p['point']}")
         c.setFont("Helvetica-Bold",7); c.drawString(460,108,"Result")
-        c.setFont("Helvetica-Bold",18); c.drawCentredString(593,76,p.get("human_result") or p.get("ai_result") or "Review")
+        c.setFont("Helvetica-Bold",18); c.drawCentredString(593,76,p.get("human_result") or p.get("ai_result") or "Ambiguous")
         c.setFont("Helvetica",6); c.drawRightString(W-25,20,f"{idx+1} / {len(records)}")
         c.showPage()
     c.save(); return out
