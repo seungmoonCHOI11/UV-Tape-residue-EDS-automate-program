@@ -114,6 +114,18 @@ def detect_residue_candidates(sem, max_candidates=8):
         m=cv2.morphologyEx(m,cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
         m=cv2.morphologyEx(m,cv2.MORPH_CLOSE,np.ones((5,5),np.uint8))
         cues.append(m)
+    # Keep the original bright-residue detector, but add a separate dark-contrast
+    # branch so large/low-brightness residues are not silently lost.  The branches
+    # are merged only at candidate generation; morphology + C/O evidence still
+    # decides which candidates are physically plausible.
+    for k in (31,45,61):
+        kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k,k))
+        black=cv2.morphologyEx(clahe,cv2.MORPH_BLACKHAT,kernel)
+        black=cv2.GaussianBlur(black,(3,3),0)
+        _,m=cv2.threshold(black,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+        m=cv2.morphologyEx(m,cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
+        m=cv2.morphologyEx(m,cv2.MORPH_CLOSE,np.ones((7,7),np.uint8))
+        cues.append(m)
     mask=cv2.bitwise_or(cues[0],cv2.bitwise_or(cues[1],cues[2]))
     n,labels,stats,_=cv2.connectedComponentsWithStats(mask)
     background=cv2.GaussianBlur(clahe,(0,0),17)
@@ -124,7 +136,8 @@ def detect_residue_candidates(sem, max_candidates=8):
         if area < max(35,int(total*0.00008)) or area > int(total*0.20): continue
         if x<=3 or y<=3 or x+ww>=w-3 or y+hh>=int(h*.84)-3: continue
         aspect=max(ww/max(hh,1),hh/max(ww,1))
-        if aspect>18: continue
+        # Reject page-border/footer structures and extremely page-spanning components.
+        if aspect>18 or ww>int(w*.72) or hh>int(h*.58): continue
         ys,xs=np.where(labels==i); vals=clahe[ys,xs].astype(np.float32); bgv=background[ys,xs].astype(np.float32)
         contrast=float(np.median(vals-bgv))/max(float(np.std(background)),8.0)
         fill=area/max(ww*hh,1); edge=float(np.mean(edge_map[ys,xs]>0))
@@ -197,7 +210,13 @@ def make_box_overlay(base,roi,roi_color=(0,0,255),ring_color=(0,220,255)):
     # Visual-only ring. It is deliberately not used for classification.
     ring=cv2.dilate(roi,np.ones((21,21),np.uint8),iterations=1); ring=((ring>0)&(roi==0)).astype(np.uint8)*255
     contours,_=cv2.findContours(ring,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE); cv2.drawContours(out,contours,-1,ring_color,2)
-    cv2.rectangle(out,(x0,y0),(x1,y1),roi_color,3); return out
+    # Show the actual irregular ROI boundary as the primary ROI, with a thin
+    # bounding rectangle retained for compatibility/readability.
+    contours,_=cv2.findContours((roi>0).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(out,contours,-1,roi_color,3)
+    # The actual irregular contour is the ROI. Do not draw a bounding rectangle:
+    # a rectangle can visually imply large background pixels are part of the ROI.
+    return out
 
 
 def make_overlay(base,mask,title=None): return make_box_overlay(base,mask)
@@ -221,78 +240,188 @@ def make_element_overview(maps,roi):
     return np.vstack([np.hstack([cells[0],cells[1]]),np.hstack([cells[2],cells[3]])])
 
 
-def residue_features(sem_ref,c_map,o_map,n_map,si_map):
-    """Select a SEM ROI, then compare that ROI with the whole analytical field.
 
-    Candidate selection uses SEM morphology first and C/O global evidence only to choose
-    between plausible SEM candidates. Classification itself never uses the Local Ring.
+def _ai_guided_mask(sem, boxes):
+    """Turn coarse AI boxes into smooth local CV masks; boxes themselves are never the ROI."""
+    if not boxes:
+        return np.zeros(sem.shape[:2], np.uint8)
+    gray=cv2.cvtColor(sem,cv2.COLOR_BGR2GRAY) if sem.ndim==3 else sem.copy()
+    h,w=gray.shape; out=np.zeros((h,w),np.uint8); work_h=int(h*.84)
+    clahe=cv2.createCLAHE(clipLimit=1.5,tileGridSize=(8,8)).apply(gray[:work_h,:])
+    for b in boxes:
+        try:
+            x=int(float(b.get("x",0))*w); y=int(float(b.get("y",0))*h)
+            x2=min(w,int((float(b.get("x",0))+float(b.get("w",0)))*w))
+            y2=min(work_h,int((float(b.get("y",0))+float(b.get("h",0)))*h))
+        except Exception:
+            continue
+        x=max(4,min(w-5,x)); y=max(4,min(work_h-5,y)); x2=max(x+8,min(w-4,x2)); y2=max(y+8,min(work_h-4,y2))
+        cw,ch=x2-x,y2-y
+        if cw<10 or ch<10: continue
+        crop=clahe[y:y2,x:x2]
+        # Multi-scale local contrast. This handles bright, dark and faint residues
+        # on a slowly varying SEM background without a single global threshold.
+        cues=[]
+        for k in (15,25,35):
+            ker=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k,k))
+            th=cv2.morphologyEx(crop,cv2.MORPH_TOPHAT,ker)
+            bh=cv2.morphologyEx(crop,cv2.MORPH_BLACKHAT,ker)
+            for cue in (th,bh):
+                cue=cv2.GaussianBlur(cue,(3,3),0)
+                _,m=cv2.threshold(cue,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+                cues.append(m)
+        mask=np.zeros_like(crop,np.uint8)
+        for m in cues: mask=cv2.bitwise_or(mask,m)
+        # Smooth speckles into physical-looking connected shapes.
+        mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9,9)),iterations=1)
+        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)),iterations=1)
+        n,lab,stats,_=cv2.connectedComponentsWithStats(mask)
+        keep=np.zeros_like(mask)
+        min_area=max(8,int(cw*ch*0.002)); max_area=max(min_area+1,int(cw*ch*0.72))
+        for i in range(1,n):
+            area=int(stats[i,cv2.CC_STAT_AREA])
+            ww=int(stats[i,cv2.CC_STAT_WIDTH]); hh=int(stats[i,cv2.CC_STAT_HEIGHT])
+            if min_area<=area<=max_area and max(ww/max(hh,1),hh/max(ww,1))<18:
+                keep[lab==i]=255
+        # A very faint object can disappear from the binary mask. In that case use
+        # the strongest smooth connected component rather than filling the whole AI box.
+        if cv2.countNonZero(keep)==0 and cv2.countNonZero(mask)>0:
+            n,lab,stats,_=cv2.connectedComponentsWithStats(mask)
+            best=max(range(1,n), key=lambda i:int(stats[i,cv2.CC_STAT_AREA]), default=0)
+            if best: keep[lab==best]=255
+        full=np.zeros((h,w),np.uint8); full[y:y2,x:x2]=keep
+        out=cv2.bitwise_or(out,full)
+    # Final smoothing and tiny-speckle removal.
+    out=cv2.morphologyEx(out,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7)),iterations=1)
+    n,lab,stats,_=cv2.connectedComponentsWithStats(out)
+    clean=np.zeros_like(out)
+    min_total=max(12,int(np.count_nonzero(out)*0.003))
+    for i in range(1,n):
+        if int(stats[i,cv2.CC_STAT_AREA])>=min_total: clean[lab==i]=255
+    return clean
+
+def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
+    """Detect one or more physical residue regions and compare them with the whole field.
+
+    The analysis ROI is now an irregular pixel mask rather than only a rectangle.
+    The red/white rectangle is retained only as a visual bounding box. This prevents
+    large or spatially separated residues from being judged by a box full of background.
     """
     candidates=detect_residue_candidates(sem_ref,8)
+    ai_mask=_ai_guided_mask(sem_ref, ai_boxes)
+    if cv2.countNonZero(ai_mask):
+        # Prefer existing CV candidates that intersect an AI-proposed region, but also
+        # keep a new smooth local segmentation when CV missed a large/faint object.
+        for c in candidates:
+            overlap=cv2.countNonZero(cv2.bitwise_and(c["mask"],ai_mask)) / max(cv2.countNonZero(c["mask"]),1)
+            c["ai_overlap"]=float(overlap)
+            if overlap>0.10: c["score"]=min(1.0,c["score"]+0.10*overlap)
+        n,lab,stats,_=cv2.connectedComponentsWithStats(ai_mask)
+        for i in range(1,n):
+            area=int(stats[i,cv2.CC_STAT_AREA]); x,y,ww,hh=[int(stats[i,j]) for j in range(4)]
+            if area<20: continue
+            cm=np.zeros_like(ai_mask,np.uint8); cm[lab==i]=255
+            candidates.append({"label":10000+i,"score":0.62,"area":area,"bbox":(x,y,ww,hh),"mask":cm,"cx":x+ww/2,"cy":y+hh/2,"ww":ww,"hh":hh,"ai_guided":True})
+        # Keep candidates compact and spatially distinct again.
+        ded=[]
+        for c in sorted(candidates,key=lambda z:z.get("score",0),reverse=True):
+            x,y,ww,hh=c["bbox"]; cx=x+ww/2; cy=y+hh/2
+            if any(np.hypot((cx-d["cx"])/max(d["ww"],20),(cy-d["cy"])/max(d["hh"],20))<.45 for d in ded): continue
+            ded.append(c)
+            if len(ded)>=10: break
+        candidates=ded
     h,w=sem_ref.shape[:2]
     gray=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY)
     am=analytical_mask(gray.shape)>0
     gmed=float(np.median(gray[am])); gmad=float(np.median(np.abs(gray[am]-gmed))); gstd=max(1.4826*gmad,1.0)
     scored=[]
     for c in candidates:
-        roi=roi_box_from_mask(c["mask"],sem_ref.shape)
-        roi_c=cv2.resize(roi,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-        roi_o=cv2.resize(roi,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+        # Candidate pixels themselves are used for the signal comparison; no local ring.
+        cmask=c["mask"]
+        roi_c=cv2.resize(cmask,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+        roi_o=cv2.resize(cmask,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST)
         cm=global_roi_metrics(c_map,roi_c,"C"); om=global_roi_metrics(o_map,roi_o,"O")
-        candidate_area=int(cv2.countNonZero(c["mask"])); roi_area=max(int(cv2.countNonZero(roi)),1)
-        vals=gray[c["mask"]>0].astype(np.float32) if candidate_area else np.array([])
+        candidate_area=int(cv2.countNonZero(cmask)); vals=gray[cmask>0].astype(np.float32)
         morph_z=(float(np.median(vals))-gmed)/gstd if vals.size else 0.0
-        coverage=candidate_area/roi_area
-        morphology_score=float(np.clip(sigmoid((morph_z-.9)/1.4)*.72+np.clip(coverage/.28,0,1)*.28,0,1)) if candidate_area else 0.0
+        # Absolute local contrast allows both bright and dark residues, while area/fill
+        # prevents isolated background grain from becoming a high-ranked candidate.
+        local_bg=cv2.GaussianBlur(gray,(0,0),17)
+        local_contrast=float(np.median(np.abs(vals-local_bg[cmask>0]))) if vals.size else 0.0
+        area_fraction=candidate_area/max(int(np.count_nonzero(am)),1)
+        morphology_score=float(np.clip(
+            .42*sigmoid((abs(morph_z)-.65)/1.25)+
+            .28*np.clip(c["score"],0,1)+
+            .18*np.clip(local_contrast/18.0,0,1)+
+            .12*np.clip(np.sqrt(area_fraction)*16,0,1),0,1))
         spatial=float(np.clip(min(cm["coverage"],om["coverage"])/55.0,0,1))
-        selection=float(np.clip(.34*morphology_score+.30*cm["score"]+.28*om["score"]+.08*spatial,0,1))
-        scored.append((selection,c,roi,cm,om,morphology_score,morph_z,spatial))
+        ai_bonus=0.08 if c.get("ai_guided") else 0.0
+        selection=float(np.clip(.34*morphology_score+.28*cm["score"]+.26*om["score"]+.07*spatial+ai_bonus,0,1))
+        scored.append((selection,c,cm,om,morphology_score,morph_z,spatial))
     if not scored:
-        roi=np.zeros((h,w),np.uint8); return {
-            "result":"Review","confidence":"Low","residue_score":0.0,"c_enrichment":0.0,"o_enrichment":0.0,
-            "c_log2_ratio":0.0,"o_log2_ratio":0.0,"c_zscore":0.0,"o_zscore":0.0,"c_score":0.0,"o_score":0.0,
-            "c_coverage":0.0,"o_coverage":0.0,"c_spatial_overlap":0.0,"o_spatial_overlap":0.0,"spatial_overlap":0.0,
-            "morphology_score":0.0,"cluster_score":0.0,"roi_area_px":0,"candidate_area_px":0,"candidate_coverage":0.0,
-            "review_reasons":["no_reliable_SEM_candidate"],"classification_note":"No defensible SEM candidate was detected; point requires human review."
-        },roi
+        roi=np.zeros((h,w),np.uint8)
+        return {"result":"Review","confidence":"Low","residue_score":0.0,"c_enrichment":0.0,"o_enrichment":0.0,
+                "c_log2_ratio":0.0,"o_log2_ratio":0.0,"c_zscore":0.0,"o_zscore":0.0,"c_score":0.0,"o_score":0.0,
+                "c_coverage":0.0,"o_coverage":0.0,"c_spatial_overlap":0.0,"o_spatial_overlap":0.0,"spatial_overlap":0.0,
+                "morphology_score":0.0,"cluster_score":0.0,"roi_area_px":0,"candidate_area_px":0,"candidate_coverage":0.0,
+                "review_reasons":["no_reliable_SEM_candidate"],"classification_note":"No defensible SEM candidate was detected; point requires human review."},roi
+
     scored.sort(key=lambda z:z[0],reverse=True)
-    _,chosen,roi,cm,om,morphology_score,morph_z,spatial=scored[0]
-    # N/Si are diagnostics only.
-    rrn=cv2.resize(roi,(n_map.shape[1],n_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-    rrs=cv2.resize(roi,(si_map.shape[1],si_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-    nm=global_roi_metrics(n_map,rrn,"N"); sm=global_roi_metrics(si_map,rrs,"Si")
+    best_score=scored[0][0]
+    # Preserve the previously successful top candidate, but add other strong, spatially
+    # distinct candidates. This is what allows multiple small residues to be represented.
+    selected=[]
+    for item in scored:
+        sel,c,cm,om,ms,mz,sp=item
+        if len(selected)>=5: break
+        if sel < max(.42,best_score*.70): continue
+        if ms < .25: continue
+        x,y,ww,hh=c["bbox"]; cx=x+ww/2; cy=y+hh/2
+        if any(np.hypot((cx-d["cx"])/max(d["ww"],20),(cy-d["cy"])/max(d["hh"],20))<.60 for d in selected):
+            continue
+        selected.append({"sel":sel,"c":c,"cm":cm,"om":om,"ms":ms,"mz":mz,"sp":sp,"cx":cx,"cy":cy,"ww":ww,"hh":hh})
+    if not selected: selected=[{"sel":best_score,"c":scored[0][1],"cm":scored[0][2],"om":scored[0][3],"ms":scored[0][4],"mz":scored[0][5],"sp":scored[0][6],"cx":scored[0][1]["cx"],"cy":scored[0][1]["cy"],"ww":scored[0][1]["ww"],"hh":scored[0][1]["hh"]}]
+
+    roi=np.zeros((h,w),np.uint8)
+    for d in selected: roi=cv2.bitwise_or(roi,d["c"]["mask"])
+    # Recalculate element metrics on the final irregular ROI.
+    rr_c=cv2.resize(roi,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+    rr_o=cv2.resize(roi,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+    rr_n=cv2.resize(roi,(n_map.shape[1],n_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+    rr_si=cv2.resize(roi,(si_map.shape[1],si_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+    cm=global_roi_metrics(c_map,rr_c,"C"); om=global_roi_metrics(o_map,rr_o,"O")
+    nm=global_roi_metrics(n_map,rr_n,"N"); sm=global_roi_metrics(si_map,rr_si,"Si")
     ce,oe=cm["score"],om["score"]
-    score=float(np.clip(.42*morphology_score+.30*ce+.22*oe+.06*spatial,0,1))
-    if morphology_score>=.50 and ce>=.48 and oe>=.48 and spatial>=.10:
-        result="Residue"
-    elif morphology_score<.30 and ce<.55 and oe<.55:
-        result="Non-residue"
-    elif morphology_score>=.34 and min(ce,oe)>=.48 and spatial>=.07:
-        result="Residue"
-    else:
-        result="Review"
+    morph=np.mean([d["ms"] for d in selected])
+    spatial=float(np.clip(min(cm["coverage"],om["coverage"])/55.0,0,1))
+    score=float(np.clip(.42*morph+.30*ce+.22*oe+.06*spatial,0,1))
+    if morph>=.50 and ce>=.48 and oe>=.48 and spatial>=.10: result="Residue"
+    elif morph<.30 and ce<.55 and oe<.55: result="Non-residue"
+    elif morph>=.34 and min(ce,oe)>=.48 and spatial>=.07: result="Residue"
+    else: result="Review"
     margin=abs(score-.50)
     conf="High" if result in {"Residue","Non-residue"} and margin>=.20 else "Medium" if result in {"Residue","Non-residue"} and margin>=.10 else "Low"
     reasons=[]
     if ce<.55 or oe<.55: reasons.append("weak_C_or_O_global_evidence")
     if abs(ce-oe)>.30: reasons.append("C_O_disagreement")
     if spatial<.08: reasons.append("weak_C_O_high_signal_overlap")
-    candidate_area=int(cv2.countNonZero(chosen["mask"])); roi_area=max(int(cv2.countNonZero(roi)),1)
+    roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
+    ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
         "result":result,"confidence":conf,"residue_score":round(score,4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],
         "spatial_overlap":round(spatial*100,2),"n_enrichment":nm["contrast_pct"],"n_log2_ratio":nm["log2_ratio"],"n_zscore":nm["zscore"],"n_coverage":nm["coverage"],
-        "si_enrichment":sm["contrast_pct"],"si_zscore":sm["zscore"],"morphology_score":round(morphology_score,4),"cluster_score":round(spatial,4),
-        "roi_area_px":roi_area,"candidate_area_px":candidate_area,"candidate_coverage":round(candidate_area/roi_area*100,2),
-        "sem_global_median":round(gmed,3),"sem_global_mad":round(gmad,3),"sem_candidate_zscore":round(morph_z,3),
+        "si_enrichment":sm["contrast_pct"],"si_zscore":sm["zscore"],"morphology_score":round(float(morph),4),"cluster_score":round(spatial,4),
+        "roi_area_px":roi_area,"candidate_area_px":candidate_area,"candidate_coverage":round(candidate_area/max(box_area,1)*100,2),
+        "sem_global_median":round(gmed,3),"sem_global_mad":round(gmad,3),"sem_candidate_zscore":round(float(np.mean([d["mz"] for d in selected])),3),
         "c_roi_mean":cm["roi_mean"],"c_global_mean":cm["global_mean"],"c_global_std":cm["global_std"],
         "o_roi_mean":om["roi_mean"],"o_global_mean":om["global_mean"],"o_global_std":om["global_std"],
-        "selected_candidate_rank":1,"candidate_count":len(scored),"candidate_selection_score":round(scored[0][0],4),
+        "selected_candidate_rank":1,"candidate_count":len(scored),"selected_candidate_count":len(selected),"candidate_selection_score":round(best_score,4),
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"ROI and the whole analytical image are compared after excluding the bottom metadata/scale-bar region. The yellow Local Ring is visualization only and is never used as the classification baseline."
+        "classification_note":"The irregular ROI mask is compared with the whole analytical image after excluding the bottom metadata/scale-bar region. The yellow Local Ring is visualization only and is never used as the classification baseline. The red/white rectangle is a visual bounding box only."
     },roi
 
 def run(payload):
@@ -304,7 +433,7 @@ def run(payload):
     first=cv2.imread(paths["page_1"],cv2.IMREAD_COLOR); second=cv2.imread(paths["page_2"],cv2.IMREAD_COLOR)
     if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
     p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()
-    features,roi=residue_features(p1["sem"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"])
+    features,roi=residue_features(p1["sem"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"],payload.get("ai_roi_boxes"))
     raw={"sem":p1["sem"],"eds_map":p1["eds_map"],"full_element_maps_original":p2["full_element_maps_original"],"se_map":p2["se_map"],"c_map":p2["c_map"],"n_map":p2["n_map"],"o_map":p2["o_map"],"si_map":p2["si_map"]}
     for key,im in raw.items():
         fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
@@ -317,7 +446,7 @@ def run(payload):
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_roi_ring_overlay(p2[key],rr),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":
             enh=enhance_element_map(p2[key],label); fp=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_box_overlay(enh,rr,roi_color=(255,255,255),ring_color=(0,220,255)),fp,92); paths[f"{key}_enhanced_overlay"]=str(fp)
-    features.update({"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v16-sem-roi-global-baseline","viewer_note":"ROI is detected from the Page-1 SEM per Point and projected by normalized coordinates. SEM uses a red rectangle; element maps use white rectangles; yellow line is visual-only and is not used for classification."})
+    features.update({"ai_roi_guided": bool(ai_boxes),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v18-hybrid-openai-roi-guide-adaptive-mask-global-baseline","viewer_note":"ROI is detected from the Page-1 SEM per Point as an irregular residue mask and projected by normalized coordinates. Red/white contours show the actual ROI; a thin bounding box is visual-only. The yellow line is visual-only and is not used for classification."})
     del roi,p1,p2,raw; gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
     Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")

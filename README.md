@@ -60,3 +60,12 @@ The backend remains a Render Web Service for now. v8 is specifically intended to
 
 ## v15
 See `README_V15.md` for the current production patch: verified v3 CROP coordinates, per-Point ROI detection, SEM/element ROI overlays, local C/O scoring, preserved loading/Re-analyze flow, and research dashboard.
+
+
+## V17 ROI logic
+- Page-1 SEM ROI detection uses multi-scale bright and dark local morphology.
+- Bottom metadata/scale-bar region is excluded from detection and global statistics.
+- ROI is an irregular pixel mask; red/white contours are the actual detected region.
+- C/O are compared against the whole analytical field, not the yellow local ring.
+- Multiple strong, spatially distinct residue candidates may be combined into one analysis mask.
+- The yellow ring is visualization only.

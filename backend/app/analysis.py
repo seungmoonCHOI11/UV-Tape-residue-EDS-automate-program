@@ -162,6 +162,48 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
             if not result_path.exists():
                 raise RuntimeError(f"Point {point_index + 1}/{len(sequence)} worker finished without a result file.")
             record = json.loads(result_path.read_text(encoding="utf-8"))
+            # Hybrid ROI stage: OpenAI proposes coarse visual boxes only for uncertain
+            # points; OpenCV remains responsible for the actual irregular pixel ROI and
+            # the final Residue/Non-residue/Review classification.
+            try:
+                from .ai import ai_available, analyze_roi_boxes_with_openai
+                ai_mode = __import__("os").getenv("OPENAI_ROI_MODE", "uncertain").lower()
+                f = record.get("features") or {}
+                uncertain = (
+                    f.get("result") == "Review" or
+                    f.get("confidence") == "Low" or
+                    f.get("selected_candidate_count", 0) == 0 or
+                    f.get("candidate_coverage", 100) < 18 or
+                    (f.get("morphology_score", 1) < 0.46 and f.get("result") != "Non-residue")
+                )
+                use_ai = ai_available() and ai_mode in {"uncertain", "all"} and (ai_mode == "all" or uncertain)
+                if use_ai and record.get("assets", {}).get("sem"):
+                    ai_hint = analyze_roi_boxes_with_openai(record["assets"]["sem"], f)
+                    boxes = ai_hint.get("boxes") or []
+                    if boxes:
+                        payload["ai_roi_boxes"] = boxes
+                        payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                        ai_proc = subprocess.run(
+                            [sys.executable, str(worker), str(payload_path)],
+                            env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, timeout=240, check=False,
+                        )
+                        if ai_proc.returncode == 0 and result_path.exists():
+                            refined = json.loads(result_path.read_text(encoding="utf-8"))
+                            refined.setdefault("features", {})["ai_roi_used"] = True
+                            refined["features"]["ai_roi_box_count"] = len(boxes)
+                            refined["features"]["ai_roi_model"] = ai_hint.get("model") or __import__("os").getenv("OPENAI_ROI_MODEL", __import__("os").getenv("OPENAI_MODEL", "gpt-5.6-luna"))
+                            refined["features"]["ai_roi_notes"] = ai_hint.get("notes", "")
+                            record = refined
+                        else:
+                            record.setdefault("features", {})["ai_roi_used"] = False
+                            record["features"]["ai_roi_error"] = (ai_proc.stderr or ai_proc.stdout or "AI refinement failed")[-1000:]
+                    else:
+                        record.setdefault("features", {})["ai_roi_used"] = False
+            except Exception as ai_exc:
+                record.setdefault("features", {})["ai_roi_used"] = False
+                record["features"]["ai_roi_error"] = f"{type(ai_exc).__name__}: {ai_exc}"
+            payload.pop("ai_roi_boxes", None)
             records.append(record)
             if progress_callback:
                 progress_callback(point_index + 1, len(sequence), "point_analysis")

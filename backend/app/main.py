@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="16.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="18.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -95,7 +95,7 @@ def health():
     return {
         "ok":True,
         "openai_configured":ai_available(),
-        "model":os.getenv("OPENAI_MODEL","gpt-5.5"),
+        "model":os.getenv("OPENAI_MODEL","gpt-5.6-luna"),
         "r2_configured":r2.configured,
         "supabase_configured":db.configured(),
     }

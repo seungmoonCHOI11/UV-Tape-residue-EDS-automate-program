@@ -5,17 +5,6 @@ import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
 const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5",points:"1-9"};
 
-// Shared by App and the module-level UploadPage component.
-// Keep this outside App so New Analysis can render without a ReferenceError.
-function parseSelection(value){
- const out=[];
- String(value||"").split(",").forEach(part=>{
-   const t=part.trim(); if(!t)return;
-   if(t.includes("-")){const [a,b]=t.split("-").map(Number);if(Number.isFinite(a)&&Number.isFinite(b)){for(let n=Math.min(a,b);n<=Math.max(a,b);n++)out.push(n)}} else {const n=Number(t);if(Number.isFinite(n))out.push(n)}
- });
- return [...new Set(out)].sort((a,b)=>a-b);
-}
-
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),input=useRef();
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false);
@@ -56,7 +45,15 @@ export default function App(){
  }
  useEffect(()=>{setMounted(true);loadData()},[]);
  useEffect(()=>{const h=e=>{if(typeof e.detail?.index!=="number")return;setIdx(e.detail.index);setVerificationOpen(true)};window.addEventListener("uvtape:open-point",h);return()=>window.removeEventListener("uvtape:open-point",h)},[]);
- function nextUnverified(start=0){
+ function parseSelection(value){
+ const out=[];
+ String(value||"").split(",").forEach(part=>{
+   const t=part.trim(); if(!t)return;
+   if(t.includes("-")){const [a,b]=t.split("-").map(Number);if(Number.isFinite(a)&&Number.isFinite(b)){for(let n=Math.min(a,b);n<=Math.max(a,b);n++)out.push(n)}} else {const n=Number(t);if(Number.isFinite(n))out.push(n)}
+ });
+ return [...new Set(out)].sort((a,b)=>a-b);
+}
+function nextUnverified(start=0){
  for(let i=Math.max(0,start);i<points.length;i++) if(!points[i].human_result) return i;
  return -1;
 }
@@ -167,7 +164,7 @@ function Review({p,idx,total,prev,next,human}){
  const maps=[["SE",[p.assets?.se_map_roi_ring,p.assets?.se_map]], ["C",[p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map]], ["N",[p.assets?.n_map_enhanced_overlay,p.assets?.n_map_roi_ring,p.assets?.n_map]], ["O",[p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]], ["Si",[p.assets?.si_map_enhanced_overlay,p.assets?.si_map_roi_ring,p.assets?.si_map]]];
  const f=p.features||{};
  const scoreValue=typeof p.residue_score==="number"?p.residue_score:(typeof f.residue_score==="number"?f.residue_score:null);
- return <div className="verificationPanel"><div className="verificationTop"><div><b>Point {idx+1} / {total}</b><span>{p.power} · {p.time} · W{p.wafer} · P{p.point}</span></div><span>{p.human_result?"Verified":"Unverified"}</span></div><div className="verificationImages"><Visual title="SEM / Residue ROI" sources={[p.assets?.sem_residue_overlay,p.assets?.sem]}/><Visual title="Full EDS Map" sources={[p.assets?.eds_map]}/></div><div className="elementStrip elementStripFive">{maps.map(([label,sources])=><div key={label}><b>{label}</b><ImageWithFallback sources={sources} alt={`${label} map with ROI`}/></div>)}</div><div className="localRingNotice"><b>ROI 표시</b><span>SEM: 빨간 박스 · SE/C/N/O/Si: 흰색 박스 · 노란 선: ROI 주변 참고 영역. ROI는 Point별 SEM 분석으로 검출하고 동일 normalized coordinate로 원소 map에 투영합니다. CV 판정은 노란 영역이 아니라 분석 이미지 전체(하단 정보/축 영역 제외)와 ROI를 비교합니다.</span></div><div className="verificationInfo"><div><small>CV RESULT</small><strong>{f.result||"—"}</strong><span>Score {typeof scoreValue==="number"?Math.round(scoreValue*100):"-"} / 100 · {p.confidence||f.confidence||"-"}</span></div><div className="featureMini"><span>SEM MORPHOLOGY {typeof f.morphology_score==="number"?f.morphology_score.toFixed(2):"-"}</span><span>C SCORE {typeof f.c_score==="number"?f.c_score.toFixed(2):"-"}</span><span>O SCORE {typeof f.o_score==="number"?f.o_score.toFixed(2):"-"}</span><span>SPATIAL OVERLAP {typeof f.spatial_overlap==="number"?`${f.spatial_overlap.toFixed(1)}%`:"-"}</span><span>C ROI / GLOBAL {typeof f.c_roi_mean==="number"&&typeof f.c_global_mean==="number"?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)}`:"-"}</span><span>O ROI / GLOBAL {typeof f.o_roi_mean==="number"&&typeof f.o_global_mean==="number"?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)}`:"-"}</span></div></div><div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>NON-RESIDUE</button><button className="approve" onClick={()=>human("Residue")}>RESIDUE</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> SKIP</button></div><div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> Previous</button><button className="secondary" onClick={next}>Next <ChevronRight size={14}/></button></div></div>
+ return <div className="verificationPanel"><div className="verificationTop"><div><b>Point {idx+1} / {total}</b><span>{p.power} · {p.time} · W{p.wafer} · P{p.point}</span></div><span>{p.human_result?"Verified":"Unverified"}</span></div><div className="verificationImages"><Visual title="SEM / Residue ROI" sources={[p.assets?.sem_residue_overlay,p.assets?.sem]}/><Visual title="Full EDS Map" sources={[p.assets?.eds_map]}/></div><div className="elementStrip elementStripFive">{maps.map(([label,sources])=><div key={label}><b>{label}</b><ImageWithFallback sources={sources} alt={`${label} map with ROI`}/></div>)}</div><div className="localRingNotice"><b>ROI 표시</b><span>SEM: 빨간 박스 · SE/C/N/O/Si: 흰색 박스 · 노란 선: ROI 주변 참고 영역. ROI는 Point별 SEM 분석으로 검출하고 동일 normalized coordinate로 원소 map에 투영합니다. CV 판정은 노란 영역이 아니라 분석 이미지 전체(하단 정보/축 영역 제외)와 ROI를 비교합니다. OpenAI는 불확실한 Point의 ROI 후보 위치만 보조하며 최종 ROI/분류는 OpenCV가 결정합니다.</span></div><div className="verificationInfo"><div><small>CV RESULT</small><strong>{f.result||"—"}</strong><span>Score {typeof scoreValue==="number"?Math.round(scoreValue*100):"-"} / 100 · {p.confidence||f.confidence||"-"}</span></div><div className="featureMini"><span>SEM MORPHOLOGY {typeof f.morphology_score==="number"?f.morphology_score.toFixed(2):"-"}</span><span>C SCORE {typeof f.c_score==="number"?f.c_score.toFixed(2):"-"}</span><span>O SCORE {typeof f.o_score==="number"?f.o_score.toFixed(2):"-"}</span><span>SPATIAL OVERLAP {typeof f.spatial_overlap==="number"?`${f.spatial_overlap.toFixed(1)}%`:"-"}</span><span>C ROI / GLOBAL {typeof f.c_roi_mean==="number"&&typeof f.c_global_mean==="number"?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)}`:"-"}</span><span>O ROI / GLOBAL {typeof f.o_roi_mean==="number"&&typeof f.o_global_mean==="number"?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)}`:"-"}</span></div></div><div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>NON-RESIDUE</button><button className="approve" onClick={()=>human("Residue")}>RESIDUE</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> SKIP</button></div><div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> Previous</button><button className="secondary" onClick={next}>Next <ChevronRight size={14}/></button></div></div>
 }
 function VerificationModal({p,idx,total,close,human,prev,next}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human}/></div></div>}
 
