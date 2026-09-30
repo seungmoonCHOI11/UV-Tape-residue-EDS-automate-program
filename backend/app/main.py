@@ -18,7 +18,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="15.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="16.0.0")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
@@ -38,6 +38,15 @@ def get_job(job_id):
 
 def public_record(r: dict) -> dict:
     out=dict(r)
+    features=out.get("features") or {}
+    # Keep score/result/confidence both at the top level and inside features so
+    # freshly analyzed in-memory records and Supabase-loaded records render identically.
+    if out.get("residue_score") is None:
+        out["residue_score"]=features.get("residue_score")
+    if out.get("confidence") is None:
+        out["confidence"]=features.get("confidence")
+    if out.get("cv_result") is None:
+        out["cv_result"]=features.get("result")
     out["assets"]={k:f"/api/assets/{quote(r['id'],safe='')}/{quote(k,safe='')}" for k in r.get("assets",{})}
     out.pop("r2_assets", None)
     return out
