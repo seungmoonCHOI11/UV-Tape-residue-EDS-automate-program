@@ -79,8 +79,42 @@ def get_latest_project():
     rows = get_client().table("projects").select("*").order("created_at", desc=True).limit(1).execute().data or []
     return rows[0] if rows else None
 
+
+def get_points_with_data(project_id: str):
+    """Load points, latest analysis, and assets with bounded DB requests."""
+    client = get_client()
+    rows = (client.table("points").select("*").eq("project_id", project_id)
+            .order("power").order("time_sec").order("wafer").order("point")
+            .execute().data or [])
+    if not rows:
+        return []
+    ids = [str(r["id"]) for r in rows]
+    latest_analysis = {}
+    asset_map = {}
+    for start in range(0, len(ids), 100):
+        chunk = ids[start:start+100]
+        analyses = (client.table("analysis_results").select("*")
+                    .in_("point_id", chunk).order("created_at", desc=True)
+                    .execute().data or [])
+        for a in analyses:
+            pid = str(a["point_id"])
+            if pid not in latest_analysis:
+                latest_analysis[pid] = a
+        assets = (client.table("point_assets").select("point_id,asset_type,storage_path")
+                  .in_("point_id", chunk).execute().data or [])
+        for a in assets:
+            asset_map.setdefault(str(a["point_id"]), {})[a["asset_type"]] = a["storage_path"]
+    return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
+
+
 def get_points(project_id: str):
     return get_client().table("points").select("*").eq("project_id", project_id).order("created_at").execute().data or []
+
+def get_point_by_key(project_id: str, power: int, time_sec: int, wafer: int, point: int):
+    rows = (get_client().table("points").select("*")
+            .eq("project_id", project_id).eq("power", power).eq("time_sec", time_sec)
+            .eq("wafer", wafer).eq("point", point).limit(1).execute().data or [])
+    return rows[0] if rows else None
 
 def get_analysis(point_id: str):
     rows=get_client().table("analysis_results").select("*").eq("point_id",point_id).order("created_at",desc=True).limit(1).execute().data or []
@@ -94,8 +128,15 @@ def re_digits(value: Any) -> str:
     return m.group(0) if m else "0"
 
 
-def get_point_by_key(project_id: str, power: int, time_sec: int, wafer: int, point: int):
+def get_first_unverified_point(project_id: str):
     rows = (get_client().table("points").select("*")
-            .eq("project_id", project_id).eq("power", int(power)).eq("time_sec", int(time_sec))
-            .eq("wafer", int(wafer)).eq("point", int(point)).limit(1).execute().data or [])
+            .eq("project_id", project_id)
+            .is_("human_result", "null")
+            .order("power").order("time_sec").order("wafer").order("point")
+            .limit(1).execute().data or [])
     return rows[0] if rows else None
+
+def add_review_history(point_id: str, previous_result, new_result, reviewer_note=None):
+    payload={"point_id":point_id,"previous_human_result":previous_result,
+             "new_human_result":new_result,"reviewer_note":reviewer_note}
+    return get_client().table("point_review_history").insert(payload).execute()

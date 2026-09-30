@@ -29,7 +29,7 @@ def export_ppt(records, out):
         subtitle=s.shapes.add_textbox(Inches(.25),Inches(.46),Inches(12),Inches(.2))
         subtitle.text_frame.paragraphs[0].text=f"{p['power']} / {p['time']} · W{p['wafer']} / P{p['point']} · {p['zone']} · {p.get('human_result') or p.get('ai_result') or 'Review'}"
         subtitle.text_frame.paragraphs[0].font.size=Pt(8)
-        for x,y,w,h,key,title in [(.25,.88,6,2.3,"sem_residue_overlay","SEM / Residue ROI"),(6.45,.88,6,2.3,"eds_map","Full EDS Map"),(.25,3.36,2.95,2.3,"c_roi_overlay","C / ROI"),(3.35,3.36,2.95,2.3,"n_roi_overlay","N / ROI"),(6.45,3.36,2.95,2.3,"o_roi_overlay","O / ROI"),(9.55,3.36,2.95,2.3,"si_roi_overlay","Si / ROI")]:
+        for x,y,w,h,key,title in [(.25,.88,6,2.3,"sem","SEM"),(6.45,.88,6,2.3,"spectrum","EDS Spectrum"),(.25,3.36,6,2.3,"eds_map","EDS Map"),(6.45,3.36,6,2.3,"element_maps","Element Maps")]:
             _add_box(s,x,y,w,h,title)
             img=p.get("assets",{}).get(key)
             if img and Path(img).exists():
@@ -54,7 +54,7 @@ def export_pdf(records,out):
         c.drawString(22,H-25,f"{p['power']}_{p['time']}_W{p['wafer']}_P{p['point']}")
         c.setFont("Helvetica",7); c.drawString(22,H-37,f"{p['power']} / {p['time']} · W{p['wafer']} / P{p['point']} · {p['zone']}")
         c.setStrokeColorRGB(.2,.36,.51); c.line(22,H-45,W-22,H-45)
-        boxes=[(22,H-215,330,155,"SEM / Residue ROI","sem_residue_overlay"),(365,H-215,330,155,"Full EDS Map","eds_map"),(22,H-380,165,155,"C / ROI","c_roi_overlay"),(192,H-380,165,155,"N / ROI","n_roi_overlay"),(362,H-380,165,155,"O / ROI","o_roi_overlay"),(532,H-380,203,155,"Si / ROI","si_roi_overlay")]
+        boxes=[(22,H-215,330,155,"SEM","sem"),(365,H-215,330,155,"EDS Spectrum","spectrum"),(22,H-380,330,155,"EDS Map","eds_map"),(365,H-380,330,155,"Element Maps","element_maps")]
         for x,y,w,h,title,key in boxes:
             c.setStrokeColorRGB(.82,.86,.89); c.rect(x,y,w,h)
             c.setFillColorRGB(.05,.18,.28); c.setFont("Helvetica-Bold",7); c.drawString(x+7,y+h-12,title)

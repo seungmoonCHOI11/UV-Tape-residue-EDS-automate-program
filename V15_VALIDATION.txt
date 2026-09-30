@@ -1,0 +1,34 @@
+UV Tape Residue EDS v15 validation
+
+Source reference:
+- UV-Tape-residue-EDS-v13.6.zip
+- UV-Tape-residue-EDS-v14-GITHUB.zip
+- UV-Tape-EDS-v13-point1-test-v3.zip
+
+Verified:
+1. v13.6/v14 frontend AppClient was retained and patched, not replaced with a standalone HTML prototype.
+2. Initial project loading screen remains.
+3. Latest project / Supabase loading remains.
+4. Re-analyze endpoint and progress polling remain.
+5. Human result preservation remains in re-analysis path.
+6. R2 source PDF reuse remains in re-analysis path.
+7. Page-1 SEM crop exact v3 boundary: 98,207 to 726,625.
+8. Page-1 Full EDS crop exact v3 boundary: 101,818 to 1203,1552.
+9. Page-2 SE exact v3 boundary: 101,190 to 643,552.
+10. Page-2 C exact v3 boundary: 658,190 to 1200,552.
+11. Page-2 N exact v3 boundary: 101,566 to 643,928.
+12. Page-2 O exact v3 boundary: 658,566 to 1200,928.
+13. Page-2 Si exact v3 boundary: 101,943 to 643,1305.
+14. v3 crop dimensions reproduced: SEM 628x418, Full EDS 1102x734, each element 542x362.
+15. Point-1 worker test completed against the supplied source PDF.
+16. Point-1 output: Residue, score 0.7014, morphology 0.6974, C score 0.8619, O score 0.7845, spatial overlap 38.81%.
+17. Point-1 SEM overlay shows red rectangular ROI and yellow local ring.
+18. Point-1 C/N/O/Si overlays use white ROI boxes and yellow local ring.
+19. Blank/no-candidate synthetic test returns Review rather than automatically calling it Residue.
+20. Full Element Maps original panel is not displayed in Verification or Image Lightbox.
+21. Verification displays SEM + Full EDS + SE/C/N/O/Si.
+22. CV RESULT displays SEM MORPHOLOGY, C SCORE, O SCORE, SPATIAL OVERLAP.
+
+Build limitation:
+- Backend Python syntax check passed.
+- Frontend npm install could not finish within the available execution timeout in this environment, so a Next.js production build could not be completed here. The package.json remains the project's original dependency configuration.
