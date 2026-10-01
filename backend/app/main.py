@@ -568,7 +568,7 @@ def asset(point_id:str,asset_type:str):
             aliases = {
                 "sem_residue_overlay": ["sem"],
                 "eds_co_overlay": ["eds_map", "element_maps_enhanced", "full_element_maps_original"],
-                "eds_map": ["eds_co_overlay", "element_maps_enhanced", "full_element_maps_original"],
+                "eds_map": ["full_element_maps_original", "element_maps_enhanced"],
                 "c_map_enhanced_overlay": ["c_map"],
                 "n_map_enhanced_overlay": ["n_map"],
                 "o_map_enhanced_overlay": ["o_map"],

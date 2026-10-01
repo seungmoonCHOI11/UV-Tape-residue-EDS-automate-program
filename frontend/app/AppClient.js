@@ -189,7 +189,7 @@ function Review({p,idx,total,prev,next,human}){
  const confidence=f.confidence||"-";
  const maps={
    sem:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
-   eds:[dynamicAsset(p,"eds_co_overlay"),p.assets?.eds_co_overlay,p.assets?.eds_map,p.assets?.element_maps_enhanced,p.assets?.full_element_maps_original],
+   eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
    c:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
    o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
@@ -204,7 +204,7 @@ function Review({p,idx,total,prev,next,human}){
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
-    <div className="verificationImages"><Visual title="SEM / Residue ROI" sources={maps.sem}/><Visual title="Full EDS Map (C + O)" sources={maps.eds}/></div>
+    <div className="verificationImages"><Visual title="SEM / Residue ROI" sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
     <div className="v21ElementStrip">
       <div className="focusPanel"><b>C Map (ROI)</b><ImageWithFallback sources={maps.c} alt="C map with ROI"/></div>
       <div className="focusPanel"><b>O Map (ROI)</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
@@ -261,7 +261,7 @@ function ImageLightbox({p,close}){
  const f=p.features||{};
  const scoreValue=displayScore(p);
  const sem=[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem];
- const eds=[dynamicAsset(p,"eds_co_overlay"),p.assets?.eds_co_overlay,p.assets?.eds_map,p.assets?.element_maps_enhanced,p.assets?.full_element_maps_original];
+ const eds=[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original];
  const maps=[["SE",[p.assets?.se_map_roi_ring,p.assets?.se_map]],["C",[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map]],["O",[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map]]];
  return <div className="lightbox" onClick={close}><div className="lightboxCard" onClick={e=>e.stopPropagation()}><div className="lightboxHead"><div><b>{p.power} · {p.time}</b><span>W{p.wafer} · P{p.point} · {p.zone}</span></div><button className="secondary" onClick={close}>Close</button></div><div className="lightboxGrid"><div><small>SEM / Residue ROI</small><ImageWithFallback sources={sem} alt="SEM overlay"/></div><div><small>Full EDS Map</small><ImageWithFallback sources={eds} alt="Full EDS Map"/></div></div><div className="elementDetailGrid">{maps.map(([label,sources])=><div key={label}><small>{label} / ROI</small><ImageWithFallback sources={sources} alt={`${label} map`}/></div>)}</div><div className="lightboxResult"><b>{p.human_result||p.features?.result||"Ambiguous"}</b><span>Score {typeof scoreValue==="number"?scoreValue:"-"} / 100 · {p.confidence||f.confidence||"-"}</span></div></div></div>
 }
