@@ -227,24 +227,26 @@
 @media(max-width:900px){.verificationLayout{grid-template-columns:1fr!important}.analysisResultCard{height:auto!important}.verificationImages,.v21ElementStrip{grid-template-columns:1fr 1fr!important}}
 @media(max-width:560px){.verificationImages,.v21ElementStrip{grid-template-columns:1fr!important}.verificationImages .visual img,.v21ElementStrip .focusPanel img{height:240px!important}}
 
-/* V21.7 UI readability patch: enlarge Analysis Result typography and color ROI/Global multipliers. */
-.analysisResultCard .analysisResultHead small{font-size:11px!important;letter-spacing:.09em!important}
-.analysisResultCard .resultTitle{font-size:11px!important;padding:6px 10px!important}
-.analysisResultCard .bigScore{font-size:60px!important;margin-top:13px!important}
-.analysisResultCard .bigScore span{font-size:18px!important}
-.analysisResultCard .confidenceText{font-size:10px!important;margin-top:6px!important;padding-bottom:13px!important}
-.analysisResultCard .barMetric>div{font-size:9px!important}
-.analysisResultCard .barMetric b{font-size:9px!important}
-.analysisResultCard .ratioList{padding:10px 0!important}
-.analysisResultCard .ratioList>div{font-size:9.5px!important;padding:6px 0!important}
-.analysisResultCard .ratioList span:first-child{color:#5f6d80!important}
-.analysisResultCard .ratioList b{font-size:9.5px!important;font-weight:800!important}
-.analysisResultCard .ratioMultiplier{font-weight:900!important}
-.analysisResultCard .ratioMultiplier.positive{color:#1f9d63!important}
-.analysisResultCard .ratioMultiplier.negative{color:#d5424d!important}
+/* V21.8 UI readability patch: clearly visible Analysis Result typography and ROI/Global multiplier colors. */
+.analysisResultCard .analysisResultHead small{font-size:14px!important;letter-spacing:.10em!important;font-weight:800!important}
+.analysisResultCard .resultTitle{font-size:13px!important;padding:7px 12px!important;font-weight:800!important}
+.analysisResultCard .bigScore{font-size:72px!important;line-height:1!important;margin-top:16px!important;font-weight:800!important}
+.analysisResultCard .bigScore span{font-size:21px!important;font-weight:700!important}
+.analysisResultCard .confidenceText{font-size:12px!important;margin-top:8px!important;padding-bottom:16px!important}
+.analysisResultCard .barMetric>div{font-size:11px!important}
+.analysisResultCard .barMetric b{font-size:11px!important}
+.analysisResultCard .ratioList{padding:13px 0!important}
+.analysisResultCard .ratioList>div{font-size:12px!important;padding:7px 0!important}
+.analysisResultCard .ratioList span:first-child{color:#4f5d70!important;font-size:12px!important;font-weight:600!important}
+.analysisResultCard .ratioList b{font-size:12px!important;font-weight:800!important}
+.analysisResultCard .ratioMultiplier{font-size:12px!important;font-weight:900!important}
+.analysisResultCard .ratioMultiplier.positive{color:#159447!important}
+.analysisResultCard .ratioMultiplier.negative{color:#d12f3d!important}
 .analysisResultCard .ratioMultiplier.neutral{color:#667386!important}
-.analysisResultCard .roiInfo>b{font-size:10px!important}
-.analysisResultCard .roiInfo>div{font-size:9px!important;padding:5px 0!important}
-.analysisResultCard .v21Rule b{font-size:11px!important}
-.analysisResultCard .v21Rule span{font-size:9px!important}
-.analysisResultCard .v21Rule small{font-size:8px!important}
+.analysisResultCard .roiInfo>b{font-size:13px!important}
+.analysisResultCard .roiInfo>div{font-size:11px!important;padding:6px 0!important}
+.analysisResultCard .roiInfo>div span{font-size:11px!important}
+.analysisResultCard .roiInfo>div strong{font-size:11px!important}
+.analysisResultCard .v21Rule b{font-size:13px!important}
+.analysisResultCard .v21Rule span{font-size:11px!important}
+.analysisResultCard .v21Rule small{font-size:10px!important}
