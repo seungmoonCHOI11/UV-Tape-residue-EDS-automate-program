@@ -1,6 +1,6 @@
 "use client";
 import {useEffect,useRef,useState} from "react";
-import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2} from "lucide-react";
+import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2,MousePointer2,RotateCcw} from "lucide-react";
 
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
 const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5",points:"1-9"};
@@ -109,6 +109,16 @@ function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toL
      setVerificationOpen(false);notify("모든 Point의 검증이 완료되었습니다.");
    }catch(e){notify(e.message||"검증 결과 저장 실패")}
  }
+ async function saveHumanRoi(polygon){
+   const p=points[idx]; if(!p)return;
+   try{
+     const r=await fetch(`${API}/api/points/${p.id}/human-roi`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polygon})});
+     const j=await r.json(); if(!r.ok)throw new Error(j.detail||"ROI 저장 실패");
+     setPoints(points.map(z=>z.id===p.id?j:z));
+     notify("Human ROI 저장 완료 · C/O 재계산 및 Ground Truth 데이터 저장");
+     return j;
+   }catch(e){notify(e.message||"ROI 저장 실패");throw e;}
+ }
  async function runProjectAI(){if(!project)return notify("먼저 분석 데이터를 불러오세요.");setAiBusy(true);notify("OpenAI가 전체 실험 결과를 분석하고 있습니다...");try{const r=await fetch(`${API}/api/projects/${project}/ai-analysis`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"AI analysis failed");setAiAnalysis(j);setPage("AI Analysis");notify("AI 연구 분석 완료")}catch(e){notify("AI 분석 오류: "+e.message)}finally{setAiBusy(false)}}
 async function reanalyzeProject(){if(!project)return notify("현재 프로젝트가 없습니다.");if(!window.confirm("R2에 저장된 원본 PDF로 현재 프로젝트를 다시 분석할까요? 기존 분석 결과가 새 분석 결과로 갱신됩니다."))return;setBusy(true);try{const r=await fetch(`${API}/api/projects/${project}/reanalyze`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"re-analysis failed");const poll=async()=>{const pr=await fetch(`${API}/api/jobs/${j.job_id}`);const st=await pr.json();setProgress(st.progress||0);setProgressPhase(st.phase||"reanalysis");setProgressMessage(st.message||"재분석 중...");if(st.status==="completed"){setBusy(false);const loaded=await loadData(project);const ni=loaded.findIndex(z=>!z.human_result);if(ni>=0)setIdx(ni);setVerificationOpen(loaded.length>0);notify("기존 데이터 재분석 완료");setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},700);return;}if(st.status==="failed"){setBusy(false);throw new Error(st.error||"재분석 실패");}setTimeout(poll,1200)};await poll()}catch(e){setBusy(false);notify("재분석 오류: "+e.message)}}
 
@@ -125,10 +135,10 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div><div className="project"><small>PROJECT</small><strong>{project?"UV Tape Residue":"No project selected"}</strong><span>{points.length} points</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition Compare",GitCompare],["Reports",FileText]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={setPage}/>}
  {page==="New Analysis"&&<UploadPage input={input} files={files} setFiles={setFiles} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} dragging={dragging} setDragging={setDragging} addFiles={addFiles} expectedPoints={expectedPoints} busy={busy} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory}/>} 
- {page==="Verification"&&(p?<Review p={p} idx={idx} total={points.length} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human}/>:<Empty title="분석 데이터가 없습니다" text="EDS PDF를 업로드하면 Point별 분석 결과가 이 화면에 표시됩니다." go={()=>setPage("New Analysis")}/>)}
+ {page==="Verification"&&(p?<Review p={p} idx={idx} total={points.length} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human} saveHumanRoi={saveHumanRoi}/>:<Empty title="분석 데이터가 없습니다" text="EDS PDF를 업로드하면 Point별 분석 결과가 이 화면에 표시됩니다." go={()=>setPage("New Analysis")}/>)}
  {page==="AI Analysis"&&<AIAnalysis points={points} analysis={aiAnalysis} busy={aiBusy} run={runProjectAI}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
- {page==="Condition Compare"&&<Compare points={points}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} </main>{verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} close={()=>setVerificationOpen(false)} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human}/>} {busy&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition Compare"&&<Compare points={points}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} </main>{verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} close={()=>setVerificationOpen(false)} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human} saveHumanRoi={saveHumanRoi}/>} {busy&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">Project data loading</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>Loading project data</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -179,7 +189,7 @@ function MetricBar({label,value,color}){
 }
 function metricValue(v){return Math.round(v*100)}
 function dynamicAsset(p,type){return p?.id?`/api/assets/${encodeURIComponent(p.id)}/${type}`:null}
-function Review({p,idx,total,prev,next,human}){
+function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
  const score=displayScore(p);
  const coverage=typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
@@ -194,7 +204,8 @@ function Review({p,idx,total,prev,next,human}){
    o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
- const cRatio=ratio(f.c_roi_mean,f.c_global_mean), oRatio=ratio(f.o_roi_mean,f.o_global_mean);
+ const hasHumanROI=Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3;
+ const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
  const ratioClass=(x)=>x==null?"neutral":x>=1.50?"positive":x<=0.90?"negative":"neutral";
  const ratioText=(x)=>x==null?"-":fmtRatio(x);
@@ -211,6 +222,7 @@ function Review({p,idx,total,prev,next,human}){
       <div className="focusPanel"><b>C Map (ROI)</b><ImageWithFallback sources={maps.c} alt="C map with ROI"/></div>
       <div className="focusPanel"><b>O Map (ROI)</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
     </div>
+    <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
    </div>
    <section className="analysisResultCard" aria-label="Analysis Result">
     <div className="analysisResultHead"><small>ANALYSIS RESULT</small><strong className={`resultTitle ${resultLabel.toLowerCase().replace(/[^a-z]+/g,"-")}`}>{resultLabel}</strong></div>
@@ -223,20 +235,32 @@ function Review({p,idx,total,prev,next,human}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=1.50?'#159447':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=1.50?'#159447':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=1.50?'#159447':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=1.50?'#159447':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
     <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>둘 다 <strong>1.50× 이상</strong>이어야 Residue 후보입니다. 1.20× 미만은 배경 수준으로 취급합니다.</span></div>
+    <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{hasHumanROI?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
     <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{f.roi_area_px?`${f.roi_area_px.toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong className={coverage!=null&&coverage>=80?'good':''}>{coverage==null?'-':`${coverage}%${coverage>=80?'  (Good)':''}`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
     <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>0–100 calibrated score. Low ROI quality cannot force an automatic Residue decision.</small></div>
    </section>
   </div>
-  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>SEM에서 검출된 실제 residue mask를 기준으로 C/O EDS 영역에 동일한 contour를 표시합니다. N, Si는 Verification에서 표시하지 않습니다. 새 Analysis / Re-analysis에서는 Local Ring을 생성하거나 판정 기준으로 사용하지 않습니다.</span></div>
+  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 Ground Truth 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>
   <div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>NON-RESIDUE (N)</button><button className="approve" onClick={()=>human("Residue")}>RESIDUE (R)</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> SKIP (S)</button></div>
   <div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> Previous</button><button className="secondary" onClick={next}>Next <ChevronRight size={14}/></button></div>
  </div>
 }
-function VerificationModal({p,idx,total,close,human,prev,next}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human}/></div></div>}
+function HumanRoiEditor({p,saveHumanRoi}){
+ const [open,setOpen]=useState(false), [pts,setPts]=useState([]), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
+ const canvasRef=useRef(); const wrapRef=useRef();
+ useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); setPts(Array.isArray(p.features?.human_roi_polygon)?p.features.human_roi_polygon:[]);},[open,p]);
+ useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);if(pts.length){ctx.beginPath();pts.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();ctx.fillStyle="rgba(255,40,40,.16)";ctx.fill();ctx.strokeStyle="#ff2525";ctx.lineWidth=3;ctx.stroke();pts.forEach(q=>{ctx.beginPath();ctx.arc(q.x*c.width,q.y*c.height,5,0,Math.PI*2);ctx.fillStyle="#fff";ctx.fill();ctx.strokeStyle="#ff2525";ctx.stroke()})}};img.src=src;},[open,src,pts]);
+ if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)?"Edit Human ROI":"Set Human ROI"}</button><span>{Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
+ const click=e=>{const c=canvasRef.current;if(!c)return;const r=c.getBoundingClientRect();setPts(v=>[...v,{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))}])};
+ const clear=()=>setPts([]); const save=async()=>{if(pts.length<3)return;setSaving(true);try{await saveHumanRoi(pts);setOpen(false)}finally{setSaving(false)}};
+ return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span>SEM에서 residue 외곽을 순서대로 클릭하세요. 마지막에 3점 이상이면 저장할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} onClick={click}/></div><div className="humanRoiActions"><button className="secondary" onClick={clear}><RotateCcw size={14}/>Clear</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||pts.length<3} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+}
+
+function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).filter(Boolean))];

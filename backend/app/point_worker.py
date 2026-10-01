@@ -744,6 +744,63 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "classification_note":"Residue requires BOTH C and O ROI/Global ratios to be clearly elevated (>=1.50x each). A strong SEM shape, shadow/edge, or a single elevated element cannot by itself create a Residue result. Ratios below 1.20x are treated as background-like; 1.20-1.49x is moderate and cannot reach the Residue band. The whole analytical image is used as the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
     },roi
 
+
+def polygon_to_mask(shape, polygon):
+    """Create an analytical ROI mask from normalized [x,y] polygon points."""
+    h,w=shape[:2]
+    mask=np.zeros((h,w),np.uint8)
+    if not isinstance(polygon,list) or len(polygon)<3:
+        return mask
+    pts=[]
+    for item in polygon:
+        try:
+            if isinstance(item,dict): x=float(item.get("x")); y=float(item.get("y"))
+            else: x=float(item[0]); y=float(item[1])
+            if not np.isfinite(x) or not np.isfinite(y): continue
+            pts.append([int(np.clip(round(x*(w-1)),0,w-1)),int(np.clip(round(y*(h-1)),0,h-1))])
+        except Exception:
+            continue
+    if len(pts)<3: return mask
+    cv2.fillPoly(mask,[np.asarray(pts,np.int32)],255)
+    mask[~(analytical_mask((h,w))>0)]=0
+    return mask
+
+
+def ai_boxes_to_mask(shape, boxes):
+    h,w=shape[:2]; mask=np.zeros((h,w),np.uint8)
+    for b in boxes or []:
+        try:
+            x=float(b.get("x",0)); y=float(b.get("y",0)); bw=float(b.get("w",0)); bh=float(b.get("h",0))
+            x0=int(np.clip(x*w,0,w-1)); y0=int(np.clip(y*h,0,h-1)); x1=int(np.clip((x+bw)*w,0,w)); y1=int(np.clip((y+bh)*h,0,h))
+            if x1>x0 and y1>y0: cv2.rectangle(mask,(x0,y0),(x1-1,y1-1),255,-1)
+        except Exception: continue
+    mask[~(analytical_mask((h,w))>0)]=0
+    return mask
+
+
+def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
+    """Recalculate element evidence on a user-confirmed ROI without changing auto CV results."""
+    roi=(roi>0).astype(np.uint8)*255
+    cm=global_roi_metrics(c_map,cv2.resize(roi,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST),"C")
+    om=global_roi_metrics(o_map,cv2.resize(roi,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST),"O")
+    nm=global_roi_metrics(n_map,cv2.resize(roi,(n_map.shape[1],n_map.shape[0]),interpolation=cv2.INTER_NEAREST),"N")
+    sm=global_roi_metrics(si_map,cv2.resize(roi,(si_map.shape[1],si_map.shape[0]),interpolation=cv2.INTER_NEAREST),"Si")
+    rq=roi_quality_metrics(sem_ref,roi,1)
+    cr=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
+    orat=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
+    both=cr>=1.50 and orat>=1.50
+    moderate=cr>=1.20 and orat>=1.20
+    return {
+        "human_roi_area_px":int(cv2.countNonZero(roi)),
+        "human_roi_quality":rq["roi_quality"],"human_roi_fill_ratio":rq["roi_fill_ratio"],"human_roi_component_count":rq["roi_component_count"],
+        "human_c_roi_mean":cm["roi_mean"],"human_c_global_mean":cm["global_mean"],"human_c_ratio":round(cr,4),"human_c_zscore":cm["zscore"],"human_c_coverage":cm["coverage"],
+        "human_o_roi_mean":om["roi_mean"],"human_o_global_mean":om["global_mean"],"human_o_ratio":round(orat,4),"human_o_zscore":om["zscore"],"human_o_coverage":om["coverage"],
+        "human_n_ratio":round((nm["roi_mean"]/nm["global_mean"]) if nm["global_mean"] else 0.0,4),
+        "human_si_ratio":round((sm["roi_mean"]/sm["global_mean"]) if sm["global_mean"] else 0.0,4),
+        "human_roi_both_strong":bool(both),"human_roi_both_moderate":bool(moderate),
+        "human_roi_rule_result":"Residue candidate" if both else "Non-residue candidate",
+    }
+
 def run(payload):
     outdir=Path(payload["output_dir"]); outdir.mkdir(parents=True,exist_ok=True); paths={}
     for local_no,info in enumerate(payload["pages"],1):

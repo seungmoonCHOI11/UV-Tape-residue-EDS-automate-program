@@ -2,7 +2,7 @@
 import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 import cv2, numpy as np
@@ -498,7 +498,7 @@ def _dynamic_asset(point_id: str, asset_type: str):
     # Import lazily so the normal FastAPI startup remains lightweight.
     from .point_worker import (
         residue_features, detect_residue_candidates, make_box_overlay,
-        make_co_overlay, enhance_element_map, analytical_mask,
+        make_co_overlay, enhance_element_map, analytical_mask, polygon_to_mask,
     )
 
     c = load("c_map")
@@ -509,6 +509,10 @@ def _dynamic_asset(point_id: str, asset_type: str):
     if c is not None and o is not None and n is not None and si is not None:
         try:
             features, roi = residue_features(sem, c, o, n, si)
+            stored_polygon=(RECORDS.get(point_id) or {}).get("features",{}).get("human_roi_polygon")
+            if stored_polygon:
+                human_mask=polygon_to_mask(sem.shape,stored_polygon)
+                if cv2.countNonZero(human_mask)>=20: roi=human_mask
         except Exception:
             features, roi = None, None
     else:
@@ -539,6 +543,72 @@ def _dynamic_asset(point_id: str, asset_type: str):
     cv2.imwrite(str(target), out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return str(target) if target.exists() else None
 
+
+
+def _load_raw_point_image(point_id: str, label: str):
+    """Load an original SEM/EDS image for manual ROI recalculation."""
+    r=RECORDS.get(point_id)
+    local=(r.get("assets") or {}).get(label) if r else None
+    if local and Path(local).exists():
+        im=cv2.imread(str(local),cv2.IMREAD_COLOR)
+        if im is not None: return im
+    if not r2.configured: return None
+    keys=_collect_asset_keys(point_id); key=keys.get(label)
+    if not key: return None
+    safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id; outdir.mkdir(parents=True,exist_ok=True)
+    cache=outdir/f"manual_raw_{label}.jpg"
+    try:
+        if not cache.exists(): r2.download_file(key,cache)
+        im=cv2.imread(str(cache),cv2.IMREAD_COLOR)
+        return im if im is not None else None
+    except Exception: return None
+
+
+def _human_roi_mask_for_point(point_id: str, shape):
+    r=RECORDS.get(point_id) or {}
+    f=r.get("features") or {}
+    return __import__('backend.app.point_worker',fromlist=['polygon_to_mask']).polygon_to_mask(shape,f.get("human_roi_polygon"))
+
+
+def _invalidate_dynamic_assets(point_id: str):
+    safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id
+    for name in ["sem_dynamic_overlay.jpg","c_dynamic_overlay.jpg","o_dynamic_overlay.jpg","eds_dynamic_overlay.jpg"]:
+        try: (outdir/name).unlink(missing_ok=True)
+        except Exception: pass
+
+
+@app.post("/api/points/{point_id}/human-roi")
+def human_roi(point_id: str, payload: dict = Body(...)):
+    if point_id not in RECORDS:
+        point(point_id)
+    polygon=payload.get("polygon") if isinstance(payload,dict) else None
+    if not isinstance(polygon,list) or len(polygon)<3:
+        raise HTTPException(400,"ROI polygon must contain at least 3 points.")
+    from .point_worker import polygon_to_mask, human_roi_features, ai_boxes_to_mask
+    sem=_load_raw_point_image(point_id,"sem")
+    c=_load_raw_point_image(point_id,"c_map"); o=_load_raw_point_image(point_id,"o_map")
+    n=_load_raw_point_image(point_id,"n_map"); si=_load_raw_point_image(point_id,"si_map")
+    if any(x is None for x in [sem,c,o,n,si]):
+        raise HTTPException(503,"Original SEM/C/O/N/Si assets are not available for manual ROI analysis.")
+    mask=polygon_to_mask(sem.shape,polygon)
+    if cv2.countNonZero(mask)<20: raise HTTPException(400,"ROI is too small or outside the analytical image.")
+    hf=human_roi_features(sem,c,o,n,si,mask)
+    r=RECORDS[point_id]; f=dict(r.get("features") or {})
+    f.update(hf); f["human_roi_polygon"]=[{"x":round(float(q.get("x",0)),6),"y":round(float(q.get("y",0)),6)} for q in polygon if isinstance(q,dict)]
+    f["human_roi_saved_at"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    f["human_roi_source"]="manual_verification"
+    ai_boxes=f.get("ai_roi_boxes") or []
+    if ai_boxes:
+        ai_mask=ai_boxes_to_mask(sem.shape,ai_boxes)
+        inter=cv2.countNonZero(cv2.bitwise_and(mask,ai_mask)); union=cv2.countNonZero(cv2.bitwise_or(mask,ai_mask))
+        f["human_roi_vs_ai_iou"]=round(inter/max(union,1),4)
+    r["features"]=f
+    _invalidate_dynamic_assets(point_id)
+    if db.configured():
+        db.upsert_analysis(point_id,f)
+        try: db.add_review_history(point_id,r.get("human_result"),r.get("human_result"),"Manual ROI saved; C/O re-evaluated and stored as Ground Truth candidate.")
+        except Exception as e: print(f"[human_roi_history] {e}")
+    return public_record(r)
 
 @app.get("/api/assets/{point_id}/{asset_type}")
 def asset(point_id:str,asset_type:str):

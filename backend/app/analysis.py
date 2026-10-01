@@ -167,7 +167,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
             # the final Residue/Non-residue/Review classification.
             try:
                 from .ai import ai_available, analyze_roi_boxes_with_openai
-                ai_mode = __import__("os").getenv("OPENAI_ROI_MODE", "uncertain").lower()
+                ai_mode = __import__("os").getenv("OPENAI_ROI_MODE", "all").lower()
                 f = record.get("features") or {}
                 uncertain = (
                     f.get("result") == "Review" or
@@ -194,6 +194,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                             refined["features"]["ai_roi_box_count"] = len(boxes)
                             refined["features"]["ai_roi_model"] = ai_hint.get("model") or __import__("os").getenv("OPENAI_ROI_MODEL", __import__("os").getenv("OPENAI_MODEL", "gpt-5.6-luna"))
                             refined["features"]["ai_roi_notes"] = ai_hint.get("notes", "")
+                            refined["features"]["ai_roi_boxes"] = boxes
                             record = refined
                         else:
                             record.setdefault("features", {})["ai_roi_used"] = False

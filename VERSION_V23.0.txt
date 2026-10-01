@@ -1,0 +1,2 @@
+UV-Tape-residue-EDS v23.0
+Core: OpenAI-assisted ROI proposal + manual Human ROI Ground Truth workflow.
