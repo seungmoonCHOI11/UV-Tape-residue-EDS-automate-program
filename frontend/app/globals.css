@@ -250,3 +250,20 @@
 .analysisResultCard .v21Rule b{font-size:13px!important}
 .analysisResultCard .v21Rule span{font-size:11px!important}
 .analysisResultCard .v21Rule small{font-size:10px!important}
+
+/* v22 dual-channel residue rule + clearer Verification typography */
+.analysisResultCard .analysisResultHead small{font-size:18px!important;letter-spacing:.08em!important;font-weight:900!important;color:#526074!important}
+.analysisResultCard .resultTitle{font-size:15px!important;padding:8px 14px!important;font-weight:900!important}
+.analysisResultCard .bigScore{font-size:82px!important;line-height:.95!important;margin-top:18px!important;font-weight:900!important}
+.analysisResultCard .bigScore span{font-size:24px!important}
+.analysisResultCard .ratioList>div{font-size:14px!important;padding:8px 0!important}
+.analysisResultCard .ratioList span:first-child{font-size:14px!important;font-weight:700!important}
+.analysisResultCard .ratioList b{font-size:14px!important;font-weight:900!important}
+.analysisResultCard .ratioMultiplier{font-size:14px!important;font-weight:900!important}
+.analysisResultCard .ratioMultiplier.positive{color:#159447!important}
+.analysisResultCard .ratioMultiplier.negative{color:#d12f3d!important}
+.analysisResultCard .ratioMultiplier.neutral{color:#667386!important}
+.ratioRuleNote{margin:8px 0 2px;padding:9px 11px;border:1px solid #e6ebf2;border-radius:8px;background:#f8fafc;display:flex;flex-direction:column;gap:3px}
+.ratioRuleNote b{font-size:12px;color:#26354a}
+.ratioRuleNote span{font-size:10px;line-height:1.5;color:#68778b}
+.ratioRuleNote strong{color:#159447;font-weight:900}

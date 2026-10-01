@@ -442,7 +442,10 @@ def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
     ys,xs=np.where(cand)
     if len(xs):
         x0,x1=int(xs.min()),int(xs.max()); y0,y1=int(ys.min()),int(ys.max())
-        px=max(10,int((x1-x0+1)*0.18)); py=max(10,int((y1-y0+1)*0.18))
+        # Keep the expansion tight: the old 18% padding frequently captured the
+        # long SEM charging/shadow halo around a real residue. The physical body
+        # should define the ROI; expansion is only for reconnecting a broken edge.
+        px=max(7,int((x1-x0+1)*0.10)); py=max(7,int((y1-y0+1)*0.10))
         region=np.zeros_like(grown)
         cv2.rectangle(region,(max(4,x0-px),max(4,y0-py)),
                       (min(gray.shape[1]-5,x1+px),min(int(gray.shape[0]*.84)-2,y1+py)),255,-1)
@@ -465,7 +468,28 @@ def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
     if cv2.countNonZero(clean)>0:
         cvals=signal[clean>0]
         if float(np.median(cvals)) < max(0.8, weak*0.80):
-            return core
+            clean=core.copy()
+
+    # Coherence guard: a physical residue should be one main body (with only very
+    # nearby fragments). Do not let dozens of SEM grain speckles survive as one ROI.
+    n2,lab2,st2,_=cv2.connectedComponentsWithStats(clean)
+    if n2>1:
+        largest=max(range(1,n2),key=lambda i:int(st2[i,cv2.CC_STAT_AREA]))
+        keep=np.zeros_like(clean)
+        keep[lab2==largest]=255
+        lx,ly,lw,lh=[int(st2[largest,j]) for j in range(4)]
+        lcx=lx+lw/2; lcy=ly+lh/2; ldiag=max(float(np.hypot(lw,lh)),10.0)
+        largest_area=max(int(st2[largest,cv2.CC_STAT_AREA]),1)
+        for i in range(1,n2):
+            if i==largest: continue
+            area=int(st2[i,cv2.CC_STAT_AREA])
+            if area<max(12,int(largest_area*0.025)): continue
+            x,y,ww,hh=[int(st2[i,j]) for j in range(4)]
+            gapx=max(lx-x, x-(lx+lw), 0); gapy=max(ly-y, y-(ly+lh), 0)
+            dist=np.hypot((x+ww/2)-lcx,(y+hh/2)-lcy)
+            if (gapx<=max(5,int(ldiag*.08)) and gapy<=max(5,int(ldiag*.08))) or dist<=ldiag*.22:
+                keep[lab2==i]=255
+        clean=keep
     return clean if cv2.countNonZero(clean)>=max(20,int(core_count*0.45)) else core
 
 def roi_quality_metrics(sem_ref, roi, selected_count=1):
@@ -631,10 +655,23 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     # C/O channel receives a bounded visual-evidence bonus; weak/noisy candidates do not.
     element_max=max(ce,oe); element_min=min(ce,oe)
     rq=roi_quality_metrics(sem_ref,roi,len(selected))
-    # Element maps are supporting evidence, not a substitute for a physically
-    # different SEM region.  In particular, an edge/rim can look strong in O while
-    # its C signal remains background-like; that must not become a high residue score.
-    element_support=float(np.clip(.70*element_max+.30*element_min,0,1))
+    # IMPORTANT: residue is only a residue when BOTH C and O are visibly elevated
+    # versus the whole analytical field. A strong SEM shape or a single-channel
+    # increase must not override this rule. The lab rule used here is a clear
+    # >=1.50x ROI/Global increase in BOTH C and O. 1.00~1.49x is treated as
+    # weak/moderate evidence, not as residue evidence.
+    c_ratio=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
+    o_ratio=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
+    STRONG_RATIO=1.50
+    MODERATE_RATIO=1.20
+    c_dual=float(np.clip((c_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
+    o_dual=float(np.clip((o_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
+    dual_element_support=float(min(c_dual,o_dual))
+    both_strong=(c_ratio>=STRONG_RATIO and o_ratio>=STRONG_RATIO)
+    both_moderate=(c_ratio>=MODERATE_RATIO and o_ratio>=MODERATE_RATIO)
+    # Keep the old channel scores visible as diagnostics, but do not let one
+    # channel create a high residue score by itself.
+    element_support=float(np.clip(.50*ce+.50*oe,0,1))
     gray_final=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY).astype(np.float32)
     bg_final=cv2.GaussianBlur(gray_final,(0,0),25)
     d_final=gray_final-bg_final
@@ -645,27 +682,20 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     ivals=d_final[er_final>0]
     sem_interior_score=float(sigmoid((abs(np.median(ivals))-3.0)/2.0)) if ivals.size else 0.0
     visual_evidence=float(np.clip(.55*morph+.30*sem_interior_score+.15*sem_contrast_score,0,1))
-    visual_bonus=0.10 if (visual_evidence>=0.88 and rq["roi_quality"]>=0.70 and element_support>=0.45) else 0.0
-    raw_score=float(np.clip(.70*visual_evidence+.20*element_support+.07*spatial+.03*rq["roi_quality"]+visual_bonus,0,1))
-    # Score calibration requested by the lab workflow:
-    # - keep the displayed score on a true 0~100 scale
-    # - map the previous 85-point level to the new 70-point level
-    # - keep 0 -> 0 and 100 -> 100
-    # - do NOT use a flat -15 point offset (that would cap the maximum at 85)
-    #
-    # Below 85, compress the score slightly so the old 70~85 band does not become
-    # overly generous. Above 85, expand the upper band so genuinely strong points
-    # can still reach 100.
+    # Final score is deliberately dual-channel: SEM can identify a candidate, but
+    # only simultaneous C+O elevation can move the score into the Residue band.
+    raw_score=float(np.clip(.45*visual_evidence+.45*dual_element_support+.10*spatial,0,1))
     if raw_score <= 0.85:
         score=float(np.clip(raw_score*(0.70/0.85),0,0.70))
     else:
         score=float(np.clip(0.70+(raw_score-0.85)*(0.30/0.15),0.70,1.0))
-    # V21 decision bands requested for production review:
-    #   >= 70 : Residue, but only when the ROI is sufficiently defensible
-    #   60-69: Ambiguous (human Verification)
-    #   < 60 : Non-residue
-    # A high score with a poor/partial mask is deliberately downgraded to Ambiguous.
-    residue_gate=(score>=0.70 and rq["roi_quality"]>=0.55 and visual_evidence>=0.70 and (element_support>=0.35 or morph>=0.90))
+    # Hard diagnostic caps prevent a visually perfect edge/shadow ROI from becoming
+    # a Residue when one or both elemental channels remain background-like.
+    if not both_moderate:
+        score=min(score,0.55)
+    elif not both_strong:
+        score=min(score,0.65)
+    residue_gate=(score>=0.70 and both_strong and rq["roi_quality"]>=0.55 and visual_evidence>=0.65)
     if residue_gate:
         result="Residue"
     elif score>=0.60:
@@ -681,6 +711,9 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     else:
         conf="Low" if score<0.70 else "Medium"
     reasons=[]
+    if not both_strong: reasons.append("C_and_O_are_not_both_strongly_elevated")
+    if c_ratio<STRONG_RATIO: reasons.append("C_ratio_below_1.50x")
+    if o_ratio<STRONG_RATIO: reasons.append("O_ratio_below_1.50x")
     if ce<.55 or oe<.55: reasons.append("weak_C_or_O_global_evidence")
     if abs(ce-oe)>.30: reasons.append("C_O_disagreement")
     if spatial<.08: reasons.append("weak_C_O_high_signal_overlap")
@@ -690,9 +723,12 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21_6_visual_first","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"v22_dual_C_O_gate_piecewise_0_to_85_to_70_100","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":0.0,"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
+        "c_roi_global_ratio":round(c_ratio,4),"o_roi_global_ratio":round(o_ratio,4),
+        "c_dual_evidence":round(c_dual,4),"o_dual_evidence":round(o_dual,4),"dual_element_support":round(dual_element_support,4),
+        "both_c_o_strong":bool(both_strong),"both_c_o_moderate":bool(both_moderate),
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],
         "spatial_overlap":round(spatial*100,2),"n_enrichment":nm["contrast_pct"],"n_log2_ratio":nm["log2_ratio"],"n_zscore":nm["zscore"],"n_coverage":nm["coverage"],
         "si_enrichment":sm["contrast_pct"],"si_zscore":sm["zscore"],"morphology_score":round(float(morph),4),"cluster_score":round(spatial,4),
@@ -705,7 +741,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"The irregular ROI mask is compared with the whole analytical image after excluding the bottom metadata/scale-bar region. The Local Ring is removed and is not used as a baseline. The displayed score remains a true 0-100 score: previous 0 maps to 0, previous 85 maps to 70, and previous 100 maps to 100 using a piecewise calibration. Decision bands are Residue >=70, Ambiguous 60-69, and Non-residue <60; a high score with poor ROI quality remains Ambiguous."
+        "classification_note":"Residue requires BOTH C and O ROI/Global ratios to be clearly elevated (>=1.50x each). A strong SEM shape, shadow/edge, or a single elevated element cannot by itself create a Residue result. Ratios below 1.20x are treated as background-like; 1.20-1.49x is moderate and cannot reach the Residue band. The whole analytical image is used as the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
     },roi
 
 def run(payload):

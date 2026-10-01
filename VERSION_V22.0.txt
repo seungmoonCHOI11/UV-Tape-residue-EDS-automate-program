@@ -1,0 +1,11 @@
+UV-Tape-residue-EDS v22.0
+
+Core change: dual-channel C+O residue decision.
+- Residue requires C ROI/Global >= 1.50x AND O ROI/Global >= 1.50x.
+- <1.20x is background-like; 1.20-1.49x is moderate and cannot enter Residue band.
+- SEM morphology can select/refine the physical candidate, but cannot override weak C/O evidence.
+- Local Ring is not used.
+- Bottom metadata/scale-bar strip is excluded from analysis.
+- ROI expansion tightened and fragmented/shadow regions are suppressed with coherence filtering.
+- Verification typography increased. Ratio multiplier is green only for >=1.50x, red for <=0.90x, neutral otherwise.
+- OpenAI remains non-authoritative for Point-level classification; CV/OpenCV performs the Point decision.
