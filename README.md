@@ -69,3 +69,8 @@ See `README_V15.md` for the current production patch: verified v3 CROP coordinat
 - C/O are compared against the whole analytical field, not the yellow local ring.
 - Multiple strong, spatially distinct residue candidates may be combined into one analysis mask.
 - The yellow ring is visualization only.
+
+---
+
+## v21.6 patch
+See `V21.6_RELEASE.md`. v21.6 strengthens visual-first ROI/score behavior, suppresses broad SEM shadows, and reduces false high scores from edge-only substrate features while preserving the existing application flows.

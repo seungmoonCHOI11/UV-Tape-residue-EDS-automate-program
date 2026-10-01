@@ -109,12 +109,12 @@ def detect_residue_candidates(sem, max_candidates=8):
     # Direct signed local-background segmentation captures the full body of large
     # residues that top-hat can otherwise fragment into only a bright edge.
     raw=work.astype(np.float32)
-    raw_bg=cv2.GaussianBlur(raw,(0,0),17)
+    raw_bg=cv2.GaussianBlur(raw,(0,0),31)
     delta=raw-raw_bg
     dmed=float(np.median(delta)); dmad=float(np.median(np.abs(delta-dmed))); drs=max(1.0,1.4826*dmad)
     for polarity in (1,-1):
         signed=delta*polarity
-        threshold=max(7.0,2.45*drs)
+        threshold=max(9.0,2.80*drs)
         m=(signed>=threshold).astype(np.uint8)*255
         m=cv2.morphologyEx(m,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9,9)))
         m=cv2.morphologyEx(m,cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)))
@@ -387,7 +387,7 @@ def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
     if not np.any(cand): return np.zeros_like(candidate_mask)
 
     # Smooth background follows illumination/shading but not the physical object.
-    bg=cv2.GaussianBlur(gray,(0,0),13)
+    bg=cv2.GaussianBlur(gray,(0,0),25)
     signed=gray-bg
     vals=signed[cand]
     if vals.size<20: return candidate_mask.copy()
@@ -399,8 +399,8 @@ def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
     # Strong core: robust enough to reject ordinary background fluctuations.
     mad=float(np.median(np.abs(sigvals-np.median(sigvals))))*1.4826
     p55=float(np.percentile(sigvals,55)); p75=float(np.percentile(sigvals,75))
-    strong=max(2.2, p55+0.30*mad, p75*0.72)
-    weak=max(0.75, strong*0.34)
+    strong=max(3.0, p55+0.45*mad, p75*0.84)
+    weak=max(1.8, strong*0.52)
 
     # Seed from the candidate itself, but retain only its strongest physical part.
     core=((cand)&(signal>=strong)).astype(np.uint8)*255
@@ -442,7 +442,7 @@ def refine_candidate_mask(sem_ref, candidate_mask, polarity_hint=None):
     ys,xs=np.where(cand)
     if len(xs):
         x0,x1=int(xs.min()),int(xs.max()); y0,y1=int(ys.min()),int(ys.max())
-        px=max(14,int((x1-x0+1)*0.30)); py=max(14,int((y1-y0+1)*0.30))
+        px=max(10,int((x1-x0+1)*0.18)); py=max(10,int((y1-y0+1)*0.18))
         region=np.zeros_like(grown)
         cv2.rectangle(region,(max(4,x0-px),max(4,y0-py)),
                       (min(gray.shape[1]-5,x1+px),min(int(gray.shape[0]*.84)-2,y1+py)),255,-1)
@@ -553,14 +553,25 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         morph_z=(float(np.median(vals))-gmed)/gstd if vals.size else 0.0
         # Absolute local contrast allows both bright and dark residues, while area/fill
         # prevents isolated background grain from becoming a high-ranked candidate.
-        local_bg=cv2.GaussianBlur(gray,(0,0),17)
-        local_contrast=float(np.median(np.abs(vals-local_bg[cmask>0]))) if vals.size else 0.0
+        local_bg=cv2.GaussianBlur(gray,(0,0),25)
+        delta_local=gray.astype(np.float32)-local_bg
+        local_vals=delta_local[cmask>0]
+        local_contrast=float(np.median(np.abs(local_vals))) if local_vals.size else 0.0
+        # A residue should have a real interior signal, not merely a clean-looking edge
+        # around a substrate feature.  Measure the eroded interior separately so a thin
+        # outline/rim cannot score like a solid physical residue.
+        eroded=cv2.erode(cmask,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)),iterations=1)
+        interior_vals=delta_local[eroded>0]
+        interior_abs=float(abs(np.median(interior_vals))) if interior_vals.size else 0.0
+        interior_score=float(sigmoid((interior_abs-3.0)/2.0)) if interior_vals.size else 0.0
+        local_strength=float(np.clip(local_contrast/14.0,0,1))
         area_fraction=candidate_area/max(int(np.count_nonzero(am)),1)
         morphology_score=float(np.clip(
-            .42*sigmoid((abs(morph_z)-.65)/1.25)+
-            .28*np.clip(c["score"],0,1)+
-            .18*np.clip(local_contrast/18.0,0,1)+
-            .12*np.clip(np.sqrt(area_fraction)*16,0,1),0,1))
+            .38*sigmoid((abs(morph_z)-.90)/1.10)+
+            .24*interior_score+
+            .20*np.clip(c["score"],0,1)+
+            .12*local_strength+
+            .06*np.clip(np.sqrt(area_fraction)*16,0,1),0,1))
         spatial=float(np.clip(min(cm["coverage"],om["coverage"])/55.0,0,1))
         # Selection is intentionally SEM-first. C/O are supporting evidence only.
         # A tiny bright speck can have a strong EDS signal; it must not outrank a
@@ -620,8 +631,22 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     # C/O channel receives a bounded visual-evidence bonus; weak/noisy candidates do not.
     element_max=max(ce,oe); element_min=min(ce,oe)
     rq=roi_quality_metrics(sem_ref,roi,len(selected))
-    visual_bonus=0.15 if (morph>=0.85 and rq["roi_quality"]>=0.70 and element_max>=0.45) else 0.0
-    raw_score=float(np.clip(.65*morph+.20*element_max+.10*element_min+.05*spatial+visual_bonus,0,1))
+    # Element maps are supporting evidence, not a substitute for a physically
+    # different SEM region.  In particular, an edge/rim can look strong in O while
+    # its C signal remains background-like; that must not become a high residue score.
+    element_support=float(np.clip(.70*element_max+.30*element_min,0,1))
+    gray_final=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY).astype(np.float32)
+    bg_final=cv2.GaussianBlur(gray_final,(0,0),25)
+    d_final=gray_final-bg_final
+    rvals=d_final[roi>0]
+    sem_contrast=float(abs(np.median(rvals))) if rvals.size else 0.0
+    sem_contrast_score=float(sigmoid((sem_contrast-3.5)/2.0)) if rvals.size else 0.0
+    er_final=cv2.erode(roi,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)),iterations=1)
+    ivals=d_final[er_final>0]
+    sem_interior_score=float(sigmoid((abs(np.median(ivals))-3.0)/2.0)) if ivals.size else 0.0
+    visual_evidence=float(np.clip(.55*morph+.30*sem_interior_score+.15*sem_contrast_score,0,1))
+    visual_bonus=0.10 if (visual_evidence>=0.88 and rq["roi_quality"]>=0.70 and element_support>=0.45) else 0.0
+    raw_score=float(np.clip(.70*visual_evidence+.20*element_support+.07*spatial+.03*rq["roi_quality"]+visual_bonus,0,1))
     # Score calibration requested by the lab workflow:
     # - keep the displayed score on a true 0~100 scale
     # - map the previous 85-point level to the new 70-point level
@@ -640,7 +665,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     #   60-69: Ambiguous (human Verification)
     #   < 60 : Non-residue
     # A high score with a poor/partial mask is deliberately downgraded to Ambiguous.
-    residue_gate=(score>=0.70 and rq["roi_quality"]>=0.55 and (element_max>=0.45 or morph>=0.90))
+    residue_gate=(score>=0.70 and rq["roi_quality"]>=0.55 and visual_evidence>=0.70 and (element_support>=0.35 or morph>=0.90))
     if residue_gate:
         result="Residue"
     elif score>=0.60:
@@ -665,7 +690,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"piecewise_0_to_85_to_70_100_preserved_v21_6_visual_first","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":round(float(visual_bonus),4),"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],
@@ -708,7 +733,7 @@ def run(payload):
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_box_overlay(p2[key],rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":
             enh=enhance_element_map(p2[key],label); fp=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_box_overlay(enh,rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_enhanced_overlay"]=str(fp)
-    features.update({"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v21-irregular-mask-merge-shadow-filter-piecewise-score-calibrated-70-60-bands","viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask, with nearby fragments merged and shadow/background filtered. Red/white contours show the actual ROI. No Local Ring is displayed or used for new analysis. Score remains 0-100 with piecewise calibration: previous 85 -> new 70 and previous 100 -> new 100. Decision bands: Residue >=70, Ambiguous 60-69, Non-residue <60."})
+    features.update({"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v21.6-visual-first-shadow-suppression-interior-aware-score","viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask. v21.6 uses stronger local-background thresholds, tighter expansion, and an interior-signal check to suppress broad shadow and edge-only substrate features. Red/white contours show the actual ROI. No Local Ring is displayed or used for new analysis. Score remains 0-100 with the existing piecewise calibration."})
     del roi,p1,p2,raw; gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
     Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")

@@ -226,3 +226,25 @@
 .analysisResultCard{position:static!important;inset:auto!important;width:auto!important;min-width:0!important;height:100%!important;background:#fff!important;color:#151a23!important;padding:14px!important;border:1px solid #e0e5ec!important;border-radius:10px!important;box-shadow:0 5px 18px rgba(20,30,60,.035)!important}
 @media(max-width:900px){.verificationLayout{grid-template-columns:1fr!important}.analysisResultCard{height:auto!important}.verificationImages,.v21ElementStrip{grid-template-columns:1fr 1fr!important}}
 @media(max-width:560px){.verificationImages,.v21ElementStrip{grid-template-columns:1fr!important}.verificationImages .visual img,.v21ElementStrip .focusPanel img{height:240px!important}}
+
+/* V21.7 UI readability patch: enlarge Analysis Result typography and color ROI/Global multipliers. */
+.analysisResultCard .analysisResultHead small{font-size:11px!important;letter-spacing:.09em!important}
+.analysisResultCard .resultTitle{font-size:11px!important;padding:6px 10px!important}
+.analysisResultCard .bigScore{font-size:60px!important;margin-top:13px!important}
+.analysisResultCard .bigScore span{font-size:18px!important}
+.analysisResultCard .confidenceText{font-size:10px!important;margin-top:6px!important;padding-bottom:13px!important}
+.analysisResultCard .barMetric>div{font-size:9px!important}
+.analysisResultCard .barMetric b{font-size:9px!important}
+.analysisResultCard .ratioList{padding:10px 0!important}
+.analysisResultCard .ratioList>div{font-size:9.5px!important;padding:6px 0!important}
+.analysisResultCard .ratioList span:first-child{color:#5f6d80!important}
+.analysisResultCard .ratioList b{font-size:9.5px!important;font-weight:800!important}
+.analysisResultCard .ratioMultiplier{font-weight:900!important}
+.analysisResultCard .ratioMultiplier.positive{color:#1f9d63!important}
+.analysisResultCard .ratioMultiplier.negative{color:#d5424d!important}
+.analysisResultCard .ratioMultiplier.neutral{color:#667386!important}
+.analysisResultCard .roiInfo>b{font-size:10px!important}
+.analysisResultCard .roiInfo>div{font-size:9px!important;padding:5px 0!important}
+.analysisResultCard .v21Rule b{font-size:11px!important}
+.analysisResultCard .v21Rule span{font-size:9px!important}
+.analysisResultCard .v21Rule small{font-size:8px!important}

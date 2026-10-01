@@ -196,6 +196,8 @@ function Review({p,idx,total,prev,next,human}){
  const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
  const cRatio=ratio(f.c_roi_mean,f.c_global_mean), oRatio=ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
+ const ratioClass=(x)=>x==null?"neutral":x>1.0001?"positive":x<0.9999?"negative":"neutral";
+ const ratioText=(x)=>x==null?"-":fmtRatio(x);
  const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
  return <div className="verificationPanel">
   <div className="verificationTop v21Top">
@@ -221,8 +223,8 @@ function Review({p,idx,total,prev,next,human}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}{cRatio==null?'-':`(${fmtRatio(cRatio)})`}</b></div>
-      <div><span>O ROI / Global</span><b>{typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}{oRatio==null?'-':`(${fmtRatio(oRatio)})`}</b></div>
+      <div><span>C ROI / Global</span><b>{typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`}>({ratioText(cRatio)})</span></b></div>
+      <div><span>O ROI / Global</span><b>{typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`}>({ratioText(oRatio)})</span></b></div>
     </div>
     <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{f.roi_area_px?`${f.roi_area_px.toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong className={coverage!=null&&coverage>=80?'good':''}>{coverage==null?'-':`${coverage}%${coverage>=80?'  (Good)':''}`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
     <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>0–100 calibrated score. Low ROI quality cannot force an automatic Residue decision.</small></div>
