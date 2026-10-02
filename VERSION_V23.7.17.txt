@@ -1,0 +1,6 @@
+UV-Tape Residue EDS - v23.7.17 GITHUB
+
+Change:
+- When a saved Human ROI exists, Verification no longer falls back to the old AI/CV ROI overlay while the fresh Human ROI overlay is loading.
+- SEM/C/O now fall back to the original image/map instead of stale AI/CV overlay.
+- Existing Human ROI editor, smoothing, red 4px stroke, save speed optimization, and analysis logic are unchanged.
