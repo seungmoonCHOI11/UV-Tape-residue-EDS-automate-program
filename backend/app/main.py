@@ -465,8 +465,6 @@ def _dynamic_asset(point_id: str, asset_type: str):
     normal permanent assets to R2. The generated files are cached on the backend
     so opening Verification does not rerun CV for every request.
     """
-    if not r2.configured:
-        return None
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(point_id))
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
@@ -486,12 +484,21 @@ def _dynamic_asset(point_id: str, asset_type: str):
     keys = _collect_asset_keys(point_id)
     # Never use an old overlay as the SEM source; use the original SEM whenever available.
     def load(label, aliases=()):
+        # Prefer the local original asset when available. This lets Human ROI
+        # overlays work even in local/dev environments without R2 configured.
+        rr=RECORDS.get(point_id) or {}
+        local_assets=rr.get("assets") or {}
+        local_path=local_assets.get(label)
+        if local_path and Path(local_path).exists():
+            im=cv2.imread(str(local_path),cv2.IMREAD_COLOR)
+            if im is not None and im.size:
+                return im
         key = keys.get(label)
         if not key:
             for a in aliases:
                 if keys.get(a):
                     key = keys[a]; break
-        if not key:
+        if not key or not r2.configured:
             return None
         cache = outdir / f"raw_{label}.jpg"
         try:

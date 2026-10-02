@@ -188,7 +188,14 @@ function MetricBar({label,value,color}){
  return <div className="barMetric"><div><span>{label}</span><b>{typeof value==="number"?metricValue(value):"-"}</b></div><i className={color}><em style={{width:pct+"%"}} /></i></div>;
 }
 function metricValue(v){return Math.round(v*100)}
-function dynamicAsset(p,type){return p?.id?`/api/assets/${encodeURIComponent(p.id)}/${type}`:null}
+function dynamicAsset(p,type){
+ if(!p?.id)return null;
+ const f=p.features||{};
+ const humanSaved=(f.human_roi_saved_at||f.human_roi_polygons||f.human_roi_polygon);
+ const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
+ const v=needsHumanRefresh?encodeURIComponent(String(f.human_roi_saved_at||"human")):"";
+ return `/api/assets/${encodeURIComponent(p.id)}/${type}${v?`?v=${v}`:""}`;
+}
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
  const score=displayScore(p);
@@ -204,7 +211,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
    o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
- const hasHumanROI=Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3;
+ const hasHumanROI=(Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
  const ratioClass=(x)=>x==null?"neutral":x>=1.50?"positive":x<=0.90?"negative":"neutral";
@@ -217,10 +224,10 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
-    <div className="verificationImages"><Visual title="SEM / Residue ROI" sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
+    <div className="verificationImages"><Visual title={hasHumanROI?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
     <div className="v21ElementStrip">
-      <div className="focusPanel"><b>C Map (ROI)</b><ImageWithFallback sources={maps.c} alt="C map with ROI"/></div>
-      <div className="focusPanel"><b>O Map (ROI)</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
+      <div className="focusPanel"><b>{hasHumanROI?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={hasHumanROI?"C map with Human ROI":"C map with ROI"}/></div>
+      <div className="focusPanel"><b>{hasHumanROI?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={hasHumanROI?"O map with Human ROI":"O map with ROI"}/></div>
     </div>
     <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
    </div>
@@ -256,7 +263,7 @@ function HumanRoiEditor({p,saveHumanRoi}){
  useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
    const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>=3){ctx.closePath();if(active){ctx.fillStyle="rgba(255,180,0,.16)";ctx.fill();}ctx.strokeStyle=active?"#ffb000":"#ff2525";ctx.lineWidth=3;ctx.stroke();}else{ctx.strokeStyle="#ffb000";ctx.lineWidth=2;ctx.stroke();}
      // Saved Human ROI is shown as a clean contour line. Click points are visible only while editing.
-     if(active) poly.forEach(q=>{ctx.beginPath();ctx.arc(q.x*c.width,q.y*c.height,5,0,Math.PI*2);ctx.fillStyle="#fff";ctx.fill();ctx.strokeStyle="#ffb000";ctx.stroke();});};
+     if(active) poly.forEach(q=>{ctx.beginPath();ctx.arc(q.x*c.width,q.y*c.height,2.2,0,Math.PI*2);ctx.fillStyle="rgba(255,255,255,.9)";ctx.fill();ctx.strokeStyle="#ffb000";ctx.lineWidth=1;ctx.stroke();});};
    regions.forEach(r=>drawPoly(r,false)); drawPoly(current,true);
  };img.src=src;},[open,src,regions,current]);
  if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)||Array.isArray(p.features?.human_roi_polygons)?"Edit Human ROI":"Set Human ROI"}</button><span>{(p.features?.human_roi_polygons?.length||0)>1?`${p.features.human_roi_polygons.length}개 Human ROI 저장됨`:Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
