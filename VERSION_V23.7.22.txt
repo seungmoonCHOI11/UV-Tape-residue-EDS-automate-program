@@ -1,0 +1,1 @@
+v23.7.22 - Verification condition filter and scrollable Point navigator

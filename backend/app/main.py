@@ -37,6 +37,27 @@ def get_job(job_id):
         return dict(JOBS.get(job_id, {}))
 
 
+
+
+def co_ratio_score(limiting: float) -> float:
+    """Map the limiting C/O ratio to a 0-100 score without saturating too early.
+
+    Classification gates remain unchanged: <2x Non-residue, 2-3x Ambiguous,
+    and both C/O >=3x Residue. Above 3x, the score rises gradually so that
+    only very strong enrichment (around 20x+) reaches 100.
+    """
+    x=float(limiting)
+    if x < 2.00:
+        return max(0.0, min(59.0, (x/2.00)*59.0))
+    if x < 3.00:
+        return 60.0 + ((x-2.00)/1.00)*10.0
+    # 3x -> 70, 5x -> ~80, 10x -> ~93, 15x -> ~97, 20x -> 100.
+    import math
+    k=0.23
+    denom=1.0-math.exp(-k*(20.0-3.0))
+    normalized=(1.0-math.exp(-k*(x-3.0)))/denom if denom else 0.0
+    return min(100.0, 70.0 + 30.0*max(0.0, normalized))
+
 def public_record(r: dict) -> dict:
     out=dict(r)
     features=dict(out.get("features") or {})
@@ -48,13 +69,7 @@ def public_record(r: dict) -> dict:
     has_human=bool(features.get("human_roi_polygons") or features.get("human_roi_polygon"))
     if has_human and isinstance(hcr,(int,float)) and isinstance(hor,(int,float)):
         limiting=min(float(hcr),float(hor))
-        if limiting < 2.00:
-            hscore=max(0.0,min(59.0,(limiting/2.00)*59.0))
-        elif limiting < 3.00:
-            hscore=60.0+((limiting-2.00)/1.00)*10.0
-        else:
-            hscore=min(100.0,70.0+((limiting-3.00)/2.0)*30.0)
-        hscore=round(hscore,1)
+        hscore=round(co_ratio_score(limiting),1)
         hresult="Residue" if hcr>=3.00 and hor>=3.00 else ("Ambiguous" if hcr>=2.00 and hor>=2.00 else "Non-residue")
         features["human_residue_score"]=hscore
         features["human_roi_rule_result"]=hresult

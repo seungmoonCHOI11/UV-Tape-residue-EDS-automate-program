@@ -691,7 +691,13 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     elif limiting_ratio < STRONG_RATIO:
         score=float(0.60 + ((limiting_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO))*0.09)
     else:
-        score=float(min(1.0,0.70 + ((limiting_ratio-STRONG_RATIO)/2.0)*0.30))
+        # Keep 3x as the Residue gate/70-point anchor, but spread strong
+        # Residues across the upper score range instead of saturating at 100.
+        # 5x~80, 10x~93, 15x~97, 20x=100.
+        k=0.23
+        denom=1.0-np.exp(-k*(20.0-3.0))
+        normalized=(1.0-np.exp(-k*(limiting_ratio-3.0)))/denom if denom else 0.0
+        score=float(min(1.0,0.70+0.30*max(0.0,normalized)))
     raw_score=score
     residue_gate=bool(both_strong)
     if residue_gate:
@@ -721,7 +727,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"v23.6_limiting_CO_ratio_1.5_3.0_5.0","score_calibration_anchor_3x_is_70":True,"visual_evidence_bonus":0.0,"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"v23.7.21_limiting_CO_log_3_to_20x","score_calibration_anchor_3x_is_70":True,"score_calibration_20x_is_100":True,"visual_evidence_bonus":0.0,"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_roi_global_ratio":round(c_ratio,4),"o_roi_global_ratio":round(o_ratio,4),
@@ -809,7 +815,12 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
     elif limiting < 3.00:
         human_score=60.0 + ((limiting-2.00)/(3.00-2.00))*10.0
     else:
-        human_score=min(100.0, 70.0 + ((limiting-3.00)/2.0)*30.0)
+        # Same upper-range calibration as the automatic CV score.
+        k=0.23
+        denom=1.0-np.exp(-k*(20.0-3.0))
+        normalized=(1.0-np.exp(-k*(limiting-3.0)))/denom if denom else 0.0
+        human_score=70.0 + 30.0*max(0.0, normalized)
+        human_score=min(100.0,human_score)
     human_score=round(float(np.clip(human_score,0,100)),1)
     return {
         "human_roi_area_px":int(cv2.countNonZero(roi)),

@@ -1,0 +1,2 @@
+UV-Tape-residue-EDS-v23.7.21-GITHUB
+Score calibration update only: 3x remains 70-point Residue anchor; strong C/O ratios spread toward 100, with ~20x reaching 100.
