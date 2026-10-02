@@ -207,11 +207,15 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const autoResult=f.result||"Ambiguous";
  const resultLabel=hasHumanROI?(f.human_roi_rule_result||"Ambiguous"):(autoResult==="Review"?"Ambiguous":autoResult);
  const confidence=hasHumanROI?"Human ROI":(f.confidence||"-");
+ const humanDynamic=hasHuman;
  const maps={
-   sem:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
-   eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
-   c:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
-   o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
+   // Before Human ROI is saved, use the already-stored/static analysis images first.
+   // Dynamic overlays can be expensive on legacy points, so they are only requested
+   // after a Human ROI actually exists.
+   sem:humanDynamic?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem]:[p.assets?.sem_residue_overlay,p.assets?.sem,dynamicAsset(p,"sem_residue_overlay")],
+   eds:[p.assets?.eds_map,p.assets?.full_element_maps_original,dynamicAsset(p,"eds_map")],
+   c:humanDynamic?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map]:[p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map,dynamicAsset(p,"c_map_enhanced_overlay")],
+   o:humanDynamic?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]:[p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map,dynamicAsset(p,"o_map_enhanced_overlay")]
  };
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
@@ -264,7 +268,7 @@ function HumanRoiEditor({p,saveHumanRoi}){
 
  useEffect(()=>{
    if(!open)return;
-   const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem;
+   const u=p.assets?.sem||p.assets?.sem_original||dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay;
    setSrc(imageUrl(u));
    const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
    regionsRef.current=stored; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;

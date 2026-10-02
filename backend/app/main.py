@@ -551,29 +551,41 @@ def _dynamic_asset(point_id: str, asset_type: str):
         make_co_overlay, enhance_element_map, analytical_mask, polygon_to_mask,
     )
 
-    c = load("c_map")
-    o = load("o_map")
-    n = load("n_map")
-    si = load("si_map")
+    stored_features=(RECORDS.get(point_id) or {}).get("features",{})
+    stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
 
-    if c is not None and o is not None and n is not None and si is not None:
-        try:
-            features, roi = residue_features(sem, c, o, n, si)
-            stored_features=(RECORDS.get(point_id) or {}).get("features",{})
-            stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
-            if stored_polygons:
-                # Human ROI may contain multiple disconnected polygons.  Use the
-                # complete saved mask, not only the legacy first polygon.
-                human_mask=polygon_to_mask(sem.shape,stored_polygons)
-                if cv2.countNonZero(human_mask)>=20: roi=human_mask
-        except Exception:
-            features, roi = None, None
+    # Human ROI overlays do not need to rerun the full residue detector.  The
+    # saved polygon(s) are already the authoritative mask, so build the mask
+    # directly. This removes a large amount of unnecessary CV work when the
+    # Verification screen requests SEM/C/O overlays after SAVE.
+    if stored_polygons:
+        roi=polygon_to_mask(sem.shape,stored_polygons)
+        if cv2.countNonZero(roi)<20:
+            return None
     else:
-        candidates = detect_residue_candidates(sem, 8)
-        roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
+        c = load("c_map")
+        o = load("o_map")
+        n = load("n_map")
+        si = load("si_map")
+        if c is not None and o is not None and n is not None and si is not None:
+            try:
+                features, roi = residue_features(sem, c, o, n, si)
+            except Exception:
+                features, roi = None, None
+        else:
+            candidates = detect_residue_candidates(sem, 8)
+            roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
 
     if roi is None:
         return None
+
+    # Only load the element maps when the requested overlay actually needs them.
+    # Human SEM overlay generation therefore remains SEM-only, while C/O overlays
+    # load just their corresponding source maps.
+    c = o = None
+    if asset_type in {"c_map_enhanced_overlay", "o_map_enhanced_overlay", "eds_co_overlay"}:
+        c = load("c_map")
+        o = load("o_map")
 
     if asset_type == "sem_residue_overlay":
         out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
@@ -622,6 +634,21 @@ def _human_roi_mask_for_point(point_id: str, shape):
     f=r.get("features") or {}
     polygons=f.get("human_roi_polygons") or f.get("human_roi_polygon")
     return __import__('backend.app.point_worker',fromlist=['polygon_to_mask']).polygon_to_mask(shape,polygons)
+
+
+def _prebuild_human_dynamic_assets(point_id: str):
+    """Warm the Human ROI overlays immediately after SAVE.
+
+    Verification previously requested SEM/C/O dynamic assets independently.
+    Each request could rerun image/CV work, which made the screen appear with
+    Full EDS first and SEM/C/O much later.  Build the three Human ROI views once
+    here so the next Verification render can read cached files immediately.
+    """
+    for asset_type in ("sem_residue_overlay", "c_map_enhanced_overlay", "o_map_enhanced_overlay"):
+        try:
+            _dynamic_asset(point_id, asset_type)
+        except Exception as e:
+            print(f"[human_roi_assets] {asset_type}: {e}")
 
 
 def _invalidate_dynamic_assets(point_id: str):
@@ -678,6 +705,10 @@ def human_roi(point_id: str, payload: dict = Body(...)):
         f["human_roi_vs_ai_iou"]=round(inter/max(union,1),4)
     r["features"]=f
     _invalidate_dynamic_assets(point_id)
+    # Generate the Human ROI visuals now, not lazily during the next screen
+    # render. This prevents the Verification page from showing only Full EDS
+    # while SEM/C/O are still being generated.
+    _prebuild_human_dynamic_assets(point_id)
     if db.configured():
         db.upsert_analysis(point_id,f)
         try: db.add_review_history(point_id,r.get("human_result"),r.get("human_result"),"Manual ROI saved; C/O re-evaluated and stored as Ground Truth candidate.")
