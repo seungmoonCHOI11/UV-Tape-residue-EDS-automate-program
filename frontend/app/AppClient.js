@@ -263,29 +263,40 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
 }
 function HumanRoiEditor({p,saveHumanRoi}){
  const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null), [imageReady,setImageReady]=useState(false), [imageError,setImageError]=useState(false);
+ const pointKey=p?.id||`${p?.power}-${p?.time}-${p?.wafer}-${p?.point}`;
  const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null);
  const regionsRef=useRef([]), currentRef=useRef([]), drawingRef=useRef(false), lastPointRef=useRef(null), rafRef=useRef(0);
 
  useEffect(()=>{
+   // Verification navigation changes `p` while this component instance stays mounted.
+   // Never carry the editor state into the next Point: the next Point starts in the
+   // compact button state and only opens its editor after the user explicitly clicks.
+   setOpen(false);
+   setImageReady(false);setImageError(false);setSrc(null);
+   regionsRef.current=[]; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
+   setRegions([]); setCurrentCount(0); setDrawing(false);
+ },[pointKey]);
+ useEffect(()=>{
    if(!open)return;
-   // Use the same SEM source priority as the Verification image itself.
-   // Some legacy points do not expose `assets.sem` consistently, so trying only
-   // that single path can leave the canvas at the browser's empty 300x150 default.
-   // Manual ROI must load the original SEM through a dedicated raw-SEM endpoint.
-   // Do not use dynamicAsset(p,"sem"): the backend dynamic renderer only generates
-   // overlay asset types, so legacy points can otherwise sit forever on the loading state.
+   // Prefer the exact SEM source already proven to render in Verification.
+   // The previous versions tried a raw/dynamic endpoint first; on some legacy points
+   // that endpoint never completed, leaving the editor stuck on the loading state.
+   // The visible SEM overlay is a safe fallback and keeps the manual editor usable.
    const candidates=[
-     p.assets?.sem,
-     `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
-     p.assets?.sem_original,
+     // The Verification SEM source is already known to work for these legacy points.
+     // Use it first so the editor does not wait on a raw-SEM endpoint that may not
+     // exist for older records.
      p.assets?.sem_residue_overlay,
+     p.assets?.sem,
+     p.assets?.sem_original,
+     `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
      dynamicAsset(p,"sem_residue_overlay")
-   ].filter(Boolean).map(imageUrl);
+   ].filter(Boolean).map(imageUrl).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);
    setImageReady(false);setImageError(false);setSrc(candidates[0]||null);
    const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
    regionsRef.current=stored; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
    setRegions(stored); setCurrentCount(0); setDrawing(false);
- },[open,p]);
+ },[open,pointKey]);
 
  const pointFromEvent=e=>{
    const c=canvasRef.current;if(!c)return null;
@@ -326,12 +337,12 @@ function HumanRoiEditor({p,saveHumanRoi}){
      if(cancelled)return;
      // Move to the next known SEM asset if this point uses a legacy asset path.
      const candidates=[
-       p.assets?.sem,
-       `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
-       p.assets?.sem_original,
        p.assets?.sem_residue_overlay,
+       p.assets?.sem,
+       p.assets?.sem_original,
+       `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
        dynamicAsset(p,"sem_residue_overlay")
-     ].filter(Boolean).map(imageUrl);
+     ].filter(Boolean).map(imageUrl).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);
      const i=candidates.indexOf(src);
      const next=candidates[i+1];
      if(next){setSrc(next);return;}
