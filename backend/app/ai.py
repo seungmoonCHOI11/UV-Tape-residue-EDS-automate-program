@@ -91,7 +91,7 @@ Important visual rules:
 - At most 8 boxes. If no defensible object exists, return an empty list.
 """
 
-def analyze_roi_boxes_with_openai(image_path, cv_features=None):
+def analyze_roi_boxes_with_openai(image_path, cv_features=None, roi_references=None):
     """Use OpenAI vision only as a second-stage ROI proposal, never as the classifier."""
     if not ai_available():
         return {"status":"not_configured","boxes":[],"used":False}
@@ -115,9 +115,20 @@ def analyze_roi_boxes_with_openai(image_path, cv_features=None):
             "selected_candidate_count":(cv_features or {}).get("selected_candidate_count"),
             "morphology_score":(cv_features or {}).get("morphology_score"),
         }
+        # Human-verified examples are project-specific Ground Truth references.
+        # They guide the ROI proposal but never override CV classification.
+        refs=[]
+        for ex in (roi_references or [])[:8]:
+            refs.append({k:ex.get(k) for k in (
+                "power","time_sec","wafer","point","zone","human_result",
+                "human_roi_area_px","human_roi_fill_ratio","human_roi_component_count",
+                "human_roi_quality","human_c_ratio","human_o_ratio","human_roi_polygons")})
+        hint["ground_truth_examples"]=refs
+        hint["ground_truth_example_count"]=len(refs)
         prompt=("Inspect this SEM image and propose coarse residue-region boxes for a downstream OpenCV segmentation stage. "
                 "Do not decide Residue/Non-residue. "
                 "Use the CV hints only as context; visually correct them when they appear incomplete. "
+                "If Ground Truth examples are supplied, treat them as project-specific human-verified references: learn their ROI shape/size/multi-region tendencies and use them to avoid repeating previous ROI mistakes. Do not copy coordinates blindly because each SEM point is a different image. "
                 "Return JSON exactly as {\"boxes\":[{\"x\":0..1,\"y\":0..1,\"w\":0..1,\"h\":0..1,\"confidence\":0..1}],\"notes\":\"...\"}.\n"
                 +json.dumps(hint,ensure_ascii=False))
         response=client.responses.create(

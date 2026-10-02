@@ -128,6 +128,43 @@ def re_digits(value: Any) -> str:
     return m.group(0) if m else "0"
 
 
+def get_ground_truth_examples(project_id: str, limit: int = 8):
+    """Return human-verified ROI examples for project-specific ROI learning.
+
+    These records are not used to retrain the base OpenAI model. They are
+    project-level Ground Truth references that can be supplied to the ROI
+    assistant and CV refinement stages on later analyses.
+    """
+    if not configured():
+        return []
+    client=get_client()
+    rows=(client.table("points").select("id,power,time_sec,wafer,point,position,human_result")
+          .eq("project_id",project_id).not_.is_("human_result","null")
+          .order("updated_at",desc=True).limit(max(1,int(limit))).execute().data or [])
+    out=[]
+    for row in rows:
+        try:
+            analyses=(client.table("analysis_results").select("features")
+                      .eq("point_id",row["id"]).order("created_at",desc=True).limit(1).execute().data or [])
+            f=(analyses[0].get("features") or {}) if analyses else {}
+            if not (f.get("human_roi_polygons") or f.get("human_roi_polygon")):
+                continue
+            out.append({
+                "power":row.get("power"),"time_sec":row.get("time_sec"),
+                "wafer":row.get("wafer"),"point":row.get("point"),
+                "zone":row.get("position"),"human_result":row.get("human_result"),
+                "human_roi_polygons":f.get("human_roi_polygons") or f.get("human_roi_polygon"),
+                "human_roi_area_px":f.get("human_roi_area_px"),
+                "human_roi_fill_ratio":f.get("human_roi_fill_ratio"),
+                "human_roi_component_count":f.get("human_roi_component_count"),
+                "human_c_ratio":f.get("human_c_ratio"),"human_o_ratio":f.get("human_o_ratio"),
+                "human_roi_quality":f.get("human_roi_quality"),
+            })
+        except Exception as e:
+            print(f"[ground_truth] example lookup failed: {e}")
+    return out
+
+
 def get_first_unverified_point(project_id: str):
     rows = (get_client().table("points").select("*")
             .eq("project_id", project_id)

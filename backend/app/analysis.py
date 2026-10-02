@@ -80,7 +80,7 @@ def _build_page_locations(pdf_paths):
     return locations, sum(counts)
 
 
-def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None):
+def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None):
     """Analyze one Point per isolated subprocess.
 
     v8 deliberately does NOT keep PyMuPDF/OpenCV objects in the FastAPI process.
@@ -142,6 +142,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
             "output_dir": str(pdir),
             "result_path": str(result_path),
             "pages": [{"path": src, "index": page_index} for src, page_index in group],
+            "roi_reference_examples": roi_reference_examples or [],
         }
         payload_path = pdir / "_point_input.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -178,7 +179,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                 )
                 use_ai = ai_available() and ai_mode in {"assist", "all"} and (ai_mode == "all" or uncertain)
                 if use_ai and record.get("assets", {}).get("sem"):
-                    ai_hint = analyze_roi_boxes_with_openai(record["assets"]["sem"], f)
+                    ai_hint = analyze_roi_boxes_with_openai(record["assets"]["sem"], f, payload.get("roi_reference_examples") or [])
                     boxes = ai_hint.get("boxes") or []
                     if boxes:
                         payload["ai_roi_boxes"] = boxes
@@ -194,6 +195,8 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                             refined["features"]["ai_roi_box_count"] = len(boxes)
                             refined["features"]["ai_roi_model"] = ai_hint.get("model") or __import__("os").getenv("OPENAI_ROI_MODEL", __import__("os").getenv("OPENAI_MODEL", "gpt-5.6-luna"))
                             refined["features"]["ai_roi_notes"] = ai_hint.get("notes", "")
+                            refined["features"]["ground_truth_reference_count"] = len(payload.get("roi_reference_examples") or [])
+                            refined["features"]["ground_truth_roi_learning"] = bool(payload.get("roi_reference_examples"))
                             refined["features"]["ai_roi_boxes"] = boxes
                             record = refined
                         else:

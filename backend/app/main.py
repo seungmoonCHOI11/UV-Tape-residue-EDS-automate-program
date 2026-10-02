@@ -147,9 +147,18 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             set_job(job_id, phase="analysis", progress=min(75, pct), completed=done, total=total,
                     message=f"Point 분석 중 · {done}/{total}")
 
+        gt_examples=[]
+        if db.configured():
+            try:
+                # Existing verified points from this project are the project-specific
+                # Ground Truth reference set. On a first upload this is empty; later
+                # re-analyses automatically reuse the accumulated examples.
+                gt_examples=db.get_ground_truth_examples(project_id, limit=8)
+            except Exception as e:
+                print(f"[ground_truth] upload context lookup failed: {e}")
         all_records = extract_pdfs(
             pdf_paths, pdir / "assets", conditions, pages_per_point,
-            progress_callback=point_progress,
+            progress_callback=point_progress, roi_reference_examples=gt_examples,
         )
         if not all_records:
             raise ValueError("No analyzable PDF points were found.")
@@ -322,7 +331,13 @@ def process_reanalysis_job(job_id,project_id,meta):
         expected=len(condition_point_sequence(normalize_conditions(conditions)))
         set_job(job_id,status="processing",phase="analysis",progress=10,completed=0,total=expected,message="R2 원본 PDF로 재분석 중입니다.")
         def point_progress(done,total,phase): set_job(job_id,phase="analysis",progress=min(75,10+int(done/max(total,1)*65)),completed=done,total=total,message=f"재분석 중 · {done}/{total}")
-        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress)
+        gt_examples=[]
+        if db.configured():
+            try:
+                gt_examples=db.get_ground_truth_examples(project_id, limit=8)
+            except Exception as e:
+                print(f"[ground_truth] reanalysis context lookup failed: {e}")
+        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,roi_reference_examples=gt_examples)
         set_job(job_id,phase="database",progress=76,completed=0,total=len(records),message="재분석 결과를 기존 Point에 반영하고 있습니다.")
         for i,r in enumerate(records,1):
             source_point_id=r["id"]
@@ -509,9 +524,12 @@ def _dynamic_asset(point_id: str, asset_type: str):
     if c is not None and o is not None and n is not None and si is not None:
         try:
             features, roi = residue_features(sem, c, o, n, si)
-            stored_polygon=(RECORDS.get(point_id) or {}).get("features",{}).get("human_roi_polygon")
-            if stored_polygon:
-                human_mask=polygon_to_mask(sem.shape,stored_polygon)
+            stored_features=(RECORDS.get(point_id) or {}).get("features",{})
+            stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
+            if stored_polygons:
+                # Human ROI may contain multiple disconnected polygons.  Use the
+                # complete saved mask, not only the legacy first polygon.
+                human_mask=polygon_to_mask(sem.shape,stored_polygons)
                 if cv2.countNonZero(human_mask)>=20: roi=human_mask
         except Exception:
             features, roi = None, None
@@ -630,6 +648,14 @@ def asset(point_id:str,asset_type:str):
     if r:
         key=(r.get("r2_assets") or {}).get(asset_type)
         local=(r.get("assets") or {}).get(asset_type)
+        # Once a Human ROI is saved, Verification must show the Human ROI contour
+        # on SEM/C/O rather than falling back to the original AI/CV overlay.
+        if asset_type in {"sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"}:
+            hf=r.get("features") or {}
+            if hf.get("human_roi_polygons") or hf.get("human_roi_polygon"):
+                local_dynamic=_dynamic_asset(point_id, asset_type)
+                if local_dynamic:
+                    return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
         if local and Path(local).exists():
             return FileResponse(local,media_type="image/jpeg")
     if db.configured():
