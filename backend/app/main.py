@@ -749,6 +749,10 @@ def asset(point_id:str,asset_type:str):
                 return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
         if not key:
             aliases = {
+                # Raw SEM source for the manual Human ROI editor.  This endpoint
+                # must resolve to the original SEM instead of invoking the dynamic
+                # overlay renderer, which only knows overlay asset types.
+                "manual_sem": ["sem", "sem_original", "sem_residue_overlay"],
                 "sem_residue_overlay": ["sem"],
                 "eds_co_overlay": ["eds_map", "element_maps_enhanced", "full_element_maps_original"],
                 "eds_map": ["full_element_maps_original", "element_maps_enhanced"],

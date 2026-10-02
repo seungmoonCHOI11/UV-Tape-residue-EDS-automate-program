@@ -271,10 +271,13 @@ function HumanRoiEditor({p,saveHumanRoi}){
    // Use the same SEM source priority as the Verification image itself.
    // Some legacy points do not expose `assets.sem` consistently, so trying only
    // that single path can leave the canvas at the browser's empty 300x150 default.
+   // Manual ROI must load the original SEM through a dedicated raw-SEM endpoint.
+   // Do not use dynamicAsset(p,"sem"): the backend dynamic renderer only generates
+   // overlay asset types, so legacy points can otherwise sit forever on the loading state.
    const candidates=[
      p.assets?.sem,
+     `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
      p.assets?.sem_original,
-     dynamicAsset(p,"sem"),
      p.assets?.sem_residue_overlay,
      dynamicAsset(p,"sem_residue_overlay")
    ].filter(Boolean).map(imageUrl);
@@ -323,10 +326,10 @@ function HumanRoiEditor({p,saveHumanRoi}){
      if(cancelled)return;
      // Move to the next known SEM asset if this point uses a legacy asset path.
      const candidates=[
-       p.assets?.sem_residue_overlay,
        p.assets?.sem,
+       `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
        p.assets?.sem_original,
-       dynamicAsset(p,"sem"),
+       p.assets?.sem_residue_overlay,
        dynamicAsset(p,"sem_residue_overlay")
      ].filter(Boolean).map(imageUrl);
      const i=candidates.indexOf(src);
