@@ -171,6 +171,24 @@ function Dashboard({points,go}){
 }
 function Metric({t,v,s}){return <div className="metric"><small>{t}</small><b>{v}</b><span>{s}</span></div>}
 function UploadPage({input,files,setFiles,upload,conditions,updateCondition,addCondition,removeCondition,pagesPerPoint,setPagesPerPoint,dragging,setDragging,addFiles,expectedPoints,busy,substrateType,setSubstrateType,sampleCategory,setSampleCategory}){return <div className="content"><div className="intro"><div><h2>New Analysis</h2></div></div><section className="panel"><div className="panelHead"><b>1. EDS source upload</b><small>PDF · drag & drop supported</small></div><div className={`drop ${dragging?"dragging":""}`} onClick={()=>input?.current?.click()} onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);addFiles(e.dataTransfer.files)}}><FileUp size={30}/><b>{dragging?"여기에 PDF를 놓으세요":"EDS PDF를 끌어다 놓거나 클릭해서 선택하세요"}</b><small>여러 PDF를 선택하면 업로드 순서대로 이어서 매핑합니다.</small><input ref={input} hidden type="file" multiple accept=".pdf,application/pdf" onChange={e=>addFiles(e.target.files)}/></div>{files.map((f,i)=><div className="file" key={`${f.name}-${i}`}><FileText size={14}/><span>{f.name}</span><small>{(f.size/1024/1024).toFixed(1)} MB</small><button className="iconBtn" onClick={()=>setFiles(fs=>fs.filter((_,n)=>n!==i))}><Trash2 size={13}/></button></div>)}</section><section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN"){setSubstrateType("SiCN")}}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>Other</option></select></label></div></section><section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>3. Analysis conditions</b></div><button className="secondary" onClick={addCondition}><Plus size={13}/> Add condition</button></div></div>{conditions.map((c,i)=><div className="conditionRow" key={i}><div className="conditionTitle">Condition {i+1}</div><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label><div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div><div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>{conditions.length>1&&<button className="iconBtn" onClick={()=>removeCondition(i)}><Trash2 size={14}/></button>}</div>)}<div className="mappingSummary"><span>Pages / Point <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>Total Points: {expectedPoints()}</b><span>Total Pages: {expectedPoints()*pagesPerPoint}</span></div></section><div className="actions"><button className="primary" disabled={busy} onClick={upload}><Play size={14}/>{busy?"Uploading / Analyzing...":"Upload + Analyze"}</button></div></div>}
+function coRatioDisplayScore(limiting){
+ const x=Number(limiting);
+ if(!Number.isFinite(x))return null;
+ if(x<2)return Math.max(0,Math.min(59,Math.round((x/2)*59)));
+ if(x<3)return Math.round(60+(x-2)*10);
+ const k=0.23, denom=1-Math.exp(-k*17);
+ const normalized=(1-Math.exp(-k*(x-3)))/denom;
+ return Math.round(Math.min(100,70+30*Math.max(0,normalized)));
+}
+function verificationResult(x){
+ const f=x?.features||{};
+ if(x?.human_result)return x.human_result;
+ if(f.human_roi_rule_result)return f.human_roi_rule_result;
+ if(x?.result)return x.result;
+ if(f.result)return f.result;
+ return "Ambiguous";
+}
+
 function displayScore(p){
  const f=p?.features||{};
  const raw=typeof f.residue_score==="number"?f.residue_score:(typeof p?.residue_score==="number"?p.residue_score:null);
@@ -201,7 +219,8 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
  const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
  const hasHumanROI=(Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
- const score=hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p);
+ const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
+ const score=hasHumanROI&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(Math.min(cRatio,oRatio)):(hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
  const coverage=hasHumanROI&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
  const maskQuality=hasHumanROI&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
  const autoResult=f.result||"Ambiguous";
@@ -216,7 +235,6 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
    c:hasHumanROI?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
    o:hasHumanROI?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
- const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
  const ratioClass=(x)=>x==null?"neutral":x>=3.00?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
  const ratioText=(x)=>x==null?"-":fmtRatio(x);
@@ -302,14 +320,14 @@ function HumanRoiEditor({p,saveHumanRoi}){
 function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,resultFilter,setResultFilter,human,saveHumanRoi}){
  const visible=points.filter(x=>{
    const c=condition==="ALL"||`${x.power} · ${x.time}`===condition;
-   const r=resultFilter==="ALL"||((x.human_result||x.result||"Ambiguous")===(resultFilter));
+   const r=resultFilter==="ALL"||(verificationResult(x)===resultFilter);
    return c&&r;
  });
  const currentPos=Math.max(0,visible.findIndex(x=>x.id===p?.id));
  useEffect(()=>{if(visible.length&&!visible.some(x=>x.id===p?.id))setIdx(points.findIndex(x=>x.id===visible[0].id));},[condition,resultFilter,visible.length,p?.id]);
  const goVisible=delta=>{if(!visible.length)return;const n=Math.min(visible.length-1,Math.max(0,currentPos+delta));const ni=points.findIndex(x=>x.id===visible[n].id);if(ni>=0)setIdx(ni)};
  const conditions=[...new Set(points.map(x=>`${x.power} · ${x.time}`).filter(Boolean))];
- return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><div className="verificationHeadTools"><span>{visible.length} points shown</span><button className="secondary" onClick={close}>Close</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point Navigator</b><small>조건별 Point 선택</small></div><label>Condition<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">All Conditions</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>Result<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">All Results</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=x.human_result||x.result||"Ambiguous";return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>P{Number(x.point)||i+1}</span><em>{x.power}W · {x.time}s · W{x.wafer}</em><strong className={r.toLowerCase().replace(/[^a-z]+/g,"-")}>{r}</strong></button>})}</div></aside><div className="verificationMain"><Review p={p} idx={idx} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={human} saveHumanRoi={saveHumanRoi}/></div></div></div></div>}
+ return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><div className="verificationHeadTools"><span>{visible.length} points shown</span><button className="secondary" onClick={close}>Close</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point Navigator</b><small>조건별 Point 선택</small></div><label>Condition<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">All Conditions</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>Result<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">All Results</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>P{Number(x.point)||i+1}</span><em>{x.power}W · {x.time}s · W{x.wafer}</em><strong className={r.toLowerCase().replace(/[^a-z]+/g,"-")}>{r}</strong></button>})}</div></aside><div className="verificationMain"><Review p={p} idx={idx} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={human} saveHumanRoi={saveHumanRoi}/></div></div></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).filter(Boolean))];

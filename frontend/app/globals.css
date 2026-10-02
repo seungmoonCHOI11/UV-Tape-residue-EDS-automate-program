@@ -277,3 +277,21 @@
 
 /* v23.7 Human ROI freehand editor */
 .humanRoiCanvasWrap canvas.humanRoiDrawCanvas{display:block;max-width:100%;height:auto;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
+
+/* v23.7.23 Verification inspection sizing: give the central SEM/EDS panels more room. */
+.verificationModal{width:min(1500px,99vw)!important;max-width:1500px!important}
+.verificationWorkspace{grid-template-columns:175px minmax(0,1fr)!important}
+.verificationQueue{padding:10px!important}
+.verificationMain .verificationPanel{padding:18px!important}
+.verificationLayout{grid-template-columns:minmax(0,1fr) 290px!important;gap:12px!important}
+.verificationImages .visual img{height:315px!important}
+.v21ElementStrip .focusPanel img{height:325px!important}
+@media(max-width:900px){
+ .verificationWorkspace{grid-template-columns:1fr!important}
+ .verificationLayout{grid-template-columns:1fr!important}
+ .verificationImages,.v21ElementStrip{grid-template-columns:1fr 1fr!important}
+}
+@media(max-width:560px){
+ .verificationImages,.v21ElementStrip{grid-template-columns:1fr!important}
+ .verificationImages .visual img,.v21ElementStrip .focusPanel img{height:260px!important}
+}

@@ -689,11 +689,11 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     if limiting_ratio < MODERATE_RATIO:
         score=float(np.clip((limiting_ratio/MODERATE_RATIO)*0.59,0,0.59))
     elif limiting_ratio < STRONG_RATIO:
-        score=float(0.60 + ((limiting_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO))*0.09)
+        score=float(0.60 + ((limiting_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO))*0.10)
     else:
-        # Keep 3x as the Residue gate/70-point anchor, but spread strong
-        # Residues across the upper score range instead of saturating at 100.
-        # 5x~80, 10x~93, 15x~97, 20x=100.
+        # v23.7.23: use the same explicit C/O limiting-ratio calibration as
+        # Human ROI/public_record.  3x=70, ~5x=81, ~7x=88, ~10x=94,
+        # ~15x=99, 20x+=100. This prevents a 5x Human ROI from displaying 100.
         k=0.23
         denom=1.0-np.exp(-k*(20.0-3.0))
         normalized=(1.0-np.exp(-k*(limiting_ratio-3.0)))/denom if denom else 0.0
@@ -815,12 +815,11 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
     elif limiting < 3.00:
         human_score=60.0 + ((limiting-2.00)/(3.00-2.00))*10.0
     else:
-        # Same upper-range calibration as the automatic CV score.
+        # Keep Human ROI on exactly the same calibration as automatic analysis.
         k=0.23
         denom=1.0-np.exp(-k*(20.0-3.0))
         normalized=(1.0-np.exp(-k*(limiting-3.0)))/denom if denom else 0.0
-        human_score=70.0 + 30.0*max(0.0, normalized)
-        human_score=min(100.0,human_score)
+        human_score=min(100.0,70.0 + 30.0*max(0.0, normalized))
     human_score=round(float(np.clip(human_score,0,100)),1)
     return {
         "human_roi_area_px":int(cv2.countNonZero(roi)),
