@@ -746,22 +746,30 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
 
 
 def polygon_to_mask(shape, polygon):
-    """Create an analytical ROI mask from normalized [x,y] polygon points."""
+    """Create an analytical ROI mask from one polygon or multiple normalized polygons."""
     h,w=shape[:2]
     mask=np.zeros((h,w),np.uint8)
-    if not isinstance(polygon,list) or len(polygon)<3:
+    if not isinstance(polygon,list) or not polygon:
         return mask
-    pts=[]
-    for item in polygon:
-        try:
-            if isinstance(item,dict): x=float(item.get("x")); y=float(item.get("y"))
-            else: x=float(item[0]); y=float(item[1])
-            if not np.isfinite(x) or not np.isfinite(y): continue
-            pts.append([int(np.clip(round(x*(w-1)),0,w-1)),int(np.clip(round(y*(h-1)),0,h-1))])
-        except Exception:
+    # Backward compatible: [{x,y}, ...] is one polygon; [[{x,y},...], ...] is multiple regions.
+    if polygon and isinstance(polygon[0],dict):
+        polygons=[polygon]
+    else:
+        polygons=polygon
+    for poly in polygons:
+        if not isinstance(poly,list) or len(poly)<3:
             continue
-    if len(pts)<3: return mask
-    cv2.fillPoly(mask,[np.asarray(pts,np.int32)],255)
+        pts=[]
+        for item in poly:
+            try:
+                if isinstance(item,dict): x=float(item.get("x")); y=float(item.get("y"))
+                else: x=float(item[0]); y=float(item[1])
+                if not np.isfinite(x) or not np.isfinite(y): continue
+                pts.append([int(np.clip(round(x*(w-1)),0,w-1)),int(np.clip(round(y*(h-1)),0,h-1))])
+            except Exception:
+                continue
+        if len(pts)>=3:
+            cv2.fillPoly(mask,[np.asarray(pts,np.int32)],255)
     mask[~(analytical_mask((h,w))>0)]=0
     return mask
 

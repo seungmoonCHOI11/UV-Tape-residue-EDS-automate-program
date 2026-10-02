@@ -112,7 +112,7 @@ function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toL
  async function saveHumanRoi(polygon){
    const p=points[idx]; if(!p)return;
    try{
-     const r=await fetch(`${API}/api/points/${p.id}/human-roi`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polygon})});
+     const r=await fetch(`${API}/api/points/${p.id}/human-roi`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polygons:polygon})});
      const j=await r.json(); if(!r.ok)throw new Error(j.detail||"ROI 저장 실패");
      setPoints(points.map(z=>z.id===p.id?j:z));
      notify("Human ROI 저장 완료 · C/O 재계산 및 Ground Truth 데이터 저장");
@@ -250,16 +250,22 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  </div>
 }
 function HumanRoiEditor({p,saveHumanRoi}){
- const [open,setOpen]=useState(false), [pts,setPts]=useState([]), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
+ const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
  const canvasRef=useRef(); const wrapRef=useRef();
- useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); setPts(Array.isArray(p.features?.human_roi_polygon)?p.features.human_roi_polygon:[]);},[open,p]);
- useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);if(pts.length){ctx.beginPath();pts.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();ctx.fillStyle="rgba(255,40,40,.16)";ctx.fill();ctx.strokeStyle="#ff2525";ctx.lineWidth=3;ctx.stroke();pts.forEach(q=>{ctx.beginPath();ctx.arc(q.x*c.width,q.y*c.height,5,0,Math.PI*2);ctx.fillStyle="#fff";ctx.fill();ctx.strokeStyle="#ff2525";ctx.stroke()})}};img.src=src;},[open,src,pts]);
- if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)?"Edit Human ROI":"Set Human ROI"}</button><span>{Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
- const click=e=>{const c=canvasRef.current;if(!c)return;const r=c.getBoundingClientRect();setPts(v=>[...v,{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))}])};
- const clear=()=>setPts([]); const save=async()=>{if(pts.length<3)return;setSaving(true);try{await saveHumanRoi(pts);setOpen(false)}finally{setSaving(false)}};
- return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span>SEM에서 residue 외곽을 순서대로 클릭하세요. 마지막에 3점 이상이면 저장할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} onClick={click}/></div><div className="humanRoiActions"><button className="secondary" onClick={clear}><RotateCcw size={14}/>Clear</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||pts.length<3} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+ useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]); setRegions(stored); setCurrent([]);},[open,p]);
+ useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
+   const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>=3){ctx.closePath();ctx.fillStyle=active?"rgba(255,180,0,.16)":"rgba(255,40,40,.16)";ctx.fill();ctx.strokeStyle=active?"#ffb000":"#ff2525";ctx.lineWidth=3;ctx.stroke();}else{ctx.strokeStyle="#ffb000";ctx.lineWidth=2;ctx.stroke();}poly.forEach((q,i)=>{ctx.beginPath();ctx.arc(q.x*c.width,q.y*c.height,5,0,Math.PI*2);ctx.fillStyle="#fff";ctx.fill();ctx.strokeStyle=active?"#ffb000":"#ff2525";ctx.stroke();});};
+   regions.forEach(r=>drawPoly(r,false)); drawPoly(current,true);
+ };img.src=src;},[open,src,regions,current]);
+ if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)||Array.isArray(p.features?.human_roi_polygons)?"Edit Human ROI":"Set Human ROI"}</button><span>{(p.features?.human_roi_polygons?.length||0)>1?`${p.features.human_roi_polygons.length}개 Human ROI 저장됨`:Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
+ const click=e=>{const c=canvasRef.current;if(!c)return;const r=c.getBoundingClientRect();setCurrent(v=>[...v,{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))}])};
+ const finishRegion=()=>{if(current.length<3)return;setRegions(v=>[...v,current]);setCurrent([])};
+ const undo=()=>setCurrent(v=>v.slice(0,-1));
+ const clear=()=>{setRegions([]);setCurrent([])};
+ const removeLastRegion=()=>setRegions(v=>v.slice(0,-1));
+ const save=async()=>{const all=current.length>=3?[...regions,current]:regions;if(!all.length)return;setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}};
+ return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span>한 개 residue는 점을 순서대로 클릭하고 <b>영역 완료</b>를 누르세요. 떨어진 residue가 여러 개면 같은 방법으로 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} onClick={click}/></div><div className="humanRoiEditorHint"><span>현재 영역: {current.length}점 · 저장할 영역: {regions.length}개</span><span>노란색=현재 작성 · 빨간색=완료된 영역</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 점 1개 취소</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||(!regions.length&&current.length<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
 }
-
 function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){

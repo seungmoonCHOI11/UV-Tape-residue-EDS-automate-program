@@ -567,7 +567,8 @@ def _load_raw_point_image(point_id: str, label: str):
 def _human_roi_mask_for_point(point_id: str, shape):
     r=RECORDS.get(point_id) or {}
     f=r.get("features") or {}
-    return __import__('backend.app.point_worker',fromlist=['polygon_to_mask']).polygon_to_mask(shape,f.get("human_roi_polygon"))
+    polygons=f.get("human_roi_polygons") or f.get("human_roi_polygon")
+    return __import__('backend.app.point_worker',fromlist=['polygon_to_mask']).polygon_to_mask(shape,polygons)
 
 
 def _invalidate_dynamic_assets(point_id: str):
@@ -582,19 +583,30 @@ def human_roi(point_id: str, payload: dict = Body(...)):
     if point_id not in RECORDS:
         point(point_id)
     polygon=payload.get("polygon") if isinstance(payload,dict) else None
-    if not isinstance(polygon,list) or len(polygon)<3:
-        raise HTTPException(400,"ROI polygon must contain at least 3 points.")
+    polygons=payload.get("polygons") if isinstance(payload,dict) else None
+    if polygons is None and isinstance(polygon,list):
+        polygons=[polygon]
+    if not isinstance(polygons,list) or not polygons:
+        raise HTTPException(400,"ROI must contain at least one polygon.")
+    polygons=[poly for poly in polygons if isinstance(poly,list) and len(poly)>=3]
+    if not polygons:
+        raise HTTPException(400,"Each ROI region must contain at least 3 points.")
     from .point_worker import polygon_to_mask, human_roi_features, ai_boxes_to_mask
     sem=_load_raw_point_image(point_id,"sem")
     c=_load_raw_point_image(point_id,"c_map"); o=_load_raw_point_image(point_id,"o_map")
     n=_load_raw_point_image(point_id,"n_map"); si=_load_raw_point_image(point_id,"si_map")
     if any(x is None for x in [sem,c,o,n,si]):
         raise HTTPException(503,"Original SEM/C/O/N/Si assets are not available for manual ROI analysis.")
-    mask=polygon_to_mask(sem.shape,polygon)
+    mask=polygon_to_mask(sem.shape,polygons)
     if cv2.countNonZero(mask)<20: raise HTTPException(400,"ROI is too small or outside the analytical image.")
     hf=human_roi_features(sem,c,o,n,si,mask)
     r=RECORDS[point_id]; f=dict(r.get("features") or {})
-    f.update(hf); f["human_roi_polygon"]=[{"x":round(float(q.get("x",0)),6),"y":round(float(q.get("y",0)),6)} for q in polygon if isinstance(q,dict)]
+    f.update(hf)
+    clean_polygons=[[{"x":round(float(q.get("x",0)),6),"y":round(float(q.get("y",0)),6)} for q in poly if isinstance(q,dict)] for poly in polygons]
+    clean_polygons=[poly for poly in clean_polygons if len(poly)>=3]
+    f["human_roi_polygons"]=clean_polygons
+    # Backward compatibility for older UI/data consumers: keep the first polygon here.
+    f["human_roi_polygon"]=clean_polygons[0] if clean_polygons else []
     f["human_roi_saved_at"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     f["human_roi_source"]="manual_verification"
     ai_boxes=f.get("ai_roi_boxes") or []
