@@ -207,7 +207,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const autoResult=f.result||"Ambiguous";
  const resultLabel=hasHumanROI?(f.human_roi_rule_result||"Ambiguous"):(autoResult==="Review"?"Ambiguous":autoResult);
  const confidence=hasHumanROI?"Human ROI":(f.confidence||"-");
- const humanDynamic=hasHuman;
+ const humanDynamic=hasHumanROI;
  const maps={
    // Before Human ROI is saved, use the already-stored/static analysis images first.
    // Dynamic overlays can be expensive on legacy points, so they are only requested
