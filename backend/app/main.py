@@ -48,17 +48,17 @@ def public_record(r: dict) -> dict:
     has_human=bool(features.get("human_roi_polygons") or features.get("human_roi_polygon"))
     if has_human and isinstance(hcr,(int,float)) and isinstance(hor,(int,float)):
         limiting=min(float(hcr),float(hor))
-        if limiting < 1.50:
-            hscore=max(0.0,min(59.0,(limiting/1.50)*59.0))
+        if limiting < 2.00:
+            hscore=max(0.0,min(59.0,(limiting/2.00)*59.0))
         elif limiting < 3.00:
-            hscore=60.0+((limiting-1.50)/1.50)*10.0
+            hscore=60.0+((limiting-2.00)/1.00)*10.0
         else:
             hscore=min(100.0,70.0+((limiting-3.00)/2.0)*30.0)
         hscore=round(hscore,1)
-        hresult="Residue" if hcr>=3.00 and hor>=3.00 else ("Ambiguous" if hcr>=1.50 and hor>=1.50 else "Non-residue")
+        hresult="Residue" if hcr>=3.00 and hor>=3.00 else ("Ambiguous" if hcr>=2.00 and hor>=2.00 else "Non-residue")
         features["human_residue_score"]=hscore
         features["human_roi_rule_result"]=hresult
-        features["human_score_rule"]="C and O both >=3.00x -> Residue; both >=1.50x but either <3.00x -> Ambiguous; otherwise Non-residue"
+        features["human_score_rule"]="C and O both >=3.00x -> Residue; both >=2.00x but either <3.00x -> Ambiguous; otherwise Non-residue"
         features["residue_score"]=hscore/100.0
         features["result"]=hresult
         features["confidence"]="Human ROI"
@@ -380,7 +380,13 @@ def process_reanalysis_job(job_id,project_id,meta):
                     # never upserted here, so Human verification/AI metadata cannot be
                     # accidentally reset by a re-analysis.
                     row=db.upsert_point(project_id,r)
+                    old_analysis=None
                 else:
+                    # Re-analysis may regenerate the automatic CV features, but a
+                    # previously human-verified ROI is Ground Truth and must survive
+                    # unchanged. Keep both the human label and the exact normalized
+                    # ROI/features from the prior analysis record.
+                    old_analysis=db.get_analysis(str(row["id"])) if db.configured() else None
                     r["human_result"]=row.get("human_result")
                     r["human_confidence"]=row.get("human_confidence")
                     r["human_verified_at"]=row.get("human_verified_at")
@@ -388,6 +394,23 @@ def process_reanalysis_job(job_id,project_id,meta):
                     r["ai_result"]=row.get("ai_result")
                     r["ai_confidence"]=row.get("ai_confidence")
                     r["ai_rationale"]=row.get("ai_rationale")
+                    oldf=(old_analysis or {}).get("features") or {}
+                    old_polys=oldf.get("human_roi_polygons") or oldf.get("human_roi_polygon")
+                    if old_polys:
+                        newf=r.setdefault("features",{})
+                        # Preserve every Human ROI-derived field so the exact manual
+                        # annotation and its C/O Ground Truth do not move after re-analysis.
+                        for k,v in oldf.items():
+                            if k.startswith("human_"):
+                                newf[k]=v
+                        newf["human_roi_polygons"]=oldf.get("human_roi_polygons") or ([oldf.get("human_roi_polygon")] if oldf.get("human_roi_polygon") else [])
+                        newf["human_roi_polygon"]=(oldf.get("human_roi_polygon") or newf["human_roi_polygons"][0])
+                        newf["human_reanalysis_preserved"]=True
+                        # Human ROI remains the displayed/authoritative result for this point.
+                        if oldf.get("human_roi_rule_result"):
+                            newf["result"]=oldf.get("human_roi_rule_result")
+                            newf["confidence"]="Human ROI"
+                            newf["residue_score"]=oldf.get("human_residue_score",newf.get("residue_score"))
                 r["db_id"]=str(row["id"]); r["id"]=str(row["id"])
                 db.upsert_analysis(r["db_id"],r.get("features",{}))
                 for asset_type,key in r.get("r2_assets",{}).items(): db.upsert_asset(r["db_id"],asset_type,key)

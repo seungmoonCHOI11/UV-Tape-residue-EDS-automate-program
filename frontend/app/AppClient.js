@@ -218,7 +218,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  };
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
- const ratioClass=(x)=>x==null?"neutral":x>=3.00?"strong":x>=1.50?"positive":x<=0.90?"negative":"neutral";
+ const ratioClass=(x)=>x==null?"neutral":x>=3.00?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
  const ratioText=(x)=>x==null?"-":fmtRatio(x);
  const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
  return <div className="verificationPanel">
@@ -246,13 +246,13 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=3.00?'#159447':cRatio>=1.50?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=1.50?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=3.00?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
-    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C와 O가 모두 3.00× 이상</strong>이면 Residue, 둘 다 1.50× 이상이면서 하나라도 3.00× 미만이면 Ambiguous로 계산합니다.</span></div>
+    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C와 O가 모두 3.00× 이상</strong>이면 Residue, 둘 다 2.00× 이상이면서 하나라도 3.00× 미만이면 Ambiguous로 계산합니다.</span></div>
     <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{hasHumanROI?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
     <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(hasHumanROI?f.human_roi_area_px:f.roi_area_px)?`${(hasHumanROI?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{hasHumanROI&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{hasHumanROI&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
-    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: &lt;1.50× = Non-residue, 1.50–2.99× = Ambiguous, ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
+    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: &lt;2.00× = Non-residue, 2.00–2.99× = Ambiguous, ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
    </section>
   </div>
   <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 Ground Truth 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>

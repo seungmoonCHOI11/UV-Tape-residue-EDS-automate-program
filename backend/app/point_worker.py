@@ -659,12 +659,12 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     # versus the whole analytical field. SEM morphology and a single-channel
     # increase must not override this rule. The v23.6 lab rule is:
     #   - BOTH C and O >= 3.00x -> Residue
-    #   - BOTH C and O >= 1.50x but at least one < 3.00x -> Ambiguous
+    #   - BOTH C and O >= 2.00x but at least one < 3.00x -> Ambiguous
     #   - otherwise -> Non-residue
     c_ratio=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
     o_ratio=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
     STRONG_RATIO=3.00
-    MODERATE_RATIO=1.50
+    MODERATE_RATIO=2.00
     c_dual=float(np.clip((c_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
     o_dual=float(np.clip((o_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
     dual_element_support=float(min(c_dual,o_dual))
@@ -739,7 +739,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"v23.6 rule: Residue requires BOTH C and O ROI/Global ratios >=3.00x. If both are >=1.50x but either is below 3.00x, the result is Ambiguous. If either is below 1.50x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
+        "classification_note":"v23.7.20 rule: Residue requires BOTH C and O ROI/Global ratios >=3.00x (3–5x maps to the Residue score range; >5x remains Residue). If both are >=2.00x but either is below 3.00x, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
     },roi
 
 
@@ -800,14 +800,14 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
     cr=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
     orat=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
     # Human ROI score is recalculated independently from the AI/CV score.
-    # v23.6: <1.50 = non-residue, 1.50-2.99 = ambiguous, >=3.00 = residue.
+    # v23.7.20: <2.00 = non-residue, 2.00-2.99 = ambiguous, >=3.00 = residue.
     limiting=min(cr,orat)
     both=cr>=3.00 and orat>=3.00
-    moderate=cr>=1.50 and orat>=1.50
-    if limiting < 1.50:
-        human_score=min(59.0, max(0.0, 40.0 + (limiting-1.0)*38.0))
+    moderate=cr>=2.00 and orat>=2.00
+    if limiting < 2.00:
+        human_score=min(59.0, max(0.0, (limiting/2.00)*59.0))
     elif limiting < 3.00:
-        human_score=60.0 + ((limiting-1.50)/(3.00-1.50))*10.0
+        human_score=60.0 + ((limiting-2.00)/(3.00-2.00))*10.0
     else:
         human_score=min(100.0, 70.0 + ((limiting-3.00)/2.0)*30.0)
     human_score=round(float(np.clip(human_score,0,100)),1)
@@ -821,7 +821,7 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
         "human_roi_both_strong":bool(both),"human_roi_both_moderate":bool(moderate),
         "human_residue_score":human_score,
         "human_roi_rule_result":"Residue" if both else ("Ambiguous" if moderate else "Non-residue"),
-        "human_score_rule":"C and O both >=3.00x -> Residue; both >=1.50x but either <3.00x -> Ambiguous; otherwise Non-residue",
+        "human_score_rule":"C and O both >=3.00x -> Residue; both >=2.00x but either <3.00x -> Ambiguous; otherwise Non-residue",
     }
 
 def run(payload):

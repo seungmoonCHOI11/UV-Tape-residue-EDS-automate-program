@@ -128,20 +128,21 @@ def re_digits(value: Any) -> str:
     return m.group(0) if m else "0"
 
 
-def get_ground_truth_examples(project_id: str, limit: int = 8):
-    """Return human-verified ROI examples for project-specific ROI learning.
+def get_ground_truth_examples(project_id: str, limit: int = 12):
+    """Return balanced, project-specific Human ROI references for later ROI assistance.
 
-    These records are not used to retrain the base OpenAI model. They are
-    project-level Ground Truth references that can be supplied to the ROI
-    assistant and CV refinement stages on later analyses.
+    Human-verified annotations are not used to retrain the base model. They are
+    project-level Ground Truth references. Prefer a balanced sample across the
+    verified Residue / Ambiguous / Non-residue classes so one class does not
+    dominate the guidance when the project grows beyond the first 30 points.
     """
     if not configured():
         return []
     client=get_client()
-    rows=(client.table("points").select("id,power,time_sec,wafer,point,position,human_result")
+    rows=(client.table("points").select("id,power,time_sec,wafer,point,position,human_result,updated_at")
           .eq("project_id",project_id).not_.is_("human_result","null")
-          .order("updated_at",desc=True).limit(max(1,int(limit))).execute().data or [])
-    out=[]
+          .order("updated_at",desc=True).limit(max(30,int(limit)*4)).execute().data or [])
+    candidates=[]
     for row in rows:
         try:
             analyses=(client.table("analysis_results").select("features")
@@ -149,7 +150,7 @@ def get_ground_truth_examples(project_id: str, limit: int = 8):
             f=(analyses[0].get("features") or {}) if analyses else {}
             if not (f.get("human_roi_polygons") or f.get("human_roi_polygon")):
                 continue
-            out.append({
+            candidates.append({
                 "power":row.get("power"),"time_sec":row.get("time_sec"),
                 "wafer":row.get("wafer"),"point":row.get("point"),
                 "zone":row.get("position"),"human_result":row.get("human_result"),
@@ -162,8 +163,21 @@ def get_ground_truth_examples(project_id: str, limit: int = 8):
             })
         except Exception as e:
             print(f"[ground_truth] example lookup failed: {e}")
-    return out
-
+    if not candidates:
+        return []
+    # Balanced selection: take up to 4 recent examples per verified class, then
+    # fill remaining slots by recency. This lets new Human ROI decisions gradually
+    # replace old examples without discarding class diversity.
+    selected=[]
+    for label in ("Residue","Ambiguous","Non-residue"):
+        selected.extend([x for x in candidates if x.get("human_result")==label][:4])
+    seen={(x.get("power"),x.get("time_sec"),x.get("wafer"),x.get("point")) for x in selected}
+    for x in candidates:
+        key=(x.get("power"),x.get("time_sec"),x.get("wafer"),x.get("point"))
+        if key not in seen:
+            selected.append(x); seen.add(key)
+        if len(selected)>=int(limit): break
+    return selected[:int(limit)]
 
 def get_first_unverified_point(project_id: str):
     rows = (get_client().table("points").select("*")

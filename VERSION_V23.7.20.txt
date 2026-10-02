@@ -1,0 +1,2 @@
+UV-Tape Residue EDS — v23.7.20
+Human ROI Ground Truth preservation + 2x/3x C/O rule
