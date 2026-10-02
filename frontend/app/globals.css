@@ -295,3 +295,49 @@
  .verificationImages,.v21ElementStrip{grid-template-columns:1fr!important}
  .verificationImages .visual img,.v21ElementStrip .focusPanel img{height:260px!important}
 }
+
+/* v23.7.24 Verification workspace: larger modal + larger Point Navigator + Wafer filter */
+.verificationModal{
+  width:min(1600px,99.5vw)!important;
+  max-width:1600px!important;
+  max-height:98vh!important;
+}
+.verificationWorkspace{
+  grid-template-columns:220px minmax(0,1fr)!important;
+}
+.verificationQueue{
+  padding:12px!important;
+}
+.verificationQueueTitle b{font-size:13px!important}
+.verificationQueueTitle small{font-size:9.5px!important}
+.verificationQueue label{font-size:9.5px!important;margin:9px 0!important}
+.verificationQueue select{padding:8px 9px!important;font-size:10.5px!important}
+.verificationQueueCount{font-size:9.5px!important;padding:8px 2px!important}
+.verificationPointList{
+  height:calc(98vh - 285px)!important;
+  min-height:300px!important;
+  padding-right:4px!important;
+}
+.verificationPointItem{
+  grid-template-columns:38px 1fr!important;
+  padding:9px 8px!important;
+  min-height:48px!important;
+  margin-bottom:6px!important;
+}
+.verificationPointItem span{font-size:10.5px!important}
+.verificationPointItem em{font-size:8.5px!important}
+.verificationPointItem strong{font-size:8.5px!important}
+.verificationMain .verificationPanel{padding:20px!important}
+.verificationImages .visual img{height:340px!important}
+.v21ElementStrip .focusPanel img{height:350px!important}
+@media(max-width:1100px){
+  .verificationWorkspace{grid-template-columns:205px minmax(0,1fr)!important}
+  .verificationImages .visual img{height:320px!important}
+}
+@media(max-width:900px){
+  .verificationWorkspace{grid-template-columns:1fr!important}
+  .verificationPointList{height:170px!important;min-height:0!important}
+}
+@media(max-width:560px){
+  .verificationImages .visual img,.v21ElementStrip .focusPanel img{height:260px!important}
+}

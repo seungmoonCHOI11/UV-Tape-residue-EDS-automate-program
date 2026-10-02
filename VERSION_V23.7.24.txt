@@ -1,0 +1,6 @@
+UV-Tape Residue EDS v23.7.24
+- Verification modal enlarged within viewport
+- Point Navigator widened and point cards enlarged
+- Added Wafer filter below Condition
+- Navigation respects Condition + Wafer + Result filters
+- Preserved existing v23.7.23 features
