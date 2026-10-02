@@ -1,0 +1,4 @@
+UV-Tape Residue EDS Analyzer
+Version: 23.7.7
+
+Human ROI editor SEM loading/fallback fix.

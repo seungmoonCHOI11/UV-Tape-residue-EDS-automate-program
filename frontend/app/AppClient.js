@@ -262,14 +262,23 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  </div>
 }
 function HumanRoiEditor({p,saveHumanRoi}){
- const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
+ const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null), [imageReady,setImageReady]=useState(false), [imageError,setImageError]=useState(false);
  const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null);
  const regionsRef=useRef([]), currentRef=useRef([]), drawingRef=useRef(false), lastPointRef=useRef(null), rafRef=useRef(0);
 
  useEffect(()=>{
    if(!open)return;
-   const u=p.assets?.sem||p.assets?.sem_original||dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay;
-   setSrc(imageUrl(u));
+   // Use the same SEM source priority as the Verification image itself.
+   // Some legacy points do not expose `assets.sem` consistently, so trying only
+   // that single path can leave the canvas at the browser's empty 300x150 default.
+   const candidates=[
+     p.assets?.sem,
+     p.assets?.sem_original,
+     dynamicAsset(p,"sem"),
+     p.assets?.sem_residue_overlay,
+     dynamicAsset(p,"sem_residue_overlay")
+   ].filter(Boolean).map(imageUrl);
+   setImageReady(false);setImageError(false);setSrc(candidates[0]||null);
    const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
    regionsRef.current=stored; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
    setRegions(stored); setCurrentCount(0); setDrawing(false);
@@ -298,15 +307,36 @@ function HumanRoiEditor({p,saveHumanRoi}){
  useEffect(()=>{
    if(!open||!src)return;
    const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return;
-   const img=new Image(); img.onload=()=>{
+   let cancelled=false;
+   const img=new Image();
+   img.onload=()=>{
+     if(cancelled)return;
      imgRef.current=img;
-     const maxW=Math.max(320,w.clientWidth),maxH=430;
-     const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);
-     c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));
-     renderCanvas();
-   }; img.src=src;
-   return()=>{imgRef.current=null};
- },[open,src]);
+     const maxW=Math.max(320,w.clientWidth-16),maxH=430;
+     const scale=Math.min(maxW/Math.max(1,img.naturalWidth),maxH/Math.max(1,img.naturalHeight));
+     c.width=Math.max(1,Math.round(img.naturalWidth*scale));
+     c.height=Math.max(1,Math.round(img.naturalHeight*scale));
+     setImageReady(true);setImageError(false);
+     requestAnimationFrame(renderCanvas);
+   };
+   img.onerror=()=>{
+     if(cancelled)return;
+     // Move to the next known SEM asset if this point uses a legacy asset path.
+     const candidates=[
+       p.assets?.sem_residue_overlay,
+       p.assets?.sem,
+       p.assets?.sem_original,
+       dynamicAsset(p,"sem"),
+       dynamicAsset(p,"sem_residue_overlay")
+     ].filter(Boolean).map(imageUrl);
+     const i=candidates.indexOf(src);
+     const next=candidates[i+1];
+     if(next){setSrc(next);return;}
+     setImageReady(false);setImageError(true);
+   };
+   img.src=src;
+   return()=>{cancelled=true;img.onload=null;img.onerror=null;imgRef.current=null};
+ },[open,src,p]);
 
  // Lightweight contour smoothing: remove dense/repeated mouse samples, then apply
  // one conservative closed moving-average pass. This only suppresses hand jitter;
@@ -367,7 +397,7 @@ function HumanRoiEditor({p,saveHumanRoi}){
    if(!all.length)return;
    setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}
  };
- return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+ return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className={`humanRoiCanvasWrap${imageReady?" ready":""}`} ref={wrapRef}>{imageReady?<canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} />:<div className="humanRoiCanvasLoading">{imageError?"SEM 이미지를 불러오지 못했습니다.":"SEM 이미지를 불러오는 중..."}</div>}</div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={!imageReady||currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={!imageReady||saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
 }
 
 function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
