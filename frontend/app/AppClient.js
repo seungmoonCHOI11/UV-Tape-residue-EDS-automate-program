@@ -264,39 +264,44 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
 function HumanRoiEditor({p,saveHumanRoi}){
  const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null), [imageReady,setImageReady]=useState(false), [imageError,setImageError]=useState(false);
  const pointKey=p?.id||`${p?.power}-${p?.time}-${p?.wafer}-${p?.point}`;
- const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null);
+ const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null); const blobUrlRef=useRef(null);
  const regionsRef=useRef([]), currentRef=useRef([]), drawingRef=useRef(false), lastPointRef=useRef(null), rafRef=useRef(0);
 
  useEffect(()=>{
-   // Verification navigation changes `p` while this component instance stays mounted.
-   // Never carry the editor state into the next Point: the next Point starts in the
-   // compact button state and only opens its editor after the user explicitly clicks.
-   setOpen(false);
-   setImageReady(false);setImageError(false);setSrc(null);
+   // Point navigation must always reset the editor to the compact button state.
+   setOpen(false); setImageReady(false); setImageError(false); setSrc(null);
    regionsRef.current=[]; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
    setRegions([]); setCurrentCount(0); setDrawing(false);
+   if(blobUrlRef.current){URL.revokeObjectURL(blobUrlRef.current);blobUrlRef.current=null;}
  },[pointKey]);
+
  useEffect(()=>{
    if(!open)return;
-   // Prefer the exact SEM source already proven to render in Verification.
-   // The previous versions tried a raw/dynamic endpoint first; on some legacy points
-   // that endpoint never completed, leaving the editor stuck on the loading state.
-   // The visible SEM overlay is a safe fallback and keeps the manual editor usable.
-   const candidates=[
-     // The Verification SEM source is already known to work for these legacy points.
-     // Use it first so the editor does not wait on a raw-SEM endpoint that may not
-     // exist for older records.
-     p.assets?.sem_residue_overlay,
-     p.assets?.sem,
-     p.assets?.sem_original,
-     `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
-     dynamicAsset(p,"sem_residue_overlay")
-   ].filter(Boolean).map(imageUrl).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);
-   setImageReady(false);setImageError(false);setSrc(candidates[0]||null);
-   const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
-   regionsRef.current=stored; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
-   setRegions(stored); setCurrentCount(0); setDrawing(false);
- },[open,pointKey]);
+   let cancelled=false;
+   const loadSem=async()=>{
+     setImageReady(false);setImageError(false);setSrc(null);
+     if(blobUrlRef.current){URL.revokeObjectURL(blobUrlRef.current);blobUrlRef.current=null;}
+     try{
+       // Always fetch the original SEM through the backend proxy.  This avoids
+       // cross-origin R2 images tainting the canvas when the user draws ROI.
+       const u=`${API}/api/assets/${encodeURIComponent(p.id)}/manual_sem?proxy=1&v=${encodeURIComponent(String(Date.now()))}`;
+       const r=await fetch(u,{cache:"no-store"});
+       if(!r.ok)throw new Error(`SEM HTTP ${r.status}`);
+       const blob=await r.blob();
+       if(!blob.type.startsWith("image/"))throw new Error("SEM response is not an image");
+       const objectUrl=URL.createObjectURL(blob);
+       if(cancelled){URL.revokeObjectURL(objectUrl);return;}
+       blobUrlRef.current=objectUrl;setSrc(objectUrl);
+       const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
+       regionsRef.current=stored;currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;
+       setRegions(stored);setCurrentCount(0);setDrawing(false);
+     }catch(e){
+       if(!cancelled){setImageReady(false);setImageError(true);}
+     }
+   };
+   loadSem();
+   return()=>{cancelled=true;};
+ },[open,pointKey,p?.id]);
 
  const pointFromEvent=e=>{
    const c=canvasRef.current;if(!c)return null;
@@ -308,8 +313,8 @@ function HumanRoiEditor({p,saveHumanRoi}){
    ctx.beginPath();
    poly.forEach((q,i)=>{const x=q.x*ctx.canvas.width,y=q.y*ctx.canvas.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
    ctx.strokeStyle=active?"#ffb000":"#ff2525";
-   ctx.lineWidth=active?3:4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();
-   if(!active&&poly.length>=3){ctx.closePath();}
+   ctx.lineWidth=active?4:4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();
+   if(!active&&poly.length>=3)ctx.closePath();
  };
  const renderCanvas=()=>{
    const c=canvasRef.current,ctx=c?.getContext("2d");
@@ -333,87 +338,42 @@ function HumanRoiEditor({p,saveHumanRoi}){
      setImageReady(true);setImageError(false);
      requestAnimationFrame(renderCanvas);
    };
-   img.onerror=()=>{
-     if(cancelled)return;
-     // Move to the next known SEM asset if this point uses a legacy asset path.
-     const candidates=[
-       p.assets?.sem_residue_overlay,
-       p.assets?.sem,
-       p.assets?.sem_original,
-       `/api/assets/${encodeURIComponent(p.id)}/manual_sem`,
-       dynamicAsset(p,"sem_residue_overlay")
-     ].filter(Boolean).map(imageUrl).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);
-     const i=candidates.indexOf(src);
-     const next=candidates[i+1];
-     if(next){setSrc(next);return;}
-     setImageReady(false);setImageError(true);
-   };
+   img.onerror=()=>{if(!cancelled){setImageReady(false);setImageError(true);}};
    img.src=src;
    return()=>{cancelled=true;img.onload=null;img.onerror=null;imgRef.current=null};
- },[open,src,p]);
+ },[open,src]);
 
- // Lightweight contour smoothing: remove dense/repeated mouse samples, then apply
- // one conservative closed moving-average pass. This only suppresses hand jitter;
- // it does not inspect or invent a residue boundary.
+ useEffect(()=>()=>{if(blobUrlRef.current)URL.revokeObjectURL(blobUrlRef.current);if(rafRef.current)cancelAnimationFrame(rafRef.current)},[]);
+
  const smoothClosedPath=poly=>{
    if(!Array.isArray(poly)||poly.length<6)return poly||[];
    const pts=[];const minStep=0.0018;
    for(const q of poly){const last=pts[pts.length-1];if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q)}
    if(pts.length<6)return pts;
    const n=pts.length;
-   return pts.map((q,i)=>{
-     const a=pts[(i-1+n)%n],b=pts[(i+1)%n];
-     return {x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))};
-   });
+   return pts.map((q,i)=>{const a=pts[(i-1+n)%n],b=pts[(i+1)%n];return {x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))};});
  };
  const startDraw=e=>{
-   e.preventDefault();
-   const q=pointFromEvent(e);if(!q)return;
-   currentRef.current=[q];lastPointRef.current=q;drawingRef.current=true;setDrawing(true);setCurrentCount(1);
-   renderCanvas();
+   e.preventDefault();const q=pointFromEvent(e);if(!q)return;
+   currentRef.current=[q];lastPointRef.current=q;drawingRef.current=true;setDrawing(true);setCurrentCount(1);renderCanvas();
    try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}
  };
  const draw=e=>{
-   if(!drawingRef.current)return;e.preventDefault();
-   const q=pointFromEvent(e);if(!q)return;
+   if(!drawingRef.current)return;e.preventDefault();const q=pointFromEvent(e);if(!q)return;
    const c=canvasRef.current,last=lastPointRef.current;if(!c||!last)return;
-   const px=Math.hypot((q.x-last.x)*c.width,(q.y-last.y)*c.height);
-   if(px<2.5)return;
+   const px=Math.hypot((q.x-last.x)*c.width,(q.y-last.y)*c.height);if(px<2.5)return;
    currentRef.current.push(q);lastPointRef.current=q;
-   // Draw only the newest segment directly; avoid React state updates and full redraws
-   // on every pointermove, which was the source of the editor lag.
-   const ctx=c.getContext("2d");
-   ctx.strokeStyle="#ffb000";ctx.lineWidth=3;ctx.lineJoin="round";ctx.lineCap="round";
-   ctx.beginPath();ctx.moveTo(last.x*c.width,last.y*c.height);ctx.lineTo(q.x*c.width,q.y*c.height);ctx.stroke();
-   if(!rafRef.current){rafRef.current=requestAnimationFrame(()=>{rafRef.current=0;setCurrentCount(currentRef.current.length)})}
+   const ctx=c.getContext("2d");ctx.strokeStyle="#ffb000";ctx.lineWidth=4;ctx.lineJoin="round";ctx.lineCap="round";ctx.beginPath();ctx.moveTo(last.x*c.width,last.y*c.height);ctx.lineTo(q.x*c.width,q.y*c.height);ctx.stroke();
+   if(!rafRef.current)rafRef.current=requestAnimationFrame(()=>{rafRef.current=0;setCurrentCount(currentRef.current.length)});
  };
- const endDraw=e=>{
-   if(!drawingRef.current)return;e?.preventDefault?.();drawingRef.current=false;lastPointRef.current=null;setDrawing(false);setCurrentCount(currentRef.current.length);
-   try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}
- };
- const finishRegion=()=>{
-   const raw=currentRef.current;if(raw.length<3)return;
-   const smoothed=smoothClosedPath(raw);
-   const next=[...regionsRef.current,smoothed];
-   regionsRef.current=next;currentRef.current=[];lastPointRef.current=null;
-   setRegions(next);setCurrentCount(0);setDrawing(false);drawingRef.current=false;renderCanvas();
- };
- const undo=()=>{
-   const cur=currentRef.current;if(!cur.length)return;
-   const next=cur.slice(0,-Math.min(12,cur.length));currentRef.current=next;lastPointRef.current=next[next.length-1]||null;setCurrentCount(next.length);renderCanvas();
- };
- const clear=()=>{regionsRef.current=[];currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;setRegions([]);setCurrentCount(0);setDrawing(false);renderCanvas()};
- const removeLastRegion=()=>{const next=regionsRef.current.slice(0,-1);regionsRef.current=next;setRegions(next);renderCanvas()};
- const save=async()=>{
-   const raw=currentRef.current;
-   let all=regionsRef.current;
-   if(raw.length>=3)all=[...all,smoothClosedPath(raw)];
-   if(!all.length)return;
-   setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}
- };
- return !open ? <div className="humanRoiBar"><span><b>{regions.length?"Human ROI가 저장되어 있습니다.":"Human ROI를 직접 지정할 수 있습니다."}</b> {regions.length?"필요하면 다시 수정할 수 있습니다.":"AI/CV ROI가 정확하지 않을 때 residue 외곽을 직접 그려주세요."}</span><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{regions.length?"Human ROI 수정":"Human ROI 직접 지정"}</button></div> : <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className={`humanRoiCanvasWrap${imageReady?" ready":""}`} ref={wrapRef}>{imageReady?<canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} />:<div className="humanRoiCanvasLoading">{imageError?"SEM 이미지를 불러오지 못했습니다.":"SEM 이미지를 불러오는 중..."}</div>}</div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={!imageReady||currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={!imageReady||saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+ const endDraw=e=>{if(!drawingRef.current)return;e?.preventDefault?.();drawingRef.current=false;lastPointRef.current=null;setDrawing(false);setCurrentCount(currentRef.current.length);try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}};
+ const finishRegion=()=>{const raw=currentRef.current;if(raw.length<3)return;const smoothed=smoothClosedPath(raw),next=[...regionsRef.current,smoothed];regionsRef.current=next;currentRef.current=[];lastPointRef.current=null;setRegions(next);setCurrentCount(0);setDrawing(false);drawingRef.current=false;renderCanvas();};
+ const undo=()=>{const cur=currentRef.current;if(!cur.length)return;const next=cur.slice(0,-Math.min(12,cur.length));currentRef.current=next;lastPointRef.current=next[next.length-1]||null;setCurrentCount(next.length);renderCanvas();};
+ const clear=()=>{regionsRef.current=[];currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;setRegions([]);setCurrentCount(0);setDrawing(false);renderCanvas();};
+ const removeLastRegion=()=>{const next=regionsRef.current.slice(0,-1);regionsRef.current=next;setRegions(next);renderCanvas();};
+ const save=async()=>{const raw=currentRef.current;let all=regionsRef.current;if(raw.length>=3)all=[...all,smoothClosedPath(raw)];if(!all.length)return;setSaving(true);try{await saveHumanRoi(all);setOpen(false);}finally{setSaving(false)}};
+ return !open ? <div className="humanRoiBar"><span><b>{regions.length?"Human ROI가 저장되어 있습니다.":"Human ROI를 직접 지정할 수 있습니다."}</b> {regions.length?"필요하면 다시 수정할 수 있습니다.":"AI/CV ROI가 정확하지 않을 때 residue 외곽을 직접 그려주세요."}</span><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{regions.length?"Human ROI 수정":"Human ROI 직접 지정"}</button></div> : <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className={`humanRoiCanvasWrap${imageReady?" ready":""}`} ref={wrapRef}>{imageReady?<canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw}/>:<div className="humanRoiCanvasLoading">{imageError?"SEM 이미지를 불러오지 못했습니다.":"SEM 이미지를 불러오는 중..."}</div>}</div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={!imageReady||currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={!imageReady||saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
 }
-
 function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){

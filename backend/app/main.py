@@ -716,7 +716,7 @@ def human_roi(point_id: str, payload: dict = Body(...)):
     return public_record(r)
 
 @app.get("/api/assets/{point_id}/{asset_type}")
-def asset(point_id:str,asset_type:str):
+def asset(point_id:str,asset_type:str,proxy: bool = False):
     r=RECORDS.get(point_id)
     key=None
     db_assets=[]
@@ -767,6 +767,23 @@ def asset(point_id:str,asset_type:str):
                     key=match["storage_path"]
                     break
     if key and r2.configured:
+        # Human ROI editor needs to draw the SEM into a canvas.  A direct
+        # presigned R2 URL can be displayed by <img>, but drawing that
+        # cross-origin image onto canvas can taint the canvas and leave the
+        # editor in a broken/loading state.  When proxy=1, serve the image
+        # through this API origin instead of redirecting to R2.
+        if proxy or asset_type == "manual_sem":
+            safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id))
+            cache_dir=OUTPUT/"_manual_sem_proxy"/safe_id
+            cache_dir.mkdir(parents=True,exist_ok=True)
+            cache=cache_dir/"sem.jpg"
+            try:
+                if not cache.exists() or cache.stat().st_size < 500:
+                    r2.download_file(key,cache)
+                if cache.exists() and cache.stat().st_size > 500:
+                    return FileResponse(str(cache),media_type="image/jpeg",headers={"Cache-Control":"no-store, max-age=0"})
+            except Exception as e:
+                print(f"[asset proxy] {point_id}/{asset_type}: {e}")
         return RedirectResponse(
             r2.presigned_url(key,expires=900),
             headers={"Cache-Control":"no-store, max-age=0"},
