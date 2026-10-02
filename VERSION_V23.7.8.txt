@@ -1,0 +1,5 @@
+UV-Tape-residue-EDS v23.7.8 GITHUB
+
+Verification Human ROI editor is collapsed behind an explicit button.
+Clicking the button opens the freehand SEM ROI editor; saved Human ROI can be edited again.
+Existing smoothing, multi-region drawing, 4px saved ROI line, Human ROI C/O recalculation and 3x rule are preserved.
