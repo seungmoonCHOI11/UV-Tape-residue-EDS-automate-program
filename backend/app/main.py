@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 import cv2, numpy as np
 from dotenv import load_dotenv
 
@@ -551,41 +551,29 @@ def _dynamic_asset(point_id: str, asset_type: str):
         make_co_overlay, enhance_element_map, analytical_mask, polygon_to_mask,
     )
 
-    stored_features=(RECORDS.get(point_id) or {}).get("features",{})
-    stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
+    c = load("c_map")
+    o = load("o_map")
+    n = load("n_map")
+    si = load("si_map")
 
-    # Human ROI overlays do not need to rerun the full residue detector.  The
-    # saved polygon(s) are already the authoritative mask, so build the mask
-    # directly. This removes a large amount of unnecessary CV work when the
-    # Verification screen requests SEM/C/O overlays after SAVE.
-    if stored_polygons:
-        roi=polygon_to_mask(sem.shape,stored_polygons)
-        if cv2.countNonZero(roi)<20:
-            return None
+    if c is not None and o is not None and n is not None and si is not None:
+        try:
+            features, roi = residue_features(sem, c, o, n, si)
+            stored_features=(RECORDS.get(point_id) or {}).get("features",{})
+            stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
+            if stored_polygons:
+                # Human ROI may contain multiple disconnected polygons.  Use the
+                # complete saved mask, not only the legacy first polygon.
+                human_mask=polygon_to_mask(sem.shape,stored_polygons)
+                if cv2.countNonZero(human_mask)>=20: roi=human_mask
+        except Exception:
+            features, roi = None, None
     else:
-        c = load("c_map")
-        o = load("o_map")
-        n = load("n_map")
-        si = load("si_map")
-        if c is not None and o is not None and n is not None and si is not None:
-            try:
-                features, roi = residue_features(sem, c, o, n, si)
-            except Exception:
-                features, roi = None, None
-        else:
-            candidates = detect_residue_candidates(sem, 8)
-            roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
+        candidates = detect_residue_candidates(sem, 8)
+        roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
 
     if roi is None:
         return None
-
-    # Only load the element maps when the requested overlay actually needs them.
-    # Human SEM overlay generation therefore remains SEM-only, while C/O overlays
-    # load just their corresponding source maps.
-    c = o = None
-    if asset_type in {"c_map_enhanced_overlay", "o_map_enhanced_overlay", "eds_co_overlay"}:
-        c = load("c_map")
-        o = load("o_map")
 
     if asset_type == "sem_residue_overlay":
         out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
@@ -623,17 +611,10 @@ def _load_raw_point_image(point_id: str, label: str):
     safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id; outdir.mkdir(parents=True,exist_ok=True)
     cache=outdir/f"manual_raw_{label}.jpg"
     try:
-        # A stale/partial cache must never be treated as a valid source image.
-        # Validate the decoded pixels and redownload once when necessary.
-        im=cv2.imread(str(cache),cv2.IMREAD_COLOR) if cache.exists() else None
-        if im is None:
-            try: cache.unlink(missing_ok=True)
-            except Exception: pass
-            r2.download_file(key,cache)
-            im=cv2.imread(str(cache),cv2.IMREAD_COLOR) if cache.exists() else None
+        if not cache.exists(): r2.download_file(key,cache)
+        im=cv2.imread(str(cache),cv2.IMREAD_COLOR)
         return im if im is not None else None
-    except Exception:
-        return None
+    except Exception: return None
 
 
 def _human_roi_mask_for_point(point_id: str, shape):
@@ -641,21 +622,6 @@ def _human_roi_mask_for_point(point_id: str, shape):
     f=r.get("features") or {}
     polygons=f.get("human_roi_polygons") or f.get("human_roi_polygon")
     return __import__('backend.app.point_worker',fromlist=['polygon_to_mask']).polygon_to_mask(shape,polygons)
-
-
-def _prebuild_human_dynamic_assets(point_id: str):
-    """Warm the Human ROI overlays immediately after SAVE.
-
-    Verification previously requested SEM/C/O dynamic assets independently.
-    Each request could rerun image/CV work, which made the screen appear with
-    Full EDS first and SEM/C/O much later.  Build the three Human ROI views once
-    here so the next Verification render can read cached files immediately.
-    """
-    for asset_type in ("sem_residue_overlay", "c_map_enhanced_overlay", "o_map_enhanced_overlay"):
-        try:
-            _dynamic_asset(point_id, asset_type)
-        except Exception as e:
-            print(f"[human_roi_assets] {asset_type}: {e}")
 
 
 def _invalidate_dynamic_assets(point_id: str):
@@ -712,10 +678,6 @@ def human_roi(point_id: str, payload: dict = Body(...)):
         f["human_roi_vs_ai_iou"]=round(inter/max(union,1),4)
     r["features"]=f
     _invalidate_dynamic_assets(point_id)
-    # Generate the Human ROI visuals now, not lazily during the next screen
-    # render. This prevents the Verification page from showing only Full EDS
-    # while SEM/C/O are still being generated.
-    _prebuild_human_dynamic_assets(point_id)
     if db.configured():
         db.upsert_analysis(point_id,f)
         try: db.add_review_history(point_id,r.get("human_result"),r.get("human_result"),"Manual ROI saved; C/O re-evaluated and stored as Ground Truth candidate.")
@@ -723,26 +685,7 @@ def human_roi(point_id: str, payload: dict = Body(...)):
     return public_record(r)
 
 @app.get("/api/assets/{point_id}/{asset_type}")
-def asset(point_id:str,asset_type:str,proxy: bool = False):
-    # Human ROI editor: use the exact same raw-SEM loader used by the
-    # Human ROI/C-O calculation path.  This avoids depending on a presigned
-    # R2 redirect or on a possibly stale manual-sem cache.
-    if asset_type == "manual_sem":
-        try:
-            im=_load_raw_point_image(point_id,"sem")
-            if im is not None:
-                safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id))
-                cache_dir=OUTPUT/"_manual_sem_proxy"/safe_id
-                cache_dir.mkdir(parents=True,exist_ok=True)
-                cache=cache_dir/"sem.jpg"
-                ok,enc=cv2.imencode(".jpg",im,[int(cv2.IMWRITE_JPEG_QUALITY),95])
-                if ok:
-                    enc.tofile(str(cache))
-                    return FileResponse(str(cache),media_type="image/jpeg",headers={"Cache-Control":"no-store, max-age=0"})
-        except Exception as e:
-            print(f"[manual_sem] raw loader failed for {point_id}: {e}")
-        # Continue into the compatibility asset resolver below if the raw
-        # source is unavailable.
+def asset(point_id:str,asset_type:str):
     r=RECORDS.get(point_id)
     key=None
     db_assets=[]
@@ -775,10 +718,6 @@ def asset(point_id:str,asset_type:str,proxy: bool = False):
                 return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
         if not key:
             aliases = {
-                # Raw SEM source for the manual Human ROI editor.  This endpoint
-                # must resolve to the original SEM instead of invoking the dynamic
-                # overlay renderer, which only knows overlay asset types.
-                "manual_sem": ["sem", "sem_original", "sem_residue_overlay"],
                 "sem_residue_overlay": ["sem"],
                 "eds_co_overlay": ["eds_map", "element_maps_enhanced", "full_element_maps_original"],
                 "eds_map": ["full_element_maps_original", "element_maps_enhanced"],
@@ -793,23 +732,6 @@ def asset(point_id:str,asset_type:str,proxy: bool = False):
                     key=match["storage_path"]
                     break
     if key and r2.configured:
-        # Human ROI editor needs to draw the SEM into a canvas.  A direct
-        # presigned R2 URL can be displayed by <img>, but drawing that
-        # cross-origin image onto canvas can taint the canvas and leave the
-        # editor in a broken/loading state.  When proxy=1, serve the image
-        # through this API origin instead of redirecting to R2.
-        if proxy or asset_type == "manual_sem":
-            safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id))
-            cache_dir=OUTPUT/"_manual_sem_proxy"/safe_id
-            cache_dir.mkdir(parents=True,exist_ok=True)
-            cache=cache_dir/"sem.jpg"
-            try:
-                if not cache.exists() or cache.stat().st_size < 500:
-                    r2.download_file(key,cache)
-                if cache.exists() and cache.stat().st_size > 500:
-                    return FileResponse(str(cache),media_type="image/jpeg",headers={"Cache-Control":"no-store, max-age=0"})
-            except Exception as e:
-                print(f"[asset proxy] {point_id}/{asset_type}: {e}")
         return RedirectResponse(
             r2.presigned_url(key,expires=900),
             headers={"Cache-Control":"no-store, max-age=0"},

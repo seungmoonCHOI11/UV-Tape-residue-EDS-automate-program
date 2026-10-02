@@ -207,15 +207,11 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const autoResult=f.result||"Ambiguous";
  const resultLabel=hasHumanROI?(f.human_roi_rule_result||"Ambiguous"):(autoResult==="Review"?"Ambiguous":autoResult);
  const confidence=hasHumanROI?"Human ROI":(f.confidence||"-");
- const humanDynamic=hasHumanROI;
  const maps={
-   // Before Human ROI is saved, use the already-stored/static analysis images first.
-   // Dynamic overlays can be expensive on legacy points, so they are only requested
-   // after a Human ROI actually exists.
-   sem:humanDynamic?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem]:[p.assets?.sem_residue_overlay,p.assets?.sem,dynamicAsset(p,"sem_residue_overlay")],
-   eds:[p.assets?.eds_map,p.assets?.full_element_maps_original,dynamicAsset(p,"eds_map")],
-   c:humanDynamic?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map]:[p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map,dynamicAsset(p,"c_map_enhanced_overlay")],
-   o:humanDynamic?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]:[p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map,dynamicAsset(p,"o_map_enhanced_overlay")]
+   sem:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
+   eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
+   c:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
+   o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
@@ -262,118 +258,44 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  </div>
 }
 function HumanRoiEditor({p,saveHumanRoi}){
- const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null), [imageReady,setImageReady]=useState(false), [imageError,setImageError]=useState(false);
- const pointKey=p?.id||`${p?.power}-${p?.time}-${p?.wafer}-${p?.point}`;
- const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null); const blobUrlRef=useRef(null);
- const regionsRef=useRef([]), currentRef=useRef([]), drawingRef=useRef(false), lastPointRef=useRef(null), rafRef=useRef(0);
-
- useEffect(()=>{
-   // Point navigation must always reset the editor to the compact button state.
-   setOpen(false); setImageReady(false); setImageError(false); setSrc(null);
-   regionsRef.current=[]; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
-   setRegions([]); setCurrentCount(0); setDrawing(false);
-   if(blobUrlRef.current){URL.revokeObjectURL(blobUrlRef.current);blobUrlRef.current=null;}
- },[pointKey]);
-
- useEffect(()=>{
-   if(!open)return;
-   let cancelled=false;
-   const loadSem=async()=>{
-     setImageReady(false);setImageError(false);setSrc(null);
-     if(blobUrlRef.current){URL.revokeObjectURL(blobUrlRef.current);blobUrlRef.current=null;}
-     try{
-       // Always fetch the original SEM through the backend proxy.  This avoids
-       // cross-origin R2 images tainting the canvas when the user draws ROI.
-       const u=`${API}/api/assets/${encodeURIComponent(p.id)}/manual_sem?proxy=1&v=${encodeURIComponent(String(Date.now()))}`;
-       const r=await fetch(u,{cache:"no-store"});
-       if(!r.ok)throw new Error(`SEM HTTP ${r.status}`);
-       const blob=await r.blob();
-       if(!blob.type.startsWith("image/"))throw new Error("SEM response is not an image");
-       const objectUrl=URL.createObjectURL(blob);
-       if(cancelled){URL.revokeObjectURL(objectUrl);return;}
-       blobUrlRef.current=objectUrl;setSrc(objectUrl);
-       const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
-       regionsRef.current=stored;currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;
-       setRegions(stored);setCurrentCount(0);setDrawing(false);
-     }catch(e){
-       if(!cancelled){setImageReady(false);setImageError(true);}
-     }
-   };
-   loadSem();
-   return()=>{cancelled=true;};
- },[open,pointKey,p?.id]);
-
- const pointFromEvent=e=>{
-   const c=canvasRef.current;if(!c)return null;
-   const r=c.getBoundingClientRect();
-   return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};
- };
- const drawPoly=(ctx,poly,active=false)=>{
-   if(!poly?.length)return;
-   ctx.beginPath();
-   poly.forEach((q,i)=>{const x=q.x*ctx.canvas.width,y=q.y*ctx.canvas.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
-   ctx.strokeStyle=active?"#ffb000":"#ff2525";
-   ctx.lineWidth=active?4:4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();
-   if(!active&&poly.length>=3)ctx.closePath();
- };
- const renderCanvas=()=>{
-   const c=canvasRef.current,ctx=c?.getContext("2d");
-   if(!c||!ctx||!imgRef.current)return;
-   ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(imgRef.current,0,0,c.width,c.height);
-   regionsRef.current.forEach(r=>drawPoly(ctx,r,false));
-   const cur=currentRef.current;if(cur.length>1)drawPoly(ctx,cur,true);
- };
- useEffect(()=>{
-   if(!open||!src)return;
-   const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return;
-   let cancelled=false;
-   const img=new Image();
-   img.onload=()=>{
-     if(cancelled)return;
-     imgRef.current=img;
-     const maxW=Math.max(320,w.clientWidth-16),maxH=430;
-     const scale=Math.min(maxW/Math.max(1,img.naturalWidth),maxH/Math.max(1,img.naturalHeight));
-     c.width=Math.max(1,Math.round(img.naturalWidth*scale));
-     c.height=Math.max(1,Math.round(img.naturalHeight*scale));
-     setImageReady(true);setImageError(false);
-     requestAnimationFrame(renderCanvas);
-   };
-   img.onerror=()=>{if(!cancelled){setImageReady(false);setImageError(true);}};
-   img.src=src;
-   return()=>{cancelled=true;img.onload=null;img.onerror=null;imgRef.current=null};
- },[open,src]);
-
- useEffect(()=>()=>{if(blobUrlRef.current)URL.revokeObjectURL(blobUrlRef.current);if(rafRef.current)cancelAnimationFrame(rafRef.current)},[]);
-
+ const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
+ const canvasRef=useRef(); const wrapRef=useRef();
+ useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]); setRegions(stored); setCurrent([]); setDrawing(false);},[open,p]);
+ useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
+   const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>1){ctx.strokeStyle=active?"#ffb000":"#ff2525";ctx.lineWidth=active?2:3;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();if(!active&&poly.length>=3){ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();}}};
+   regions.forEach(r=>drawPoly(r,false)); drawPoly(current,true);
+ };img.src=src;},[open,src,regions,current]);
+ if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)||Array.isArray(p.features?.human_roi_polygons)?"Edit Human ROI":"Set Human ROI"}</button><span>{(p.features?.human_roi_polygons?.length||0)>1?`${p.features.human_roi_polygons.length}개 Human ROI 저장됨`:Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
+ const pointFromEvent=e=>{const c=canvasRef.current;if(!c)return null;const r=c.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};};
+ const startDraw=e=>{e.preventDefault();const q=pointFromEvent(e);if(!q)return;setDrawing(true);setCurrent([q]);try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}};
+ const draw=e=>{if(!drawing)return;e.preventDefault();const q=pointFromEvent(e);if(!q)return;setCurrent(v=>{const last=v[v.length-1];if(last&&Math.hypot((q.x-last.x)*canvasRef.current.width,(q.y-last.y)*canvasRef.current.height)<2)return v;return [...v,q]});};
+ const endDraw=e=>{if(!drawing)return;e?.preventDefault?.();setDrawing(false);try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}};
  const smoothClosedPath=poly=>{
    if(!Array.isArray(poly)||poly.length<6)return poly||[];
-   const pts=[];const minStep=0.0018;
-   for(const q of poly){const last=pts[pts.length-1];if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q)}
+   const pts=[];
+   const minStep=0.0018;
+   for(const q of poly){
+     const last=pts[pts.length-1];
+     if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q);
+   }
    if(pts.length<6)return pts;
    const n=pts.length;
-   return pts.map((q,i)=>{const a=pts[(i-1+n)%n],b=pts[(i+1)%n];return {x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))};});
+   return pts.map((q,i)=>{
+     const a=pts[(i-1+n)%n],b=pts[(i+1)%n];
+     return {
+       x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),
+       y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))
+     };
+   });
  };
- const startDraw=e=>{
-   e.preventDefault();const q=pointFromEvent(e);if(!q)return;
-   currentRef.current=[q];lastPointRef.current=q;drawingRef.current=true;setDrawing(true);setCurrentCount(1);renderCanvas();
-   try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}
- };
- const draw=e=>{
-   if(!drawingRef.current)return;e.preventDefault();const q=pointFromEvent(e);if(!q)return;
-   const c=canvasRef.current,last=lastPointRef.current;if(!c||!last)return;
-   const px=Math.hypot((q.x-last.x)*c.width,(q.y-last.y)*c.height);if(px<2.5)return;
-   currentRef.current.push(q);lastPointRef.current=q;
-   const ctx=c.getContext("2d");ctx.strokeStyle="#ffb000";ctx.lineWidth=4;ctx.lineJoin="round";ctx.lineCap="round";ctx.beginPath();ctx.moveTo(last.x*c.width,last.y*c.height);ctx.lineTo(q.x*c.width,q.y*c.height);ctx.stroke();
-   if(!rafRef.current)rafRef.current=requestAnimationFrame(()=>{rafRef.current=0;setCurrentCount(currentRef.current.length)});
- };
- const endDraw=e=>{if(!drawingRef.current)return;e?.preventDefault?.();drawingRef.current=false;lastPointRef.current=null;setDrawing(false);setCurrentCount(currentRef.current.length);try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}};
- const finishRegion=()=>{const raw=currentRef.current;if(raw.length<3)return;const smoothed=smoothClosedPath(raw),next=[...regionsRef.current,smoothed];regionsRef.current=next;currentRef.current=[];lastPointRef.current=null;setRegions(next);setCurrentCount(0);setDrawing(false);drawingRef.current=false;renderCanvas();};
- const undo=()=>{const cur=currentRef.current;if(!cur.length)return;const next=cur.slice(0,-Math.min(12,cur.length));currentRef.current=next;lastPointRef.current=next[next.length-1]||null;setCurrentCount(next.length);renderCanvas();};
- const clear=()=>{regionsRef.current=[];currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;setRegions([]);setCurrentCount(0);setDrawing(false);renderCanvas();};
- const removeLastRegion=()=>{const next=regionsRef.current.slice(0,-1);regionsRef.current=next;setRegions(next);renderCanvas();};
- const save=async()=>{const raw=currentRef.current;let all=regionsRef.current;if(raw.length>=3)all=[...all,smoothClosedPath(raw)];if(!all.length)return;setSaving(true);try{await saveHumanRoi(all);setOpen(false);}finally{setSaving(false)}};
- return !open ? <div className="humanRoiBar"><span><b>{regions.length?"Human ROI가 저장되어 있습니다.":"Human ROI를 직접 지정할 수 있습니다."}</b> {regions.length?"필요하면 다시 수정할 수 있습니다.":"AI/CV ROI가 정확하지 않을 때 residue 외곽을 직접 그려주세요."}</span><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{regions.length?"Human ROI 수정":"Human ROI 직접 지정"}</button></div> : <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className={`humanRoiCanvasWrap${imageReady?" ready":""}`} ref={wrapRef}>{imageReady?<canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw}/>:<div className="humanRoiCanvasLoading">{imageError?"SEM 이미지를 불러오지 못했습니다.":"SEM 이미지를 불러오는 중..."}</div>}</div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={!imageReady||currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={!imageReady||saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+ const finishRegion=()=>{if(current.length<3)return;setRegions(v=>[...v,smoothClosedPath(current)]);setCurrent([]);setDrawing(false)};
+ const undo=()=>setCurrent(v=>v.slice(0,-Math.min(12,v.length||0)));
+ const clear=()=>{setRegions([]);setCurrent([]);setDrawing(false)};
+ const removeLastRegion=()=>setRegions(v=>v.slice(0,-1));
+ const save=async()=>{const all=current.length>=3?[...regions,smoothClosedPath(current)]:regions;if(!all.length)return;setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}};
+ return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 하나의 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} onPointerLeave={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||(!regions.length&&current.length<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
 }
+
 function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){

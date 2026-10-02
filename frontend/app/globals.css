@@ -274,6 +274,3 @@
 
 /* v23.7 Human ROI freehand editor */
 .humanRoiCanvasWrap canvas.humanRoiDrawCanvas{display:block;max-width:100%;height:auto;cursor:crosshair;touch-action:none;user-select:none;-webkit-user-select:none}
-
-/* v23.7.7 Human ROI canvas load guard */
-.humanRoiCanvasWrap{min-height:150px;align-items:center}.humanRoiCanvasWrap.ready{min-height:0}.humanRoiCanvasLoading{width:100%;min-height:180px;display:flex;align-items:center;justify-content:center;color:#aeb7c5;font-size:12px;background:#151922;border-radius:6px}
