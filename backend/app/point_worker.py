@@ -768,7 +768,12 @@ def polygon_to_mask(shape, polygon):
                 continue
         if len(pts)>=3:
             cv2.fillPoly(mask,[np.asarray(pts,np.int32)],255)
-    mask[~(analytical_mask((h,w))>0)]=0
+    # Human ROI coordinates are drawn against the full SEM image shown in the
+    # Verification editor.  The previous 0.84 analytical cutoff removed the
+    # lowest ~16% of the image, which could clip legitimate residues near the
+    # bottom of the analytical field.  Keep only the actual bottom metadata/
+    # scale-bar band out of Human ROI calculations.
+    mask[~(analytical_mask((h,w), footer_fraction=0.92)>0)]=0
     return mask
 
 
