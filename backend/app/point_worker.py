@@ -215,6 +215,13 @@ def detect_residue_candidates(sem, max_candidates=8):
         if any(np.hypot((cx-d["cx"])/max(d["ww"],20),(cy-d["cy"])/max(d["hh"],20))<.55 for d in out): continue
         c={**c,"cx":cx,"cy":cy,"ww":ww,"hh":hh}; out.append(c)
         if len(out)>=max_candidates: break
+    # v23.8: record the local-background threshold strategy so Verification can
+    # explain why the same nominal threshold is not used for every SEM. The actual
+    # segmentation is already based on local background + robust MAD rather than a
+    # single global grayscale cutoff.
+    out_meta = {"threshold_mode":"adaptive_local_background_mad","threshold_factor":2.80,"threshold_min":9.0,"background_median":round(float(np.median(raw_bg)),2),"background_mad":round(float(dmad),3),"background_robust_sigma":round(float(drs),3)}
+    for c in out:
+        c["threshold_meta"] = out_meta
     return out
 
 def detect_residue_mask(sem):
@@ -636,6 +643,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     # Select one primary physical residue. Fragmented pieces belonging to that residue
     # are merged earlier; separate distant particles should not dilute the main ROI.
     item=scored[0]
+    threshold_meta=(item[1].get("threshold_meta") or {})
     selected=[{"sel":item[0],"c":item[1],"cm":item[2],"om":item[3],"ms":item[4],"mz":item[5],"sp":item[6],"cx":item[1]["cx"],"cy":item[1]["cy"],"ww":item[1]["ww"],"hh":item[1]["hh"]}]
 
     roi=np.zeros((h,w),np.uint8)
@@ -728,7 +736,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "c_dual_evidence":round(c_dual,4),"o_dual_evidence":round(o_dual,4),"dual_element_support":round(dual_element_support,4),
         "both_c_o_strong":bool(both_strong),"both_c_o_moderate":bool(both_moderate),
         "c_coverage":cm["coverage"],"o_coverage":om["coverage"],"c_spatial_overlap":cm["overlap"],"o_spatial_overlap":om["overlap"],
-        "spatial_overlap":round(spatial*100,2),"n_enrichment":nm["contrast_pct"],"n_log2_ratio":nm["log2_ratio"],"n_zscore":nm["zscore"],"n_coverage":nm["coverage"],
+        "spatial_overlap":round(spatial*100,2),"n_enrichment":nm["contrast_pct"],"n_log2_ratio":nm["log2_ratio"],"n_zscore":nm["zscore"],"n_coverage":nm["coverage"],"n_roi_mean":nm["roi_mean"],"n_global_mean":nm["global_mean"],"n_roi_global_ratio":round((nm["roi_mean"]/nm["global_mean"]) if nm["global_mean"] else 0.0,4),
         "si_enrichment":sm["contrast_pct"],"si_zscore":sm["zscore"],"morphology_score":round(float(morph),4),"cluster_score":round(spatial,4),
         "roi_area_px":roi_area,"candidate_area_px":candidate_area,"candidate_coverage":round(candidate_area/max(box_area,1)*100,2),
         "roi_quality":rq["roi_quality"],"roi_fill_ratio":rq["roi_fill_ratio"],"roi_component_count":rq["roi_component_count"],"roi_bbox_area_px":rq["roi_bbox_area_px"],
@@ -737,6 +745,12 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "o_roi_mean":om["roi_mean"],"o_global_mean":om["global_mean"],"o_global_std":om["global_std"],
         "selected_candidate_rank":1,"candidate_count":len(scored),"selected_candidate_count":len(selected),"candidate_selection_score":round(best_score,4),
         "review_reasons":reasons,
+        "threshold_mode":threshold_meta.get("threshold_mode","adaptive_local_background_mad"),
+        "threshold_factor":threshold_meta.get("threshold_factor",2.80),
+        "threshold_min":threshold_meta.get("threshold_min",9.0),
+        "threshold_background_median":threshold_meta.get("background_median"),
+        "threshold_background_mad":threshold_meta.get("background_mad"),
+        "threshold_robust_sigma":threshold_meta.get("background_robust_sigma"),
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "classification_note":"v23.6 rule: Residue requires BOTH C and O ROI/Global ratios >=3.00x. If both are >=1.50x but either is below 3.00x, the result is Ambiguous. If either is below 1.50x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
