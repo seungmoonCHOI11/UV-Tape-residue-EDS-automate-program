@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, Response
 import cv2, numpy as np
 from dotenv import load_dotenv
 
@@ -623,10 +623,17 @@ def _load_raw_point_image(point_id: str, label: str):
     safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id; outdir.mkdir(parents=True,exist_ok=True)
     cache=outdir/f"manual_raw_{label}.jpg"
     try:
-        if not cache.exists(): r2.download_file(key,cache)
-        im=cv2.imread(str(cache),cv2.IMREAD_COLOR)
+        # A stale/partial cache must never be treated as a valid source image.
+        # Validate the decoded pixels and redownload once when necessary.
+        im=cv2.imread(str(cache),cv2.IMREAD_COLOR) if cache.exists() else None
+        if im is None:
+            try: cache.unlink(missing_ok=True)
+            except Exception: pass
+            r2.download_file(key,cache)
+            im=cv2.imread(str(cache),cv2.IMREAD_COLOR) if cache.exists() else None
         return im if im is not None else None
-    except Exception: return None
+    except Exception:
+        return None
 
 
 def _human_roi_mask_for_point(point_id: str, shape):
@@ -717,6 +724,25 @@ def human_roi(point_id: str, payload: dict = Body(...)):
 
 @app.get("/api/assets/{point_id}/{asset_type}")
 def asset(point_id:str,asset_type:str,proxy: bool = False):
+    # Human ROI editor: use the exact same raw-SEM loader used by the
+    # Human ROI/C-O calculation path.  This avoids depending on a presigned
+    # R2 redirect or on a possibly stale manual-sem cache.
+    if asset_type == "manual_sem":
+        try:
+            im=_load_raw_point_image(point_id,"sem")
+            if im is not None:
+                safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id))
+                cache_dir=OUTPUT/"_manual_sem_proxy"/safe_id
+                cache_dir.mkdir(parents=True,exist_ok=True)
+                cache=cache_dir/"sem.jpg"
+                ok,enc=cv2.imencode(".jpg",im,[int(cv2.IMWRITE_JPEG_QUALITY),95])
+                if ok:
+                    enc.tofile(str(cache))
+                    return FileResponse(str(cache),media_type="image/jpeg",headers={"Cache-Control":"no-store, max-age=0"})
+        except Exception as e:
+            print(f"[manual_sem] raw loader failed for {point_id}: {e}")
+        # Continue into the compatibility asset resolver below if the raw
+        # source is unavailable.
     r=RECORDS.get(point_id)
     key=None
     db_assets=[]
