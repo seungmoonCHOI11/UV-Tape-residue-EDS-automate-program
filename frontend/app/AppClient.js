@@ -258,24 +258,112 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  </div>
 }
 function HumanRoiEditor({p,saveHumanRoi}){
- const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
- const canvasRef=useRef(); const wrapRef=useRef();
- useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]); setRegions(stored); setCurrent([]); setDrawing(false);},[open,p]);
- useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
-   const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>1){ctx.strokeStyle=active?"#ffb000":"#ff2525";ctx.lineWidth=active?2:3;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();if(!active&&poly.length>=3){ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();}}};
-   regions.forEach(r=>drawPoly(r,false)); drawPoly(current,true);
- };img.src=src;},[open,src,regions,current]);
- if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)||Array.isArray(p.features?.human_roi_polygons)?"Edit Human ROI":"Set Human ROI"}</button><span>{(p.features?.human_roi_polygons?.length||0)>1?`${p.features.human_roi_polygons.length}개 Human ROI 저장됨`:Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
- const pointFromEvent=e=>{const c=canvasRef.current;if(!c)return null;const r=c.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};};
- const startDraw=e=>{e.preventDefault();const q=pointFromEvent(e);if(!q)return;setDrawing(true);setCurrent([q]);try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}};
- const draw=e=>{if(!drawing)return;e.preventDefault();const q=pointFromEvent(e);if(!q)return;setCurrent(v=>{const last=v[v.length-1];if(last&&Math.hypot((q.x-last.x)*canvasRef.current.width,(q.y-last.y)*canvasRef.current.height)<2)return v;return [...v,q]});};
- const endDraw=e=>{if(!drawing)return;e?.preventDefault?.();setDrawing(false);try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}};
- const finishRegion=()=>{if(current.length<3)return;setRegions(v=>[...v,current]);setCurrent([]);setDrawing(false)};
- const undo=()=>setCurrent(v=>v.slice(0,-Math.min(12,v.length||0)));
- const clear=()=>{setRegions([]);setCurrent([]);setDrawing(false)};
- const removeLastRegion=()=>setRegions(v=>v.slice(0,-1));
- const save=async()=>{const all=current.length>=3?[...regions,current]:regions;if(!all.length)return;setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}};
- return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 하나의 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} onPointerLeave={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||(!regions.length&&current.length<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
+ const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [currentCount,setCurrentCount]=useState(0), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
+ const canvasRef=useRef(); const wrapRef=useRef(); const imgRef=useRef(null);
+ const regionsRef=useRef([]), currentRef=useRef([]), drawingRef=useRef(false), lastPointRef=useRef(null), rafRef=useRef(0);
+
+ useEffect(()=>{
+   if(!open)return;
+   const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem;
+   setSrc(imageUrl(u));
+   const stored=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
+   regionsRef.current=stored; currentRef.current=[]; lastPointRef.current=null; drawingRef.current=false;
+   setRegions(stored); setCurrentCount(0); setDrawing(false);
+ },[open,p]);
+
+ const pointFromEvent=e=>{
+   const c=canvasRef.current;if(!c)return null;
+   const r=c.getBoundingClientRect();
+   return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};
+ };
+ const drawPoly=(ctx,poly,active=false)=>{
+   if(!poly?.length)return;
+   ctx.beginPath();
+   poly.forEach((q,i)=>{const x=q.x*ctx.canvas.width,y=q.y*ctx.canvas.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
+   ctx.strokeStyle=active?"#ffb000":"#ff2525";
+   ctx.lineWidth=active?3:4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();
+   if(!active&&poly.length>=3){ctx.closePath();}
+ };
+ const renderCanvas=()=>{
+   const c=canvasRef.current,ctx=c?.getContext("2d");
+   if(!c||!ctx||!imgRef.current)return;
+   ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(imgRef.current,0,0,c.width,c.height);
+   regionsRef.current.forEach(r=>drawPoly(ctx,r,false));
+   const cur=currentRef.current;if(cur.length>1)drawPoly(ctx,cur,true);
+ };
+ useEffect(()=>{
+   if(!open||!src)return;
+   const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return;
+   const img=new Image(); img.onload=()=>{
+     imgRef.current=img;
+     const maxW=Math.max(320,w.clientWidth),maxH=430;
+     const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);
+     c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));
+     renderCanvas();
+   }; img.src=src;
+   return()=>{imgRef.current=null};
+ },[open,src]);
+
+ // Lightweight contour smoothing: remove dense/repeated mouse samples, then apply
+ // one conservative closed moving-average pass. This only suppresses hand jitter;
+ // it does not inspect or invent a residue boundary.
+ const smoothClosedPath=poly=>{
+   if(!Array.isArray(poly)||poly.length<6)return poly||[];
+   const pts=[];const minStep=0.0018;
+   for(const q of poly){const last=pts[pts.length-1];if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q)}
+   if(pts.length<6)return pts;
+   const n=pts.length;
+   return pts.map((q,i)=>{
+     const a=pts[(i-1+n)%n],b=pts[(i+1)%n];
+     return {x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))};
+   });
+ };
+ const startDraw=e=>{
+   e.preventDefault();
+   const q=pointFromEvent(e);if(!q)return;
+   currentRef.current=[q];lastPointRef.current=q;drawingRef.current=true;setDrawing(true);setCurrentCount(1);
+   renderCanvas();
+   try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}
+ };
+ const draw=e=>{
+   if(!drawingRef.current)return;e.preventDefault();
+   const q=pointFromEvent(e);if(!q)return;
+   const c=canvasRef.current,last=lastPointRef.current;if(!c||!last)return;
+   const px=Math.hypot((q.x-last.x)*c.width,(q.y-last.y)*c.height);
+   if(px<2.5)return;
+   currentRef.current.push(q);lastPointRef.current=q;
+   // Draw only the newest segment directly; avoid React state updates and full redraws
+   // on every pointermove, which was the source of the editor lag.
+   const ctx=c.getContext("2d");
+   ctx.strokeStyle="#ffb000";ctx.lineWidth=3;ctx.lineJoin="round";ctx.lineCap="round";
+   ctx.beginPath();ctx.moveTo(last.x*c.width,last.y*c.height);ctx.lineTo(q.x*c.width,q.y*c.height);ctx.stroke();
+   if(!rafRef.current){rafRef.current=requestAnimationFrame(()=>{rafRef.current=0;setCurrentCount(currentRef.current.length)})}
+ };
+ const endDraw=e=>{
+   if(!drawingRef.current)return;e?.preventDefault?.();drawingRef.current=false;lastPointRef.current=null;setDrawing(false);setCurrentCount(currentRef.current.length);
+   try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{}
+ };
+ const finishRegion=()=>{
+   const raw=currentRef.current;if(raw.length<3)return;
+   const smoothed=smoothClosedPath(raw);
+   const next=[...regionsRef.current,smoothed];
+   regionsRef.current=next;currentRef.current=[];lastPointRef.current=null;
+   setRegions(next);setCurrentCount(0);setDrawing(false);drawingRef.current=false;renderCanvas();
+ };
+ const undo=()=>{
+   const cur=currentRef.current;if(!cur.length)return;
+   const next=cur.slice(0,-Math.min(12,cur.length));currentRef.current=next;lastPointRef.current=next[next.length-1]||null;setCurrentCount(next.length);renderCanvas();
+ };
+ const clear=()=>{regionsRef.current=[];currentRef.current=[];lastPointRef.current=null;drawingRef.current=false;setRegions([]);setCurrentCount(0);setDrawing(false);renderCanvas()};
+ const removeLastRegion=()=>{const next=regionsRef.current.slice(0,-1);regionsRef.current=next;setRegions(next);renderCanvas()};
+ const save=async()=>{
+   const raw=currentRef.current;
+   let all=regionsRef.current;
+   if(raw.length>=3)all=[...all,smoothClosedPath(raw)];
+   if(!all.length)return;
+   setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}
+ };
+ return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓은 뒤 <b>영역 완료</b>를 누르면 마우스 떨림을 약하게 smoothing한 ROI가 추가됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 선: {currentCount}점 · 저장할 영역: {regions.length}개{drawing?" · 그리는 중":""}</span><span>노란색=작성 중 · 빨간색=저장된 Human ROI · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!currentCount}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={currentCount<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving||(!regions.length&&currentCount<3)} onClick={save}>{saving?"Saving...":"Save Human ROI"}</button></div></div>
 }
 
 function VerificationModal({p,idx,total,close,human,prev,next,saveHumanRoi}){return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><button className="secondary" onClick={close}>Close</button></div><Review p={p} idx={idx} total={total} prev={prev} next={next} human={human} saveHumanRoi={saveHumanRoi}/></div></div>}
