@@ -487,11 +487,13 @@ def _collect_asset_keys(point_id: str) -> dict:
 
 
 def _dynamic_asset(point_id: str, asset_type: str):
-    """Generate a no-Local-Ring overlay for legacy points that lack v21 assets.
+    """Generate and cache Verification overlays.
 
-    This is a compatibility path only. New uploads/re-analysis still write the
-    normal permanent assets to R2. The generated files are cached on the backend
-    so opening Verification does not rerun CV for every request.
+    Human-ROI path is intentionally lightweight: after a manual ROI is saved,
+    the ROI mask is already known, so do NOT rerun the full residue_features()
+    pipeline (which loads C/O/N/Si) for every SEM/C/O image request.  Build only
+    the source image needed for the requested overlay and apply the saved mask.
+    Legacy/AI-CV points keep the previous full pipeline for compatibility.
     """
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(point_id))
     outdir = OUTPUT / "_dynamic_assets" / safe_id
@@ -510,80 +512,109 @@ def _dynamic_asset(point_id: str, asset_type: str):
         return str(target)
 
     keys = _collect_asset_keys(point_id)
-    # Never use an old overlay as the SEM source; use the original SEM whenever available.
+    rr = RECORDS.get(point_id) or {}
+    stored_features = rr.get("features") or {}
+    stored_polygons = stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
+
     def load(label, aliases=()):
-        # Prefer the local original asset when available. This lets Human ROI
-        # overlays work even in local/dev environments without R2 configured.
-        rr=RECORDS.get(point_id) or {}
-        local_assets=rr.get("assets") or {}
-        local_path=local_assets.get(label)
+        local_assets = rr.get("assets") or {}
+        local_path = local_assets.get(label)
         if local_path and Path(local_path).exists():
-            im=cv2.imread(str(local_path),cv2.IMREAD_COLOR)
+            im = cv2.imread(str(local_path), cv2.IMREAD_COLOR)
             if im is not None and im.size:
                 return im
         key = keys.get(label)
         if not key:
-            for a in aliases:
-                if keys.get(a):
-                    key = keys[a]; break
+            for alias in aliases:
+                if keys.get(alias):
+                    key = keys[alias]
+                    break
         if not key or not r2.configured:
             return None
         cache = outdir / f"raw_{label}.jpg"
         try:
-            if not cache.exists():
+            if not cache.exists() or cache.stat().st_size < 500:
                 r2.download_file(key, cache)
+            im = cv2.imread(str(cache), cv2.IMREAD_COLOR)
+            if im is not None and im.size:
+                return im
+            # Remove a stale/corrupt cache so the next request can redownload it.
+            cache.unlink(missing_ok=True)
+            r2.download_file(key, cache)
             im = cv2.imread(str(cache), cv2.IMREAD_COLOR)
             return im if im is not None and im.size else None
         except Exception:
             return None
 
+    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask
+
+    # Fast path for saved Human ROI: only load the image(s) actually required.
+    if stored_polygons:
+        sem = load("sem", ("sem_original", "sem_residue_overlay"))
+        if sem is None:
+            return None
+        try:
+            roi = polygon_to_mask(sem.shape, stored_polygons)
+        except Exception:
+            return None
+        if cv2.countNonZero(roi) < 20:
+            return None
+
+        if asset_type == "sem_residue_overlay":
+            out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
+        elif asset_type == "c_map_enhanced_overlay":
+            src = load("c_map")
+            if src is None:
+                return None
+            rr_mask = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+            out = make_box_overlay(enhance_element_map(src, "C"), rr_mask, roi_color=(255, 255, 255))
+        elif asset_type == "o_map_enhanced_overlay":
+            src = load("o_map")
+            if src is None:
+                return None
+            rr_mask = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+            out = make_box_overlay(enhance_element_map(src, "O"), rr_mask, roi_color=(255, 255, 255))
+        elif asset_type == "eds_co_overlay":
+            c = load("c_map")
+            o = load("o_map")
+            if c is None or o is None:
+                return None
+            out = make_co_overlay(c, o, cv2.resize(roi, (c.shape[1], c.shape[0]), interpolation=cv2.INTER_NEAREST))
+        else:
+            return None
+
+        if out is None:
+            return None
+        cv2.imwrite(str(target), out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        return str(target) if target.exists() else None
+
+    # Legacy/AI-CV compatibility path: retain the previous full calculation.
+    from .point_worker import residue_features, detect_residue_candidates
     sem = load("sem")
     if sem is None:
-        # A legacy project may only have the previous overlay. It is still better to
-        # show the image than a blank Verification panel.
         sem = load("sem_residue_overlay")
     if sem is None:
         return None
-
-    # Import lazily so the normal FastAPI startup remains lightweight.
-    from .point_worker import (
-        residue_features, detect_residue_candidates, make_box_overlay,
-        make_co_overlay, enhance_element_map, analytical_mask, polygon_to_mask,
-    )
-
     c = load("c_map")
     o = load("o_map")
     n = load("n_map")
     si = load("si_map")
-
     if c is not None and o is not None and n is not None and si is not None:
         try:
             features, roi = residue_features(sem, c, o, n, si)
-            stored_features=(RECORDS.get(point_id) or {}).get("features",{})
-            stored_polygons=stored_features.get("human_roi_polygons") or stored_features.get("human_roi_polygon")
-            if stored_polygons:
-                # Human ROI may contain multiple disconnected polygons.  Use the
-                # complete saved mask, not only the legacy first polygon.
-                human_mask=polygon_to_mask(sem.shape,stored_polygons)
-                if cv2.countNonZero(human_mask)>=20: roi=human_mask
         except Exception:
             features, roi = None, None
     else:
         candidates = detect_residue_candidates(sem, 8)
         roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
-
     if roi is None:
         return None
-
     if asset_type == "sem_residue_overlay":
         out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
     elif asset_type == "eds_co_overlay":
         if c is None or o is None:
-            out = load("eds_map", ("eds_co_overlay", "element_maps_enhanced"))
-            if out is None:
-                return None
-        else:
-            out = make_co_overlay(c, o, roi)
+            return None
+        out = make_co_overlay(c, o, roi)
     else:
         src = c if asset_type == "c_map_enhanced_overlay" else o
         label = "C" if asset_type == "c_map_enhanced_overlay" else "O"
@@ -595,7 +626,6 @@ def _dynamic_asset(point_id: str, asset_type: str):
         return None
     cv2.imwrite(str(target), out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     return str(target) if target.exists() else None
-
 
 
 def _load_raw_point_image(point_id: str, label: str):

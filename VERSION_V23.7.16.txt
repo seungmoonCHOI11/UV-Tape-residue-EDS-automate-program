@@ -1,0 +1,2 @@
+23.7.16
+Human ROI drawing: red stroke, slightly thicker (4px); smoothing and editor structure unchanged.
