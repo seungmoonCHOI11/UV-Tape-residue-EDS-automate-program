@@ -39,15 +39,43 @@ def get_job(job_id):
 
 def public_record(r: dict) -> dict:
     out=dict(r)
-    features=out.get("features") or {}
+    features=dict(out.get("features") or {})
+    # v23.6: saved Human ROI records are always rendered using the current
+    # 3x C/O rule, including records created under older 2x versions. This
+    # prevents an old cached human_residue_score/result from remaining visible.
+    hcr=features.get("human_c_ratio")
+    hor=features.get("human_o_ratio")
+    has_human=bool(features.get("human_roi_polygons") or features.get("human_roi_polygon"))
+    if has_human and isinstance(hcr,(int,float)) and isinstance(hor,(int,float)):
+        limiting=min(float(hcr),float(hor))
+        if limiting < 1.50:
+            hscore=max(0.0,min(59.0,(limiting/1.50)*59.0))
+        elif limiting < 3.00:
+            hscore=60.0+((limiting-1.50)/1.50)*10.0
+        else:
+            hscore=min(100.0,70.0+((limiting-3.00)/2.0)*30.0)
+        hscore=round(hscore,1)
+        hresult="Residue" if hcr>=3.00 and hor>=3.00 else ("Ambiguous" if hcr>=1.50 and hor>=1.50 else "Non-residue")
+        features["human_residue_score"]=hscore
+        features["human_roi_rule_result"]=hresult
+        features["human_score_rule"]="C and O both >=3.00x -> Residue; both >=1.50x but either <3.00x -> Ambiguous; otherwise Non-residue"
+        features["residue_score"]=hscore/100.0
+        features["result"]=hresult
+        features["confidence"]="Human ROI"
     # Keep score/result/confidence both at the top level and inside features so
     # freshly analyzed in-memory records and Supabase-loaded records render identically.
-    if out.get("residue_score") is None:
-        out["residue_score"]=features.get("residue_score")
-    if out.get("confidence") is None:
-        out["confidence"]=features.get("confidence")
-    if out.get("cv_result") is None:
-        out["cv_result"]=features.get("result")
+    out["features"]=features
+    if has_human and isinstance(features.get("human_residue_score"),(int,float)):
+        out["residue_score"]=features.get("human_residue_score")
+        out["confidence"]="Human ROI"
+        out["cv_result"]=features.get("human_roi_rule_result")
+    else:
+        if out.get("residue_score") is None:
+            out["residue_score"]=features.get("residue_score")
+        if out.get("confidence") is None:
+            out["confidence"]=features.get("confidence")
+        if out.get("cv_result") is None:
+            out["cv_result"]=features.get("result")
     out["assets"]={k:f"/api/assets/{quote(r['id'],safe='')}/{quote(k,safe='')}" for k in r.get("assets",{})}
     out.pop("r2_assets", None)
     return out
@@ -627,6 +655,15 @@ def human_roi(point_id: str, payload: dict = Body(...)):
     hf=human_roi_features(sem,c,o,n,si,mask)
     r=RECORDS[point_id]; f=dict(r.get("features") or {})
     f.update(hf)
+    # Human ROI becomes the active analysis basis immediately after SAVE.
+    # Keep the original AI/CV values separately for later ROI-quality comparison.
+    if "ai_cv_result_before_human" not in f:
+        f["ai_cv_result_before_human"] = f.get("result")
+    if "ai_cv_score_before_human" not in f:
+        f["ai_cv_score_before_human"] = f.get("residue_score")
+    f["residue_score"] = hf.get("human_residue_score")
+    f["result"] = hf.get("human_roi_rule_result")
+    f["confidence"] = "Human ROI"
     clean_polygons=[[{"x":round(float(q.get("x",0)),6),"y":round(float(q.get("y",0)),6)} for q in poly if isinstance(q,dict)] for poly in polygons]
     clean_polygons=[poly for poly in clean_polygons if len(poly)>=3]
     f["human_roi_polygons"]=clean_polygons

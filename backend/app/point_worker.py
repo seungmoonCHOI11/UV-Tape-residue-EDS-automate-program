@@ -655,15 +655,16 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     # C/O channel receives a bounded visual-evidence bonus; weak/noisy candidates do not.
     element_max=max(ce,oe); element_min=min(ce,oe)
     rq=roi_quality_metrics(sem_ref,roi,len(selected))
-    # IMPORTANT: residue is only a residue when BOTH C and O are visibly elevated
-    # versus the whole analytical field. A strong SEM shape or a single-channel
-    # increase must not override this rule. The lab rule used here is a clear
-    # >=1.50x ROI/Global increase in BOTH C and O. 1.00~1.49x is treated as
-    # weak/moderate evidence, not as residue evidence.
+    # IMPORTANT: residue is only a residue when BOTH C and O are strongly elevated
+    # versus the whole analytical field. SEM morphology and a single-channel
+    # increase must not override this rule. The v23.6 lab rule is:
+    #   - BOTH C and O >= 3.00x -> Residue
+    #   - BOTH C and O >= 1.50x but at least one < 3.00x -> Ambiguous
+    #   - otherwise -> Non-residue
     c_ratio=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
     o_ratio=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
-    STRONG_RATIO=1.50
-    MODERATE_RATIO=1.20
+    STRONG_RATIO=3.00
+    MODERATE_RATIO=1.50
     c_dual=float(np.clip((c_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
     o_dual=float(np.clip((o_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO),0,1))
     dual_element_support=float(min(c_dual,o_dual))
@@ -682,20 +683,17 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     ivals=d_final[er_final>0]
     sem_interior_score=float(sigmoid((abs(np.median(ivals))-3.0)/2.0)) if ivals.size else 0.0
     visual_evidence=float(np.clip(.55*morph+.30*sem_interior_score+.15*sem_contrast_score,0,1))
-    # Final score is deliberately dual-channel: SEM can identify a candidate, but
-    # only simultaneous C+O elevation can move the score into the Residue band.
-    raw_score=float(np.clip(.45*visual_evidence+.45*dual_element_support+.10*spatial,0,1))
-    if raw_score <= 0.85:
-        score=float(np.clip(raw_score*(0.70/0.85),0,0.70))
+    # v23.6 score is driven by the limiting C/O ratio only. SEM morphology and
+    # spatial overlap remain diagnostics, but they cannot override the dual C/O rule.
+    limiting_ratio=min(c_ratio,o_ratio)
+    if limiting_ratio < MODERATE_RATIO:
+        score=float(np.clip((limiting_ratio/MODERATE_RATIO)*0.59,0,0.59))
+    elif limiting_ratio < STRONG_RATIO:
+        score=float(0.60 + ((limiting_ratio-MODERATE_RATIO)/(STRONG_RATIO-MODERATE_RATIO))*0.09)
     else:
-        score=float(np.clip(0.70+(raw_score-0.85)*(0.30/0.15),0.70,1.0))
-    # Hard diagnostic caps prevent a visually perfect edge/shadow ROI from becoming
-    # a Residue when one or both elemental channels remain background-like.
-    if not both_moderate:
-        score=min(score,0.55)
-    elif not both_strong:
-        score=min(score,0.65)
-    residue_gate=(score>=0.70 and both_strong and rq["roi_quality"]>=0.55 and visual_evidence>=0.65)
+        score=float(min(1.0,0.70 + ((limiting_ratio-STRONG_RATIO)/2.0)*0.30))
+    raw_score=score
+    residue_gate=bool(both_strong)
     if residue_gate:
         result="Residue"
     elif score>=0.60:
@@ -711,9 +709,9 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     else:
         conf="Low" if score<0.70 else "Medium"
     reasons=[]
-    if not both_strong: reasons.append("C_and_O_are_not_both_strongly_elevated")
-    if c_ratio<STRONG_RATIO: reasons.append("C_ratio_below_1.50x")
-    if o_ratio<STRONG_RATIO: reasons.append("O_ratio_below_1.50x")
+    if not both_strong: reasons.append("C_and_O_are_not_both_above_3.00x")
+    if c_ratio<STRONG_RATIO: reasons.append("C_ratio_below_3.00x")
+    if o_ratio<STRONG_RATIO: reasons.append("O_ratio_below_3.00x")
     if ce<.55 or oe<.55: reasons.append("weak_C_or_O_global_evidence")
     if abs(ce-oe)>.30: reasons.append("C_O_disagreement")
     if spatial<.08: reasons.append("weak_C_O_high_signal_overlap")
@@ -723,7 +721,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi_area=int(cv2.countNonZero(roi)); candidate_area=sum(int(cv2.countNonZero(d["c"]["mask"])) for d in selected)
     ys,xs=np.where(roi>0); box_area=0 if len(xs)==0 else max(1,(xs.max()-xs.min()+1)*(ys.max()-ys.min()+1))
     return {
-        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"v22_dual_C_O_gate_piecewise_0_to_85_to_70_100","score_calibration_anchor_previous_85_new_70":True,"visual_evidence_bonus":0.0,"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
+        "result":result,"confidence":conf,"residue_score":round(score,4),"score_calibrated":True,"raw_residue_score":round(raw_score,4),"score_calibration_method":"v23.6_limiting_CO_ratio_1.5_3.0_5.0","score_calibration_anchor_3x_is_70":True,"visual_evidence_bonus":0.0,"sem_contrast":round(sem_contrast,3),"sem_contrast_score":round(sem_contrast_score,4),"sem_interior_score":round(sem_interior_score,4),"visual_evidence":round(visual_evidence,4),"element_support":round(element_support,4),
         "c_enrichment":cm["contrast_pct"],"o_enrichment":om["contrast_pct"],"c_log2_ratio":cm["log2_ratio"],"o_log2_ratio":om["log2_ratio"],
         "c_zscore":cm["zscore"],"o_zscore":om["zscore"],"c_score":ce,"o_score":oe,
         "c_roi_global_ratio":round(c_ratio,4),"o_roi_global_ratio":round(o_ratio,4),
@@ -741,7 +739,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"Residue requires BOTH C and O ROI/Global ratios to be clearly elevated (>=1.50x each). A strong SEM shape, shadow/edge, or a single elevated element cannot by itself create a Residue result. Ratios below 1.20x are treated as background-like; 1.20-1.49x is moderate and cannot reach the Residue band. The whole analytical image is used as the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
+        "classification_note":"v23.6 rule: Residue requires BOTH C and O ROI/Global ratios >=3.00x. If both are >=1.50x but either is below 3.00x, the result is Ambiguous. If either is below 1.50x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used."
     },roi
 
 
@@ -796,8 +794,18 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
     rq=roi_quality_metrics(sem_ref,roi,1)
     cr=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
     orat=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
-    both=cr>=1.50 and orat>=1.50
-    moderate=cr>=1.20 and orat>=1.20
+    # Human ROI score is recalculated independently from the AI/CV score.
+    # v23.6: <1.50 = non-residue, 1.50-2.99 = ambiguous, >=3.00 = residue.
+    limiting=min(cr,orat)
+    both=cr>=3.00 and orat>=3.00
+    moderate=cr>=1.50 and orat>=1.50
+    if limiting < 1.50:
+        human_score=min(59.0, max(0.0, 40.0 + (limiting-1.0)*38.0))
+    elif limiting < 3.00:
+        human_score=60.0 + ((limiting-1.50)/(3.00-1.50))*10.0
+    else:
+        human_score=min(100.0, 70.0 + ((limiting-3.00)/2.0)*30.0)
+    human_score=round(float(np.clip(human_score,0,100)),1)
     return {
         "human_roi_area_px":int(cv2.countNonZero(roi)),
         "human_roi_quality":rq["roi_quality"],"human_roi_fill_ratio":rq["roi_fill_ratio"],"human_roi_component_count":rq["roi_component_count"],
@@ -806,7 +814,9 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
         "human_n_ratio":round((nm["roi_mean"]/nm["global_mean"]) if nm["global_mean"] else 0.0,4),
         "human_si_ratio":round((sm["roi_mean"]/sm["global_mean"]) if sm["global_mean"] else 0.0,4),
         "human_roi_both_strong":bool(both),"human_roi_both_moderate":bool(moderate),
-        "human_roi_rule_result":"Residue candidate" if both else "Non-residue candidate",
+        "human_residue_score":human_score,
+        "human_roi_rule_result":"Residue" if both else ("Ambiguous" if moderate else "Non-residue"),
+        "human_score_rule":"C and O both >=3.00x -> Residue; both >=1.50x but either <3.00x -> Ambiguous; otherwise Non-residue",
     }
 
 def run(payload):

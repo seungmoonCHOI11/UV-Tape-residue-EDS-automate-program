@@ -240,7 +240,7 @@
 .analysisResultCard .ratioList span:first-child{color:#4f5d70!important;font-size:12px!important;font-weight:600!important}
 .analysisResultCard .ratioList b{font-size:12px!important;font-weight:800!important}
 .analysisResultCard .ratioMultiplier{font-size:12px!important;font-weight:900!important}
-.analysisResultCard .ratioMultiplier.positive{color:#159447!important}
+.analysisResultCard .ratioMultiplier.positive{color:#b77900!important}.analysisResultCard .ratioMultiplier.strong{color:#159447!important}
 .analysisResultCard .ratioMultiplier.negative{color:#d12f3d!important}
 .analysisResultCard .ratioMultiplier.neutral{color:#667386!important}
 .analysisResultCard .roiInfo>b{font-size:13px!important}
@@ -260,7 +260,7 @@
 .analysisResultCard .ratioList span:first-child{font-size:14px!important;font-weight:700!important}
 .analysisResultCard .ratioList b{font-size:14px!important;font-weight:900!important}
 .analysisResultCard .ratioMultiplier{font-size:14px!important;font-weight:900!important}
-.analysisResultCard .ratioMultiplier.positive{color:#159447!important}
+.analysisResultCard .ratioMultiplier.positive{color:#b77900!important}.analysisResultCard .ratioMultiplier.strong{color:#159447!important}
 .analysisResultCard .ratioMultiplier.negative{color:#d12f3d!important}
 .analysisResultCard .ratioMultiplier.neutral{color:#667386!important}
 .ratioRuleNote{margin:8px 0 2px;padding:9px 11px;border:1px solid #e6ebf2;border-radius:8px;background:#f8fafc;display:flex;flex-direction:column;gap:3px}

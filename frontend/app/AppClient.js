@@ -174,6 +174,7 @@ function UploadPage({input,files,setFiles,upload,conditions,updateCondition,addC
 function displayScore(p){
  const f=p?.features||{};
  const raw=typeof f.residue_score==="number"?f.residue_score:(typeof p?.residue_score==="number"?p.residue_score:null);
+ if(typeof f.human_residue_score==='number' && ((Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3))) return Math.max(0,Math.min(100,Math.round(f.human_residue_score)));
  if(raw==null)return null;
  // v19: new backend stores the calibrated score; legacy records are shifted -15 points
  // so the previous 85-point level becomes the new 70-point level.
@@ -198,23 +199,23 @@ function dynamicAsset(p,type){
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
- const score=displayScore(p);
- const coverage=typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
- const maskQuality=typeof f.roi_quality==='number'?f.roi_quality:null;
+ const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
+ const hasHumanROI=(Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
+ const score=hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p);
+ const coverage=hasHumanROI&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
+ const maskQuality=hasHumanROI&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
  const autoResult=f.result||"Ambiguous";
- const resultLabel=autoResult==="Review"?"Ambiguous":autoResult;
- const confidence=f.confidence||"-";
+ const resultLabel=hasHumanROI?(f.human_roi_rule_result||"Ambiguous"):(autoResult==="Review"?"Ambiguous":autoResult);
+ const confidence=hasHumanROI?"Human ROI":(f.confidence||"-");
  const maps={
    sem:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
    eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
    c:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
    o:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
- const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
- const hasHumanROI=(Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
- const ratioClass=(x)=>x==null?"neutral":x>=1.50?"positive":x<=0.90?"negative":"neutral";
+ const ratioClass=(x)=>x==null?"neutral":x>=3.00?"strong":x>=1.50?"positive":x<=0.90?"negative":"neutral";
  const ratioText=(x)=>x==null?"-":fmtRatio(x);
  const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
  return <div className="verificationPanel">
@@ -242,13 +243,13 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=1.50?'#159447':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=1.50?'#159447':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=3.00?'#159447':cRatio>=1.50?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=1.50?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
-    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>둘 다 <strong>1.50× 이상</strong>이어야 Residue 후보입니다. 1.20× 미만은 배경 수준으로 취급합니다.</span></div>
+    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C와 O가 모두 3.00× 이상</strong>이면 Residue, 둘 다 1.50× 이상이면서 하나라도 3.00× 미만이면 Ambiguous로 계산합니다.</span></div>
     <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{hasHumanROI?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
-    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{f.roi_area_px?`${f.roi_area_px.toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong className={coverage!=null&&coverage>=80?'good':''}>{coverage==null?'-':`${coverage}%${coverage>=80?'  (Good)':''}`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
-    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>0–100 calibrated score. Low ROI quality cannot force an automatic Residue decision.</small></div>
+    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(hasHumanROI?f.human_roi_area_px:f.roi_area_px)?`${(hasHumanROI?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{hasHumanROI&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{hasHumanROI&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
+    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: &lt;1.50× = Non-residue, 1.50–2.99× = Ambiguous, ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
    </section>
   </div>
   <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 Ground Truth 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>
