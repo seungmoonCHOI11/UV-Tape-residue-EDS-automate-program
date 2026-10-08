@@ -1,0 +1,9 @@
+V23.7.33
+
+Sequential per-PDF analysis queue patch.
+- Multiple selected PDFs are submitted as independent jobs, one PDF per job.
+- Jobs are registered sequentially without blocking navigation with a full-screen analysis modal.
+- Backend queue continues processing one job at a time.
+- Failure of one PDF no longer marks the other PDFs in the selected batch as failed.
+- Failed upload registration remains visible in the queue and the next PDF continues.
+- Existing cumulative workspace, Human ROI, R2, Supabase, re-analysis, verification, dashboard and condition views are preserved.
