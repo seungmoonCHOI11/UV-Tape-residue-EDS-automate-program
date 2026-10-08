@@ -16,7 +16,7 @@ function parseSelection(value){
 
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),conditionInputs=useRef({});
- const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>Object.fromEntries(Array.from({length:9},(_,i)=>[String(i+1),"SiCN"]))),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]);
+ const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>Object.fromEntries(Array.from({length:9},(_,i)=>[String(i+1),"SiCN"]))),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]),[analysisModalOpen,setAnalysisModalOpen]=useState(false);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -116,6 +116,10 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
    const invalid=conditions.findIndex(c=>!expectedPointsForCondition(c));
    if(invalid>=0)return notify(`Condition ${invalid+1}의 Power / Time / Wafer / Point 조건을 확인하세요.`);
    const batch=[...conditions];
+   // Start a fresh visible analysis batch. Previous test jobs should not be mixed
+   // into the new progress window.
+   setAnalysisQueue([]);
+   setAnalysisModalOpen(true);
    setBusy(true);setProgressPhase("queued");setProgress(0);setProgressMessage(`${batch.length}개 조건을 순차적으로 분석 대기열에 등록합니다.`);
    let added=0,failed=0;
    try{
@@ -136,7 +140,7 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
      }
      setProgressPhase("queued");setProgress(100);setProgressMessage(`${added}개 PDF가 순차 분석 대기열에 등록되었습니다.${failed?` ${failed}개는 등록 실패했습니다.`:""}`);await loadProjectList();notify(`${added}개 PDF를 순차 분석 대기열에 추가했습니다.${failed?` (${failed}개 실패)`:""}`);
      if(added>0)setConditions([{...DEFAULT_CONDITION,file:null}]);
-   }finally{setBusy(false);setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},900);}
+   }finally{setBusy(false);}
  }
  async function deleteProjectById(projectId,meta){
    if(!projectId)return;
@@ -210,12 +214,23 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  {page==="AI Analysis"&&<AIAnalysis points={points} analysis={aiAnalysis} busy={aiBusy} run={runProjectAI}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
  {page==="Condition View"&&<ConditionView points={points} selected={conditionView} setSelected={setConditionView} go={setPage}/>}
- {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">Project data loading</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>Loading project data</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
  const label=phase==="upload"?"파일 업로드":phase==="queued"?"분석 준비":phase==="analysis"?"Point 분석":phase==="database"?"결과 저장":"분석 진행";
  return <div className="progressOverlay"><div className="progressModal"><div className="progressTop"><div><span className="badge"><Activity size={13}/> ANALYSIS IN PROGRESS</span><h3>{label}</h3></div><b>{Math.round(progress)}%</b></div><div className="progressTrack"><div className="progressBar" style={{width:`${Math.max(2,Math.min(100,progress))}%`}}/></div><p>{message||"분석 중입니다. 잠시만 기다려주세요."}</p><small>창을 닫거나 새로고침하지 마세요.</small></div></div>
+}
+function AnalysisBatchModal({items,open,close}){
+ if(!open)return null;
+ const active=items.some(x=>!["completed","failed","cancelled"].includes(x.status));
+ const overall=items.length?Math.round(items.reduce((sum,x)=>sum+Math.max(0,Math.min(100,Number(x.progress)||0)),0)/items.length):0;
+ return <div className="progressOverlay"><div className="progressModal batchProgressModal">
+   <div className="progressTop"><div><span className="badge"><Activity size={13}/> ANALYSIS IN PROGRESS</span><h3>{active?"등록된 PDF를 순서대로 분석하고 있습니다.":"분석 작업이 완료되었습니다."}</h3></div><b>{overall}%</b></div>
+   <div className="progressTrack"><div className="progressBar" style={{width:`${Math.max(2,Math.min(100,overall))}%`}}/></div>
+   <div className="batchProgressList">{items.map((x,i)=>{const pct=Math.round(x.progress||0);const terminal=x.status==="completed"||x.status==="failed"||x.status==="cancelled";const label=x.status==="completed"?"완료":x.status==="failed"?"실패":x.status==="cancelled"?"취소":x.status==="queued"?"대기 중":"분석 중";return <div className="batchProgressItem" key={x.job_id||i}><div className="batchProgressMain"><div><b>{i+1}. {x.files?.join(", ")||"PDF"}</b><span>{x.message||label}</span></div><strong className={terminal?`status-${x.status}`:""}>{pct}%</strong></div><div className="miniProgressTrack"><div className="miniProgressBar" style={{width:`${Math.max(0,Math.min(100,pct))}%`}}/></div></div>})}</div>
+   <div className="batchProgressBottom"><span>{active?"분석은 서버에서 순차적으로 계속 진행됩니다.":"모든 등록 작업이 종료되었습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+ </div></div>
 }
 function Dashboard({points,go}){
  const key=p=>`${p.power||"-"} / ${p.time||"-"}`;
@@ -261,7 +276,6 @@ function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCo
   </section>
   <section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b><small>전체 배치에 적용됩니다. 위치별 기판을 지정할 수 있습니다.</small></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Default Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">Position / Substrate</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>P{pos}<select value={positionSubstrates[String(pos)]||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section>
   <div className="actions"><button className="primary analysisStartBtn" disabled={busy} onClick={upload}><Play size={14}/>{busy?"Analysis 준비 중...":`Analysis 시작 (${conditions.length}개 PDF)`}</button></div>
-  <section className="panel queuePanel"><div className="panelHead"><div><b>Analysis Queue</b><small>Analysis를 누르면 등록된 Condition 순서대로 PDF가 서버 대기열에 들어갑니다. 한 PDF가 실패해도 다음 PDF는 계속 진행합니다.</small></div></div>{!analysisQueue?.length?<div className="queueEmpty">아직 시작한 분석 작업이 없습니다.</div>:<div className="analysisQueueList">{analysisQueue.map((q,i)=><div className="analysisQueueItem" key={q.job_id}><div><b>{q.files?.join(", ")||`Project ${i+1}`}</b><span>{q.completed||0}/{q.total||0} points · {q.status}{q.message?` · ${q.message}`:""}</span></div><strong>{Math.round(q.progress||0)}%</strong></div>)}</div>}</section>
  </div>
 }
 function coRatioDisplayScore(limiting){

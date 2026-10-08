@@ -130,12 +130,30 @@ def _build_point_groups(pdf_paths, pages_per_point=3):
                     groups.append(current)
                 if current is not None:
                     current["pages"].append((str(path), idx))
-    # Keep only complete 3-page Point groups.  A trailing partial group is treated
-    # as an incomplete/missing-last-point situation rather than a fatal error.
+    # Keep only complete Point groups. If the PDF is image-only (the common Bruker
+    # export has no searchable text), Point labels cannot be extracted from PDF text.
+    # In that case fall back to the original fixed pages-per-point grouping so a
+    # normal 3-page Point PDF remains analyzable. This fallback deliberately does not
+    # claim to detect missing/duplicated Points; without a readable Point label there
+    # is no reliable way to distinguish those cases from page order alone.
     valid = [g for g in groups if len(g["pages"]) >= pages_per_point]
     for g in valid:
         g["pages"] = g["pages"][:pages_per_point]
-    return valid
+    if valid:
+        return valid
+
+    locations, _ = _build_page_locations(pdf_paths)
+    fallback = []
+    for start in range(0, len(locations), pages_per_point):
+        chunk = locations[start:start + pages_per_point]
+        if len(chunk) < pages_per_point:
+            break
+        fallback.append({
+            "point_number": None,
+            "pages": chunk,
+            "fallback_index": start // pages_per_point,
+        })
+    return fallback
 
 
 def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None, position_substrates=None):
@@ -162,18 +180,28 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
     expected_idx = 0
     previous_observed = None
     for group in groups:
-        observed = int(group["point_number"])
-        if previous_observed == observed:
-            # Consecutive same-label group = duplicated whole Point. Skip it.
-            continue
-        match = None
-        for j in range(expected_idx, len(sequence)):
-            if int(sequence[j]["point"]) == observed:
-                match = j
+        observed = group.get("point_number")
+        if observed is None:
+            # Image-only PDF fallback: preserve the original sequential mapping.
+            # The fallback is safe for normal exports and avoids the old fatal
+            # "No analyzable Point groups" error. Missing/duplicate whole Points
+            # cannot be identified reliably without a readable Point label.
+            if expected_idx >= len(sequence):
                 break
-        if match is None:
-            # Unknown/out-of-sequence Point: do not guess a condition/wafer.
-            continue
+            match = expected_idx
+        else:
+            observed = int(observed)
+            if previous_observed == observed:
+                # Consecutive same-label group = duplicated whole Point. Skip it.
+                continue
+            match = None
+            for j in range(expected_idx, len(sequence)):
+                if int(sequence[j]["point"]) == observed:
+                    match = j
+                    break
+            if match is None:
+                # Unknown/out-of-sequence Point: do not guess a condition/wafer.
+                continue
         meta = sequence[match]
         aligned.append((match, meta, group["pages"]))
         expected_idx = match + 1

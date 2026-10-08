@@ -1,0 +1,9 @@
+V23.7.37
+
+- Fixed image-only Bruker EDS PDFs that have no searchable Point text: fallback to sequential pages-per-point grouping.
+- Removed the visible Analysis Queue panel from New Analysis.
+- Restored the original-style Analysis In Progress modal, expanded to show every uploaded PDF and each PDF's live progress/status.
+- A new analysis batch clears stale local queue items from previous tests.
+- The progress modal can be sent to the background while server-side sequential processing continues.
+- R2/storage failure remains non-fatal for PDF analysis.
+- Existing dashboard/navigation loading fixes are preserved.
