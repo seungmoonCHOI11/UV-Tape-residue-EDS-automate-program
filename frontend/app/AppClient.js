@@ -235,7 +235,7 @@ function AnalysisProgress({progress,phase,message}){
 }
 function AnalysisBatchModal({items,open,close}){
  if(!open)return null;
- const active=items.some(x=>!["completed","failed","cancelled"].includes(x.status));
+ const active=items.length===0 || items.some(x=>!["completed","failed","cancelled"].includes(x.status));
  const overall=items.length?Math.round(items.reduce((sum,x)=>sum+Math.max(0,Math.min(100,Number(x.progress)||0)),0)/items.length):0;
  return <div className="progressOverlay"><div className="progressModal batchProgressModal">
    <div className="progressTop"><div><span className="badge"><Activity size={13}/> ANALYSIS IN PROGRESS</span><h3>{active?"등록된 PDF를 순서대로 분석하고 있습니다.":"분석 작업이 완료되었습니다."}</h3></div><b>{overall}%</b></div>

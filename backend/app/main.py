@@ -594,7 +594,10 @@ def workspace():
     try:
         packed=db.get_all_points_with_data()
         projects=db.get_projects(limit=1000)
-        latest=projects[0] if projects else None
+        # Do not let a newer empty/queued project become the workspace identity.
+        # The user-facing workspace is cumulative, so the selected project must
+        # be a project that actually owns stored Point data.
+        latest=db.get_latest_project_with_points()
     except Exception as e:
         print(f"[workspace] Supabase lookup failed: {type(e).__name__}: {e}")
         raise HTTPException(503,"Cumulative workspace data could not be loaded.")

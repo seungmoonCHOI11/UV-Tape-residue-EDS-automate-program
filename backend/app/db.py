@@ -108,6 +108,26 @@ def get_latest_project():
     return rows[0] if rows else None
 
 
+def get_latest_project_with_points():
+    """Return the most recently populated project, not merely the newest project row.
+
+    The user-facing workspace is cumulative. A queued/empty project can be newer
+    than the project that actually contains the stored analysis points, so using
+    projects.created_at alone can make another browser select an empty project.
+    The newest point is the authoritative signal for the current populated batch.
+    """
+    client = get_client()
+    rows = (client.table("points").select("project_id,created_at")
+            .order("created_at", desc=True).limit(1).execute().data or [])
+    if not rows:
+        return get_latest_project()
+    project_id = str(rows[0].get("project_id") or "")
+    if not project_id:
+        return get_latest_project()
+    project_rows = client.table("projects").select("*").eq("id", project_id).limit(1).execute().data or []
+    return project_rows[0] if project_rows else get_latest_project()
+
+
 def get_points_with_data(project_id: str):
     """Load points, latest analysis, and assets with bounded DB requests."""
     client = get_client()

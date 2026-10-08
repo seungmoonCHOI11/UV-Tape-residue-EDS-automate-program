@@ -1,0 +1,7 @@
+V23.7.40
+
+Cross-PC cumulative workspace project identity fix.
+- Workspace remains cumulative across all stored projects.
+- The workspace project_id now points to the most recently populated project (latest stored Point), not simply the newest project row.
+- Prevents a newer empty/queued project from making another browser show 0 Points.
+- Existing Point/analysis data are not deleted or migrated.

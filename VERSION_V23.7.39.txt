@@ -1,0 +1,6 @@
+V23.7.39
+
+Analysis modal initial-state fix.
+- Prevent empty analysis batch modal from showing "analysis completed" at 0% while PDF registration is still starting.
+- Treat an empty batch as active until the first queued PDF item is registered.
+- Preserve v23.7.38 backend/frontend behavior.
