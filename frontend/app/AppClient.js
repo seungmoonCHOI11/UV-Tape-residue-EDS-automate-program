@@ -16,7 +16,7 @@ function parseSelection(value){
 
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[files,setFiles]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),input=useRef();
- const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>Object.fromEntries(Array.from({length:9},(_,i)=>[String(i+1),"SiCN"]))),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]);
+ const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>Object.fromEntries(Array.from({length:9},(_,i)=>[String(i+1),"SiCN"]))),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[dragging,setDragging]=useState(false),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -37,15 +37,14 @@ export default function App(){
      // an error so a transient cold-start does not look like lost project data.
      for(let attempt=0;attempt<4;attempt++){
        try{
-         const target=savedId?`${API}/api/projects/${savedId}`:`${API}/api/projects/latest`;
+         // v23.7.29: the user-facing dataset is cumulative across uploads.
+         // Project IDs remain internal for queue/re-analysis/delete bookkeeping.
+         const target=`${API}/api/workspace`;
          let r=await fetch(target,{cache:"no-store"});
-         if(!r.ok && savedId){
-           r=await fetch(`${API}/api/projects/latest`,{cache:"no-store"});
-         }
          if(!r.ok) throw new Error(`HTTP ${r.status}`);
          const j=await r.json();
          if(j?.project_id || j?.id){
-           const pid=j.project_id||j.id;
+           const pid=j.latest_project_id||j.project_id||j.id;
            const arr=(j.points||[]).map(x=>({...x,human_result:x.human_result||null}));
            if(j.position_substrates)setPositionSubstrates(j.position_substrates);
            setProject(pid);setPoints(arr);
@@ -84,8 +83,12 @@ export default function App(){
        }catch{}
        next.push(item);
      }
+     const hadCompleted=next.some((x,i)=>x.status==="completed" && analysisQueue[i]?.status!=="completed");
      if(!stopped)setAnalysisQueue(next);
-     if(!stopped)await loadProjectList();
+     if(!stopped){
+       await loadProjectList();
+       if(hadCompleted) await loadData();
+     }
    };
    tick(); const timer=setInterval(tick,2500); return()=>{stopped=true;clearInterval(timer)};
  },[analysisQueue.length]);
@@ -122,23 +125,32 @@ function addFiles(list){const incoming=Array.from(list||[]).filter(f=>f.name.toL
      notify(`${(j.files||files).length}개 PDF · ${j.expected_points||n} Points 분석 대기열 추가`);
    }catch(e){notify(`Backend 오류: ${e?.message||"network error"}`)}finally{setBusy(false);setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},500)}
  }
+ async function deleteProjectById(projectId,meta){
+   if(!projectId)return;
+   const label=meta?`${meta.point_count||0} points · ${meta.files?.join(", ")||"project"}`:"선택한 project";
+   if(!window.confirm(`정말 이 데이터를 삭제할까요?\n\n${label}\n\nProject의 Point, 분석 결과, Human ROI, 이미지/R2 원본까지 삭제됩니다. 이 작업은 되돌릴 수 없습니다.`))return;
+   try{
+     setBusy(true);
+     const r=await fetch(`${API}/api/projects/${projectId}`,{method:"DELETE"});
+     const j=await r.json(); if(!r.ok)throw new Error(j.detail||"데이터 삭제 실패");
+     setAnalysisQueue(q=>q.filter(x=>x.project_id!==projectId));
+     const deletingCurrent=projectId===project;
+     if(deletingCurrent){
+       localStorage.removeItem("uvtape:selectedProject");
+       setProject(null);setPoints([]);setVerificationOpen(false);
+     }
+     const list=await loadProjectList();
+     if(deletingCurrent){
+       const next=list.find(x=>x.status!=="Deleted");
+       if(next){await loadData(next.id)}
+     }
+     notify("선택한 데이터와 관련 원본/분석 파일이 삭제되었습니다.");
+   }catch(e){notify(e.message||"데이터 삭제 실패")}finally{setBusy(false)}
+ }
  async function deleteCurrentProject(){
    if(!project)return;
    const meta=projectList.find(x=>x.id===project);
-   const label=meta?`${meta.point_count||0} points · ${meta.files?.join(", ")||"project"}`:"현재 project";
-   if(!window.confirm(`정말 이 프로젝트를 삭제할까요?\n\n${label}\n\nProject의 Point, 분석 결과, Human ROI, 이미지/R2 원본까지 삭제됩니다. 이 작업은 되돌릴 수 없습니다.`))return;
-   try{
-     setBusy(true);
-     const r=await fetch(`${API}/api/projects/${project}`,{method:"DELETE"});
-     const j=await r.json(); if(!r.ok)throw new Error(j.detail||"프로젝트 삭제 실패");
-     setAnalysisQueue(q=>q.filter(x=>x.project_id!==project));
-     localStorage.removeItem("uvtape:selectedProject");
-     setProject(null);setPoints([]);setVerificationOpen(false);
-     const list=await loadProjectList();
-     const next=list.find(x=>x.status!=="Deleted");
-     if(next){await loadData(next.id)}
-     notify("프로젝트와 관련 데이터가 삭제되었습니다.");
-   }catch(e){notify(e.message||"프로젝트 삭제 실패")}finally{setBusy(false)}
+   await deleteProjectById(project,meta);
  }
  async function human(v){
    const p=points[idx]; if(!p)return;
@@ -178,13 +190,14 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  if(!mounted)return <div className="app"><main><InitialLoading/></main></div>;
  if(initialLoading)return <div className="app"><main><InitialLoading/></main></div>;
  const p=points[idx],filtered=points.filter(x=>(result==="All"||(x.human_result||x.features?.result)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div><div className="project"><small>PROJECT</small><strong>{project?"UV Tape Residue":"No project selected"}</strong><span>{points.length} points</span>{projectList.length>0&&<select className="projectPicker" value={project||""} onChange={async e=>{const id=e.target.value;if(!id)return;setVerificationOpen(false);setPage("Dashboard");const loaded=await loadData(id);setVerificationCondition("ALL");setVerificationWafer("ALL");setVerificationResult("ALL");const meta=projectList.find(x=>x.id===id);if(meta?.position_substrates)setPositionSubstrates(meta.position_substrates);}}><option value="" disabled>Select project</option>{projectList.map(x=><option key={x.id} value={x.id}>{new Date(x.created_at||0).toLocaleDateString("ko-KR")} · R{x.repeat_no||"-"} · {x.point_count||0}pt</option>)}</select>} {project&&<button className="danger projectDeleteBtn" onClick={deleteCurrentProject} disabled={busy}><Trash2 size={12}/> Delete Project</button>}</div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition Compare",GitCompare],["Reports",FileText]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
+ return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition View",Activity],["Condition Compare",GitCompare],["Reports",FileText],["Delete Data",Trash2]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={setPage}/>}
  {page==="New Analysis"&&<UploadPage input={input} files={files} setFiles={setFiles} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} dragging={dragging} setDragging={setDragging} addFiles={addFiles} expectedPoints={expectedPoints} busy={busy} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
  {page==="Verification"&&(p?<Review p={p} idx={idx} total={points.length} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human} saveHumanRoi={saveHumanRoi}/>:<Empty title="분석 데이터가 없습니다" text="EDS PDF를 업로드하면 Point별 분석 결과가 이 화면에 표시됩니다." go={()=>setPage("New Analysis")}/>)}
  {page==="AI Analysis"&&<AIAnalysis points={points} analysis={aiAnalysis} busy={aiBusy} run={runProjectAI}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
- {page==="Condition Compare"&&<Compare points={points}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} </main>{verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {busy&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition View"&&<ConditionView points={points} selected={conditionView} setSelected={setConditionView} go={setPage}/>}
+ {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {busy&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">Project data loading</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>Loading project data</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -208,9 +221,9 @@ function Dashboard({points,go}){
  return <div className="content">
    <div className="dashboardHeader"><div><span className="badge"><Activity size={13}/> SEM / EDS</span><h2>Analysis Dashboard</h2><p>현재 저장된 조건과 분석 결과의 요약입니다.</p></div><div className="dashboardActions"><button className="primary" onClick={()=>go("New Analysis")}><Upload size={14}/> New Analysis</button><button className="secondary" onClick={()=>go("Verification")}><Check size={14}/> Verification</button></div></div>
    <section className="panel conditionSection"><div className="panelHead"><b>Saved Conditions</b><small>{Object.keys(groups).length} condition(s) · {points.length} points</small></div><div className="conditionCards">{Object.entries(groups).map(([k,a])=>{const r=a.filter(p=>cls(p)==="Residue").length;const n=a.filter(p=>cls(p)==="Non-residue").length;const q=a.length-r-n;return <button className="conditionCard" key={k} onClick={()=>go("Condition Compare")}><b>{k}</b><span>{a.length} Points · Residue {r} · Non-residue {n} · Ambiguous {q}</span></button>})}{!points.length&&<div className="emptyInline">저장된 분석 조건이 없습니다.</div>}</div></section>
-   <div className="dashboardMetrics"><Metric t="Points" v={points.length} s="current project"/><Metric t="Residue" v={residue} s={points.length?`${Math.round(residue/points.length*100)}%`:"—"}/><Metric t="Non-residue" v={non} s={points.length?`${Math.round(non/points.length*100)}%`:"—"}/><Metric t="Ambiguous" v={review} s="needs review"/><Metric t="Verified" v={verified} s="human reviewed"/><Metric t="Conditions" v={Object.keys(groups).length} s="Power / Time"/></div>
-   {points.length>0&&<><div className="dashboardTwoCol"><section className="panel"><div className="panelHead"><b>Result Distribution</b><small>Current project</small></div><div className="distribution">{[["Residue",residue], ["Non-residue",non], ["Ambiguous",review]].map(([label,n])=><div className="distRow" key={label}><span>{label}</span><div className="distTrack"><i style={{width:`${Math.round(n/points.length*100)}%`}}/></div><strong>{n} · {Math.round(n/points.length*100)}%</strong></div>)}</div></section><section className="panel"><div className="panelHead"><b>Zone Summary</b><small>Center / Edge / Diamond</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Zone</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{["Center","Edge","Diamond","Unknown"].map(z=>{const a=points.filter(p=>(p.zone||"Unknown")===z);if(!a.length)return null;const rr=a.filter(p=>cls(p)==="Residue").length;const nn=a.filter(p=>cls(p)==="Non-residue").length;const aa=a.filter(p=>cls(p)==="Ambiguous"||cls(p)==="Review").length;return <div className="dashTr" key={z}><span>{z}</span><span>{a.length}</span><span>{rr}</span><span>{nn}</span><span>{aa}</span><strong>{Math.round(rr/a.length*100)}%</strong></div>})}</div></section></div>
-   <section className="panel conditionSection"><div className="panelHead"><b>Power / Time Summary</b><small>Stored point results</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Condition</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{Object.entries(groups).map(([k,a])=>{const rr=a.filter(p=>cls(p)==="Residue").length;const nn=a.filter(p=>cls(p)==="Non-residue").length;const aa=a.filter(p=>cls(p)==="Ambiguous"||cls(p)==="Review").length;return <div className="dashTr" key={k}><span>{k}</span><span>{a.length}</span><span>{rr}</span><span>{nn}</span><span>{aa}</span><strong>{Math.round(rr/a.length*100)}%</strong></div>})}</div></section>
+   <div className="dashboardMetrics"><Metric t="Points" v={points.length} s="cumulative workspace"/><Metric t="Residue" v={residue} s={points.length?`${Math.round(residue/points.length*100)}%`:"—"}/><Metric t="Non-residue" v={non} s={points.length?`${Math.round(non/points.length*100)}%`:"—"}/><Metric t="Ambiguous" v={review} s="needs review"/><Metric t="Verified" v={verified} s="human reviewed"/><Metric t="Conditions" v={Object.keys(groups).length} s="Power / Time"/></div>
+   {points.length>0&&<><div className="dashboardTwoCol"><section className="panel"><div className="panelHead"><b>Result Distribution</b><small>Cumulative workspace</small></div><div className="distribution">{[["Residue",residue], ["Non-residue",non], ["Ambiguous",review]].map(([label,n])=><div className="distRow" key={label}><span>{label}</span><div className="distTrack"><i style={{width:`${Math.round(n/points.length*100)}%`}}/></div><strong>{n} · {Math.round(n/points.length*100)}%</strong></div>)}</div></section><section className="panel"><div className="panelHead"><b>Zone Summary</b><small>Center / Edge / Diamond</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Zone</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{["Center","Edge","Diamond","Unknown"].map(z=>{const a=points.filter(p=>(p.zone||"Unknown")===z);if(!a.length)return null;const rr=a.filter(p=>cls(p)==="Residue").length;const nn=a.filter(p=>cls(p)==="Non-residue").length;const aa=a.filter(p=>cls(p)==="Ambiguous"||cls(p)==="Review").length;return <div className="dashTr" key={z}><span>{z}</span><span>{a.length}</span><span>{rr}</span><span>{nn}</span><span>{aa}</span><strong>{Math.round(rr/a.length*100)}%</strong></div>})}</div></section></div>
+   <section className="panel conditionSection"><div className="panelHead"><b>Power / Time Summary</b><small>All stored point results</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Condition</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{Object.entries(groups).map(([k,a])=>{const rr=a.filter(p=>cls(p)==="Residue").length;const nn=a.filter(p=>cls(p)==="Non-residue").length;const aa=a.filter(p=>cls(p)==="Ambiguous"||cls(p)==="Review").length;return <div className="dashTr" key={k}><span>{k}</span><span>{a.length}</span><span>{rr}</span><span>{nn}</span><span>{aa}</span><strong>{Math.round(rr/a.length*100)}%</strong></div>})}</div></section>
    <section className="panel representativePanel"><div className="panelHead"><b>Representative Results</b><small>One stored example per result state</small></div><div className="representativeGrid">{reps.map(([label,p,kind])=>p?<button className={`repCard ${kind}`} key={label} onClick={()=>open(p)}><div className="repImage"><ImageWithFallback sources={[p.assets?.sem_residue_overlay,p.assets?.sem]} alt={label}/></div><div className="repBody"><b>{p.power} · {p.time} · W{p.wafer} · P{p.point}</b><strong>{label}</strong><span>Score {displayScore(p)==null?"-":displayScore(p)} / 100 · {p.confidence||p.features?.confidence||"-"}</span></div></button>:<div className="repCard emptyRep" key={label}><strong>{label}</strong><span>현재 데이터에 해당 결과가 없습니다.</span></div>)}</div></section></>}
    {!points.length&&<section className="panel emptyPanel"><Database size={24}/><b>분석 데이터가 없습니다</b><small>EDS PDF를 업로드하면 조건과 Point 분석 결과가 이 대시보드에 표시됩니다.</small><button className="secondary" onClick={()=>go("New Analysis")}><Upload size={14}/> EDS 데이터 업로드</button></section>}
  </div>
@@ -409,6 +422,120 @@ function ImageLightbox({p,close}){
 }
 function AIAnalysis({points,analysis,busy,run}){const residue=points.filter(p=>(p.human_result||p.features?.result)==="Residue").length;const non=points.filter(p=>(p.human_result||p.features?.result)==="Non-residue").length;return <div className="content"><div className="intro"><div><label>RESEARCH INTERPRETATION</label><h2>AI Analysis</h2><p>OpenAI는 개별 Point의 분류기가 아니라, 이미 계산된 SEM/EDS 분석 결과를 연구 관점에서 해석합니다.</p></div><button className="primary" disabled={busy} onClick={run}><BrainCircuit size={14}/>{busy?"Analyzing...":"Run OpenAI Analysis"}</button></div><div className="metrics"><Metric t="Points" v={points.length} s="current dataset"/><Metric t="Residue" v={residue} s="classified"/><Metric t="Non-residue" v={non} s="classified"/><Metric t="Review" v={Math.max(0,points.length-residue-non)} s="ambiguous / needs review"/></div>{analysis?<div className="aiAnalysisGrid"><section className="panel"><div className="panelHead"><b>Summary</b><small>OpenAI research interpretation</small></div><div className="aiBody"><p>{analysis.summary}</p><h4>Key findings</h4><ul>{(analysis.key_findings||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section><section className="panel"><div className="panelHead"><b>Condition trends</b><small>Based on current dataset</small></div><div className="aiBody"><ul>{(analysis.condition_trends||[]).map((x,i)=><li key={i}>{x}</li>)}</ul><h4>Anomalies / points to inspect</h4><ul>{(analysis.anomalies||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section><section className="panel"><div className="panelHead"><b>Research next steps</b><small>Suggestions, not automated decisions</small></div><div className="aiBody"><ul>{(analysis.next_steps||[]).map((x,i)=><li key={i}>{x}</li>)}</ul><h4>Caveats</h4><ul>{(analysis.caveats||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section></div>:<section className="panel emptyPanel"><BrainCircuit size={26}/><b>AI Analysis를 실행하세요</b><small>Residue / Non-residue 분류 자체는 CV + Human Review 결과를 사용하고, OpenAI는 조건별 경향과 이상점, 연구 해석에 사용합니다.</small><button className="primary" disabled={busy} onClick={run}><BrainCircuit size={14}/> Run OpenAI Analysis</button></section>}</div>}
 
-function Compare({points}){let g={};points.forEach(p=>{let k=`${p.power} / ${p.time}`;(g[k]??=[]).push(p)});return <div className="content"><div className="intro"><div><h2>Condition Comparison</h2><p>조건별 결과 분포.</p></div></div><section className="panel"><div className="table">{Object.entries(g).map(([k,a])=>{let r=a.filter(p=>(p.human_result||p.features?.result)==="Residue").length;return <div className="tr" key={k}><b>{k}</b><span>{a.length}</span><strong>{a.length?Math.round(r/a.length*100):0}%</strong><span>Avg score {a.length?(a.reduce((s,p)=>s+(displayScore(p)||0),0)/a.length).toFixed(1):"-"}</span></div>})}</div></section></div>}
+function conditionKey(p){return `${p.power||"-"} / ${p.time||"-"}`}
+function pointClass(p){return p.human_result||p.features?.result||"Ambiguous"}
+function conditionGroups(points){const g={};(points||[]).forEach(p=>{const k=conditionKey(p);(g[k]??=[]).push(p)});return g}
+function ConditionView({points,selected,setSelected,go}){
+ const groups=conditionGroups(points); const keys=Object.keys(groups); const active=selected&&selected!=="ALL"?groups[selected]||[]:points;
+ const residue=active.filter(p=>pointClass(p)==="Residue").length, non=active.filter(p=>pointClass(p)==="Non-residue").length, amb=active.length-residue-non;
+ const wafers=[...new Set(active.map(p=>p.wafer).filter(x=>x!=null))].sort((a,b)=>Number(a)-Number(b));
+ return <div className="content"><div className="intro"><div><span className="badge"><Activity size={13}/> CONDITION VIEW</span><h2>Condition View</h2><p>누적된 전체 데이터를 Power / Time 조건별로 확인합니다.</p></div><span>{active.length} Points</span></div>
+ <section className="panel conditionViewToolbar"><div className="conditionViewSelect"><label>Condition</label><select value={selected} onChange={e=>setSelected(e.target.value)}><option value="ALL">All Conditions · {points.length} Points</option>{keys.map(k=><option key={k} value={k}>{k} · {groups[k].length} Points</option>)}</select></div><button className="secondary" onClick={()=>go("Condition Compare")}><GitCompare size={14}/> Compare Conditions</button></section>
+ <div className="dashboardMetrics conditionMetrics"><Metric t="Points" v={active.length} s={selected==="ALL"?"cumulative":"selected condition"}/><Metric t="Residue" v={residue} s={active.length?`${Math.round(residue/active.length*100)}%`:"—"}/><Metric t="Non-residue" v={non} s={active.length?`${Math.round(non/active.length*100)}%`:"—"}/><Metric t="Ambiguous" v={amb} s="needs review"/><Metric t="Avg Score" v={active.length?(active.reduce((s,p)=>s+(displayScore(p)||0),0)/active.length).toFixed(1):"—"} s="selected points"/><Metric t="Wafers" v={wafers.length} s={wafers.map(w=>`W${w}`).join(", ")||"—"}/></div>
+ <section className="panel"><div className="panelHead"><b>{selected==="ALL"?"All Conditions":"Condition · "+selected}</b><small>Result distribution and wafer summary</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Condition</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{keys.map(k=>{const a=groups[k],r=a.filter(p=>pointClass(p)==="Residue").length,n=a.filter(p=>pointClass(p)==="Non-residue").length,q=a.length-r-n;return <button className={`dashTr conditionRowBtn ${selected===k?"selected": ""}`} key={k} onClick={()=>setSelected(k)}><span>{k}</span><span>{a.length}</span><span>{r}</span><span>{n}</span><span>{q}</span><strong>{a.length?Math.round(r/a.length*100):0}%</strong></button>})}</div></section>
+ {selected!=="ALL"&&<section className="panel conditionPointPanel"><div className="panelHead"><b>{selected} · Point List</b><small>Point를 클릭하면 Verification에서 해당 결과를 확인합니다.</small></div><div className="conditionPointGrid">{active.map(p=>{const c=pointClass(p);return <button className={`conditionPointCard ${c.toLowerCase().replace("-","")}`} key={p.id} onClick={()=>{const i=points.findIndex(x=>x.id===p.id);if(i>=0){go("Verification");setTimeout(()=>window.dispatchEvent(new CustomEvent("uvtape:open-point",{detail:{index:i}})),0)}}}><b>P{p.point}</b><span>W{p.wafer} · {p.power} · {p.time}</span><strong>{c}</strong><small>Score {displayScore(p)==null?"-":displayScore(p)}</small></button>})}</div></section>}
+ </div>
+}
+function compareRatio(p,kind){
+ const f=p?.features||{};
+ const direct=kind==="C"?f.human_c_ratio:f.human_o_ratio;
+ if(typeof direct==="number"&&Number.isFinite(direct))return direct;
+ const roi=kind==="C"?f.c_roi_mean:f.o_roi_mean;
+ const global=kind==="C"?f.c_global_mean:f.o_global_mean;
+ return typeof roi==="number"&&typeof global==="number"&&global!==0?roi/global:null;
+}
+function comparePointKey(p){return `W${p?.wafer??"-"}|P${p?.point??"-"}`}
+function compareEsc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function compareRate(a,b){return b?Math.round(a/b*1000)/10:0}
+function Compare({points,selected,setSelected}){
+ const g=conditionGroups(points),keys=Object.keys(g);
+ const active=Array.isArray(selected)?selected:[];
+ const effectiveKeys=active.length?active:keys.slice(0,2);
+ const rows=effectiveKeys.map(k=>{
+   const a=g[k]||[], r=a.filter(p=>pointClass(p)==="Residue").length, n=a.filter(p=>pointClass(p)==="Non-residue").length;
+   const q=a.length-r-n, scores=a.map(displayScore).filter(v=>typeof v==="number"&&Number.isFinite(v));
+   const cr=a.map(p=>compareRatio(p,"C")).filter(v=>typeof v==="number"&&Number.isFinite(v));
+   const or=a.map(p=>compareRatio(p,"O")).filter(v=>typeof v==="number"&&Number.isFinite(v));
+   const lim=a.map(p=>{const c=compareRatio(p,"C"),o=compareRatio(p,"O");return Number.isFinite(c)&&Number.isFinite(o)?Math.min(c,o):null}).filter(v=>v!=null);
+   const waf=[...new Set(a.map(p=>p.wafer).filter(v=>v!=null))].sort((x,y)=>Number(x)-Number(y));
+   const subs=[...new Set(a.map(p=>p.substrate_type||p.features?.substrate_type||"SiCN"))];
+   return {k,a,r,n,q,avg:scores.length?scores.reduce((s,v)=>s+v,0)/scores.length:null,max:scores.length?Math.max(...scores):null,avgC:cr.length?cr.reduce((s,v)=>s+v,0)/cr.length:null,avgO:or.length?or.reduce((s,v)=>s+v,0)/or.length:null,avgLim:lim.length?lim.reduce((s,v)=>s+v,0)/lim.length:null,waf,subs};
+ });
+ const toggle=k=>setSelected(active.includes(k)?active.filter(x=>x!==k):[...active,k]);
+ const pair=rows.length===2?rows:null;
+ const pairTransition=()=>{
+   if(!pair)return null;
+   const [a,b]=pair, bm=new Map(b.a.map(p=>[comparePointKey(p),p]));
+   const trans={};
+   const matched=[];
+   a.a.forEach(pa=>{const pb=bm.get(comparePointKey(pa));if(!pb)return;const ar=pointClass(pa),br=pointClass(pb);const key=`${ar} → ${br}`;trans[key]=(trans[key]||0)+1; if(ar!==br)matched.push({key:comparePointKey(pa),wafer:pa.wafer,point:pa.point,from:ar,to:br});});
+   return {trans,matched};
+ };
+ const transition=pairTransition();
+ const findings=[];
+ if(pair){
+   const [a,b]=pair;
+   const dr=compareRate(b.r,b.a.length)-compareRate(a.r,a.a.length);
+   const ds=(b.avg??0)-(a.avg??0);
+   const da=compareRate(b.q,b.a.length)-compareRate(a.q,a.a.length);
+   findings.push(`${b.k}의 Residue율은 ${dr>=0?"+":""}${dr.toFixed(1)}%p (${compareRate(a.r,a.a.length).toFixed(1)}% → ${compareRate(b.r,b.a.length).toFixed(1)}%)입니다.`);
+   findings.push(`평균 Score는 ${ds>=0?"+":""}${ds.toFixed(1)}점, Ambiguous율은 ${da>=0?"+":""}${da.toFixed(1)}%p 변화했습니다.`);
+   if(transition) findings.push(`동일 W/P가 모두 존재하는 Point 중 ${transition.matched.length}개에서 판정이 변경되었습니다.`);
+ }
+ const printReport=()=>{
+   const title=pair?`${pair[0].k} vs ${pair[1].k}`:"Selected Condition Comparison";
+   const html=`<html><head><title>${compareEsc(title)}</title><style>
+   @page{size:A4 landscape;margin:10mm}body{font-family:Arial,"Malgun Gothic",sans-serif;color:#172236;margin:0}
+   h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:18px 0 8px}.muted{color:#68768a;font-size:11px}
+   table{width:100%;border-collapse:collapse;font-size:10px}th,td{border:1px solid #d7e0e8;padding:6px;text-align:center}th{background:#eef3f7}
+   .cards{display:grid;grid-template-columns:repeat(${Math.min(3,Math.max(1,rows.length))},1fr);gap:10px}.card{border:1px solid #d7e0e8;border-radius:8px;padding:10px}.big{font-size:24px;font-weight:800}.note{font-size:10px;line-height:1.5}
+   </style></head><body><h1>UV Tape Residue — Condition Comparison</h1><div class="muted">${compareEsc(title)} · cumulative workspace</div>
+   <div class="cards">${rows.map(x=>`<div class="card"><b>${compareEsc(x.k)}</b><div class="big">${x.a.length} <span style="font-size:11px">Points</span></div><div>Residue ${compareRate(x.r,x.a.length).toFixed(1)}% · Avg Score ${x.avg==null?"-":x.avg.toFixed(1)}</div><div>Ambiguous ${compareRate(x.q,x.a.length).toFixed(1)}% · Avg C ${x.avgC==null?"-":x.avgC.toFixed(2)}× · Avg O ${x.avgO==null?"-":x.avgO.toFixed(2)}×</div></div>`).join("")}</div>
+   <h2>Direct Comparison</h2><table><tr><th>Condition</th><th>Points</th><th>Residue %</th><th>Non-residue %</th><th>Ambiguous %</th><th>Avg Score</th><th>Avg C Ratio</th><th>Avg O Ratio</th></tr>${rows.map(x=>`<tr><td>${compareEsc(x.k)}</td><td>${x.a.length}</td><td>${compareRate(x.r,x.a.length).toFixed(1)}%</td><td>${compareRate(x.n,x.a.length).toFixed(1)}%</td><td>${compareRate(x.q,x.a.length).toFixed(1)}%</td><td>${x.avg==null?"-":x.avg.toFixed(1)}</td><td>${x.avgC==null?"-":x.avgC.toFixed(2)}×</td><td>${x.avgO==null?"-":x.avgO.toFixed(2)}×</td></tr>`).join("")}</table>
+   ${pair&&transition?`<h2>Same Wafer / Position Result Transition</h2><table><tr><th>Transition</th><th>Count</th></tr>${Object.entries(transition.trans).map(([k,v])=>`<tr><td>${compareEsc(k)}</td><td>${v}</td></tr>`).join("")}</table>`:""}
+   <div class="note" style="margin-top:14px">해석은 관측된 데이터 변화만 요약하며 공정 원인/인과관계를 단정하지 않습니다.</div>
+   </body></html>`;
+   const w=window.open("","_blank");if(w){w.document.write(html);w.document.close();setTimeout(()=>w.print(),500);}
+ };
+ return <div className="content">
+   <div className="intro"><div><span className="badge"><GitCompare size={13}/> CONDITION COMPARE</span><h2>Condition Comparison</h2><p>HTML Viewer처럼 조건을 선택하고 Power / Time / Wafer / Position / Zone / Substrate별로 비교합니다.</p></div><span>{effectiveKeys.length} conditions</span></div>
+   <section className="panel comparePicker"><div className="panelHead"><div><b>Compare Conditions</b><small>2개 선택하면 동일 Wafer + Position의 판정 변화까지 분석합니다. 여러 조건 선택도 가능합니다.</small></div><div style={{display:"flex",gap:7}}><button className="secondary" onClick={()=>setSelected([])}>Reset</button><button className="secondary" onClick={printReport}><FileText size={13}/> 비교 리포트</button></div></div>
+     <div className="compareChoices">{keys.map(k=><button key={k} className={`compareChoice ${active.includes(k)?"selected":""}`} onClick={()=>toggle(k)}><b>{k}</b><span>{g[k].length} Points · Residue {compareRate(g[k].filter(p=>pointClass(p)==="Residue").length,g[k].length).toFixed(1)}%</span><i>{active.includes(k)?"✓":"+"}</i></button>)}</div>
+     <div className="compareActions"><span>{active.length?`${active.length}개 선택`:`선택이 없어서 최근 2개 조건을 기본 비교합니다.`}</span><button className="secondary" onClick={()=>setSelected(keys)}>전체 조건 선택</button></div>
+   </section>
+   <section className="panel"><div className="panelHead"><b>Comparison Summary</b><small>누적 workspace 기준 · Human ROI 판정이 있으면 해당 결과를 사용합니다.</small></div>
+     <div className="compareGrid">{rows.map(x=><div className="compareCard" key={x.k}><h3>{x.k}</h3><div className="compareBig">{x.a.length}<small> Points</small></div><div className="compareStats"><span><b>{x.r}</b> Residue</span><span><b>{x.n}</b> Non-residue</span><span><b>{x.q}</b> Ambiguous</span></div><div className="compareBar"><i style={{width:`${compareRate(x.r,x.a.length)}%`}}/></div><div className="compareFoot"><span>Residue Rate</span><strong>{compareRate(x.r,x.a.length).toFixed(1)}%</strong><span>Avg Score</span><strong>{x.avg==null?"-":x.avg.toFixed(1)}</strong><span>Max Score</span><strong>{x.max==null?"-":x.max.toFixed(1)}</strong><span>Avg C / O</span><strong>{x.avgC==null?"-":x.avgC.toFixed(2)}× / {x.avgO==null?"-":x.avgO.toFixed(2)}×</strong></div></div>)}</div>
+   </section>
+   {pair&&<section className="panel"><div className="panelHead"><b>A ↔ B Direct Comparison</b><small>첫 번째 선택 조건을 A, 두 번째 선택 조건을 B로 봅니다.</small></div>
+     <div className="compareDeltaGrid"><div><small>Residue Rate Δ</small><b>{(compareRate(pair[1].r,pair[1].a.length)-compareRate(pair[0].r,pair[0].a.length)).toFixed(1)}%p</b></div><div><small>Avg Score Δ</small><b>{((pair[1].avg??0)-(pair[0].avg??0)).toFixed(1)}</b></div><div><small>Ambiguous Rate Δ</small><b>{(compareRate(pair[1].q,pair[1].a.length)-compareRate(pair[0].q,pair[0].a.length)).toFixed(1)}%p</b></div><div><small>Avg Limiting C/O Δ</small><b>{pair[0].avgLim!=null&&pair[1].avgLim!=null?((pair[1].avgLim-pair[0].avgLim).toFixed(2)+"×"):"-"}</b></div></div>
+     <div className="dashTable"><div className="dashTr dashTh"><span>Condition</span><span>Points</span><span>Residue %</span><span>Avg Score</span><span>Ambiguous %</span><span>Wafers</span></div>{pair.map(x=><div className="dashTr" key={x.k}><span>{x.k}</span><span>{x.a.length}</span><strong>{compareRate(x.r,x.a.length).toFixed(1)}%</strong><span>{x.avg==null?"-":x.avg.toFixed(1)}</span><span>{compareRate(x.q,x.a.length).toFixed(1)}%</span><span>{x.waf.map(w=>`W${w}`).join(", ")||"-"}</span></div>)}</div>
+   </section>}
+   <section className="grid2">
+     <section className="panel"><div className="panelHead"><b>Residue Rate Ranking</b><small>선택 조건 중 Residue 비율</small></div>{[...rows].sort((a,b)=>compareRate(b.r,b.a.length)-compareRate(a.r,a.a.length)).map(x=><div className="compareRank" key={x.k}><span>{x.k}</span><div><i style={{width:`${compareRate(x.r,x.a.length)}%`}}/></div><strong>{compareRate(x.r,x.a.length).toFixed(1)}%</strong></div>)}</section>
+     <section className="panel"><div className="panelHead"><b>Score Distribution</b><small>60 미만 / 60–69 / 70–79 / 80–89 / 90+</small></div>{rows.map(x=>{const bins=[[0,60],[60,70],[70,80],[80,90],[90,101]].map(([lo,hi])=>x.a.filter(p=>{const s=displayScore(p);return s!=null&&s>=lo&&s<hi}).length);return <div key={x.k} className="scoreDistBlock"><b>{x.k}</b>{bins.map((v,i)=><div className="scoreDistRow" key={i}><span>{["<60","60–69","70–79","80–89","90+"][i]}</span><div><i style={{width:`${compareRate(v,x.a.length)}%`}}/></div><strong>{v} ({compareRate(v,x.a.length).toFixed(1)}%)</strong></div>)}</div>})}</section>
+   </section>
+   <section className="grid2">
+     <section className="panel"><div className="panelHead"><b>Time 변화 — 같은 Power</b><small>조건을 표 형태로 확인</small></div><div className="compareMatrix">{[...new Set(rows.map(x=>x.k.split(" / ")[1]))].map(t=>null)}<table><thead><tr><th>Power</th>{[...new Set(rows.map(x=>x.k.split(" / ")[1]))].map(t=><th key={t}>{t}</th>)}</tr></thead><tbody>{[...new Set(rows.map(x=>x.k.split(" / ")[0]))].map(p=><tr key={p}><th>{p}</th>{[...new Set(rows.map(x=>x.k.split(" / ")[1]))].map(t=>{const x=rows.find(r=>r.k===`${p} / ${t}`);return <td key={t}>{x?`${compareRate(x.r,x.a.length).toFixed(1)}% (${x.a.length})`:"—"}</td>})}</tr>)}</tbody></table></div></section>
+     <section className="panel"><div className="panelHead"><b>Power 변화 — 같은 Time</b><small>조건을 표 형태로 확인</small></div><table><thead><tr><th>Time</th>{[...new Set(rows.map(x=>x.k.split(" / ")[0]))].map(p=><th key={p}>{p}</th>)}</tr></thead><tbody>{[...new Set(rows.map(x=>x.k.split(" / ")[1]))].map(t=><tr key={t}><th>{t}</th>{[...new Set(rows.map(x=>x.k.split(" / ")[0]))].map(p=>{const x=rows.find(r=>r.k===`${p} / ${t}`);return <td key={p}>{x?`${compareRate(x.r,x.a.length).toFixed(1)}% (${x.a.length})`:"—"}</td>})}</tr>)}</tbody></table></section>
+   </section>
+   <section className="grid2">
+     <section className="panel"><div className="panelHead"><b>Zone별 조건 비교</b><small>Corner / Edge / Middle별 Residue율</small></div><table><thead><tr><th>Condition</th>{["Corner","Edge","Middle"].map(z=><th key={z}>{z}</th>)}</tr></thead><tbody>{rows.map(x=><tr key={x.k}><th>{x.k}</th>{["Corner","Edge","Middle"].map(z=>{const a=x.a.filter(p=>p.zone===z),r=a.filter(p=>pointClass(p)==="Residue").length;return <td key={z}>{a.length?`${compareRate(r,a.length).toFixed(1)}% (${a.length})`:"—"}</td>})}</tr>)}</tbody></table></section>
+     <section className="panel"><div className="panelHead"><b>Wafer별 조건 비교</b><small>W1 / W4 / W5 / W9 등 실제 데이터 기준</small></div><table><thead><tr><th>Condition</th>{[...new Set(rows.flatMap(x=>x.waf))].sort((a,b)=>Number(a)-Number(b)).map(w=><th key={w}>W{w}</th>)}</tr></thead><tbody>{rows.map(x=><tr key={x.k}><th>{x.k}</th>{[...new Set(rows.flatMap(y=>y.waf))].sort((a,b)=>Number(a)-Number(b)).map(w=>{const a=x.a.filter(p=>Number(p.wafer)===Number(w)),r=a.filter(p=>pointClass(p)==="Residue").length;return <td key={w}>{a.length?`${compareRate(r,a.length).toFixed(1)}% (${a.length})`:"—"}</td>})}</tr>)}</tbody></table></section>
+   </section>
+   <section className="grid2">
+     <section className="panel"><div className="panelHead"><b>Position별 조건 비교</b><small>P1–P9 · 같은 위치의 Residue율</small></div><table><thead><tr><th>Condition</th>{Array.from({length:9},(_,i)=>i+1).map(p=><th key={p}>P{p}</th>)}</tr></thead><tbody>{rows.map(x=><tr key={x.k}><th>{x.k}</th>{Array.from({length:9},(_,i)=>i+1).map(pt=>{const a=x.a.filter(p=>Number(p.point)===pt),r=a.filter(p=>pointClass(p)==="Residue").length;return <td key={pt}>{a.length?`${compareRate(r,a.length).toFixed(0)}%`:"—"}</td>})}</tr>)}</tbody></table></section>
+     <section className="panel"><div className="panelHead"><b>Substrate별 조건 비교</b><small>SiCN / Si / SiN / SiO2</small></div><table><thead><tr><th>Condition</th>{["SiCN","Si","SiN","SiO2"].map(s=><th key={s}>{s}</th>)}</tr></thead><tbody>{rows.map(x=><tr key={x.k}><th>{x.k}</th>{["SiCN","Si","SiN","SiO2"].map(s=>{const a=x.a.filter(p=>(p.substrate_type||p.features?.substrate_type||"SiCN")===s),r=a.filter(p=>pointClass(p)==="Residue").length;return <td key={s}>{a.length?`${compareRate(r,a.length).toFixed(1)}% (${a.length})`:"—"}</td>})}</tr>)}</tbody></table></section>
+   </section>
+   {pair&&transition&&<section className="panel"><div className="panelHead"><div><b>Same Wafer + Position Transition</b><small>{pair[0].k} → {pair[1].k} · 동일한 W/P만 비교</small></div></div>
+     <div className="transitionGrid">{Object.entries(transition.trans).sort((a,b)=>b[1]-a[1]).map(([k,v])=><div className="transitionCard" key={k}><b>{k}</b><strong>{v}</strong><span>{compareRate(v,transition.matched.length).toFixed(1)}%</span></div>)}</div>
+     {transition.matched.length>0&&<div className="dashTable"><div className="dashTr dashTh"><span>Wafer / Position</span><span>From</span><span>To</span><span>Type</span><span></span><span></span></div>{transition.matched.slice(0,40).map((x,i)=><div className="dashTr" key={i}><span>W{x.wafer} / P{x.point}</span><span>{x.from}</span><strong>{x.to}</strong><span>{x.from==="Ambiguous"?"Ambiguous resolution":x.to==="Ambiguous"?"Ambiguous appearance":"Result changed"}</span><span></span><span></span></div>)}</div>}</section>}
+   {pair&&<section className="panel"><div className="panelHead"><b>Data-supported Findings</b><small>자동 생성 · 인과관계가 아닌 관측값만 표시</small></div><ul className="compareFindings">{findings.map((f,i)=><li key={i}>{f}</li>)}</ul></section>}
+ </div>
+}
+
+function DeleteData({projectList,currentProject,deleteProject,busy}){
+ const list=Array.isArray(projectList)?projectList:[];
+ return <div className="content"><div className="intro"><div><h2>Delete Data</h2><p>필요하지 않은 Project와 해당 Point/분석 결과/원본 파일을 삭제합니다. 삭제 후 복구할 수 없습니다.</p></div></div><section className="panel deleteDataPanel"><div className="panelHead"><b>Stored Projects</b><small>업로드 배치는 내부적으로 구분되지만 Dashboard/Verification에서는 모든 데이터가 누적되어 표시됩니다.</small></div>{!list.length?<div className="deleteEmpty">삭제할 Project가 없습니다.</div>:<div className="deleteList">{list.map((x,i)=><div className={`deleteRow ${x.id===currentProject?"current":""}`} key={x.id}><div className="deleteMeta"><b>{x.name||"UV Tape Residue"}{x.id===currentProject&&<span className="currentTag">CURRENT</span>}</b><span>{x.created_at?new Date(x.created_at).toLocaleString("ko-KR"):"-"} · {x.point_count||0} points</span><small>{(x.files||[]).join(", ")||"source PDF"}</small></div><button className="danger" disabled={busy} onClick={()=>deleteProject(x.id,x)}><Trash2 size={13}/> Delete</button></div>)}</div>}</section></div>
+}
 function Reports({exportFile,project}){return <div className="content"><div className="intro"><div><h2>Reports & Export</h2><p>1 Point = 1 Page / Slide.</p></div></div><div className="reportGrid"><Report t="Point PPT" d="SEM / Spectrum / EDS Map / Element Maps / Data / Result" a={()=>exportFile("ppt")} disabled={!project}/><Report t="Point PDF" d="동일 레이아웃으로 1 Point = 1 Page" a={()=>exportFile("pdf")} disabled={!project}/><Report t="Analysis JSON" d="전체 분석 데이터 export" a={()=>exportFile("json")} disabled={!project}/></div></div>}
 function Report({t,d,a,disabled}){return <div className="reportCard"><FileText size={20}/><b>{t}</b><p>{d}</p><button className="secondary" disabled={disabled} onClick={a}><Download size={14}/> Export</button></div>}

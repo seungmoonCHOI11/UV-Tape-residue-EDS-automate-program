@@ -135,6 +135,33 @@ def get_points_with_data(project_id: str):
     return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
 
 
+def get_all_points_with_data():
+    """Load points across every stored project as one cumulative workspace."""
+    client = get_client()
+    rows = (client.table("points").select("*")
+            .order("power").order("time_sec").order("wafer").order("point")
+            .execute().data or [])
+    if not rows:
+        return []
+    ids = [str(r["id"]) for r in rows]
+    latest_analysis = {}
+    asset_map = {}
+    for start in range(0, len(ids), 100):
+        chunk = ids[start:start+100]
+        analyses = (client.table("analysis_results").select("*")
+                    .in_("point_id", chunk).order("created_at", desc=True)
+                    .execute().data or [])
+        for a in analyses:
+            pid = str(a["point_id"])
+            if pid not in latest_analysis:
+                latest_analysis[pid] = a
+        assets = (client.table("point_assets").select("point_id,asset_type,storage_path")
+                  .in_("point_id", chunk).execute().data or [])
+        for a in assets:
+            asset_map.setdefault(str(a["point_id"]), {})[a["asset_type"]] = a["storage_path"]
+    return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
+
+
 def get_points(project_id: str):
     return get_client().table("points").select("*").eq("project_id", project_id).order("created_at").execute().data or []
 

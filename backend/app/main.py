@@ -195,20 +195,10 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                 db.update_project(project_id, description=json.dumps(meta,ensure_ascii=False), status="Processing")
             except Exception as e: print(f"[project] queue metadata update failed: {e}")
 
-        # Validate page count in the background, so a large PDF never blocks the
-        # upload HTTP request.
-        set_job(job_id, phase="validation", progress=9, message="PDF 페이지 구조를 확인하고 있습니다.", total=expected_points, completed=0)
-        import pymupdf as fitz
-        total_pages = 0
-        for path in pdf_paths:
-            with fitz.open(path) as doc:
-                total_pages += len(doc)
-        if total_pages != expected_pages:
-            raise ValueError(
-                f"Page count mismatch: expected {expected_pages} pages "
-                f"({expected_points} points × {pages_per_point} pages/point), "
-                f"but received {total_pages} pages. Check condition order/count."
-            )
+        # Do not reject PDFs based on total page count. Whole Points may be missing
+        # or duplicated; extract_pdfs() identifies Point labels and continues with
+        # every usable Point instead of shifting the remaining 3-page groups.
+        set_job(job_id, phase="validation", progress=9, message="PDF Point 구조를 확인하고 있습니다.", total=expected_points, completed=0)
 
         set_job(job_id, status="processing", phase="analysis", progress=10, message="PDF 분석을 시작했습니다.", total=expected_points, completed=0)
 
@@ -564,6 +554,52 @@ def delete_project(project_id: str):
     for rid in old_record_ids:
         RECORDS.pop(rid,None)
     return {"ok":True,"project_id":project_id,"cancelled_jobs":job_ids}
+
+@app.get("/api/workspace")
+def workspace():
+    """Return all stored points as one cumulative analysis workspace.
+
+    Projects remain internal batches for queueing, source-file ownership,
+    re-analysis, and selective deletion, but the user-facing dataset is
+    intentionally cumulative. This also makes older uploads reappear without
+    requiring the PDF to be uploaded again.
+    """
+    if not db.configured():
+        all_recs=[]
+        for pid,p in PROJECTS.items():
+            for rid in p.get("records") or []:
+                if rid in RECORDS: all_recs.append(RECORDS[rid])
+        all_recs.sort(key=lambda r:(str(r.get("power","")),str(r.get("time","")),int(r.get("wafer",0) or 0),int(r.get("point",0) or 0)))
+        latest=next(reversed(list(PROJECTS.keys())),None) if PROJECTS else None
+        return {"project_id":latest,"latest_project_id":latest,"points":[public_record(r) for r in all_recs]}
+    try:
+        packed=db.get_all_points_with_data()
+        projects=db.get_projects(limit=1000)
+        latest=projects[0] if projects else None
+    except Exception as e:
+        print(f"[workspace] Supabase lookup failed: {type(e).__name__}: {e}")
+        raise HTTPException(503,"Cumulative workspace data could not be loaded.")
+    all_recs=[]
+    for row,analysis,assets in packed:
+        pid=str(row.get("project_id"))
+        rec=db_record(pid,row,analysis,assets)
+        rec["project_id"]=pid
+        all_recs.append(rec)
+        RECORDS[rec["id"]]=rec
+    all_recs.sort(key=lambda r:(int(re.search(r"\d+",str(r.get("power","0"))).group()) if re.search(r"\d+",str(r.get("power","0"))) else 0, int(re.search(r"\d+",str(r.get("time","0"))).group()) if re.search(r"\d+",str(r.get("time","0"))) else 0, int(r.get("wafer",0) or 0), int(r.get("point",0) or 0), str(r.get("id"))))
+    latest_id=str(latest["id"]) if latest else None
+    latest_meta={}
+    if latest:
+        try: latest_meta=json.loads(latest.get("description") or "{}")
+        except Exception: latest_meta={}
+    return {
+        "project_id":latest_id,
+        "latest_project_id":latest_id,
+        "points":[public_record(r) for r in all_recs],
+        "position_substrates":normalize_position_substrates(latest_meta.get("position_substrates") or {}),
+        "substrate_type":latest_meta.get("substrate_type") or "SiCN",
+        "project_count":len(projects),
+    }
 
 @app.get("/api/projects/latest")
 def latest_project():

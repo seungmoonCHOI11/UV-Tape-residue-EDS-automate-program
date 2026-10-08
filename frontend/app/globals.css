@@ -353,3 +353,47 @@
 
 /* V23.7.27 batch queue + project deletion */
 .projectDeleteBtn{width:100%;justify-content:center;margin-top:8px;padding:7px 9px;font-size:9px}.queuePanel{margin-top:13px}.queueEmpty{padding:18px;color:#8a94a2;font-size:9px;text-align:center}.analysisQueueList{padding:0 17px 12px}.analysisQueueItem{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #edf0f4}.analysisQueueItem>div{min-width:0}.analysisQueueItem b,.analysisQueueItem span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.analysisQueueItem b{font-size:9px}.analysisQueueItem span{font-size:8px;color:#87919e;margin-top:3px}.analysisQueueItem strong{font-size:10px;color:#4d66d1;min-width:42px;text-align:right}
+
+/* V23.7.28: simplify sidebar; project management is now a dedicated Delete Data page. */
+.deleteDataPanel{margin-top:8px}.deleteList{padding:0 17px 8px}.deleteRow{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 0;border-bottom:1px solid #edf0f4}.deleteRow.current{background:#fafbff;margin:0 -17px;padding-left:17px;padding-right:17px}.deleteMeta{min-width:0;flex:1}.deleteMeta b,.deleteMeta span,.deleteMeta small{display:block}.deleteMeta b{font-size:11px;color:#202633}.deleteMeta span{font-size:9px;color:#737e8c;margin-top:4px}.deleteMeta small{font-size:8px;color:#98a0ab;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.currentTag{display:inline-block!important;margin-left:7px;padding:3px 6px;border-radius:10px;background:#edf2ff;color:#4d66d1;font-size:7px!important;font-weight:800}.deleteEmpty{padding:30px;text-align:center;color:#8a94a2;font-size:10px}
+@media(max-width:600px){.deleteRow{align-items:flex-start;flex-direction:column}.deleteRow .danger{align-self:flex-end}}
+
+/* v23.7.30: cumulative condition view + multi-condition comparison */
+.conditionViewToolbar{display:flex;justify-content:space-between;align-items:end;gap:14px;padding:15px 17px;margin-bottom:12px}.conditionViewSelect{flex:1;max-width:620px}.conditionViewSelect label{display:block;font-size:8px;color:#7f8996;font-weight:800;margin-bottom:6px}.conditionViewSelect select{width:100%;background:#fff;border:1px solid #dfe4eb;border-radius:8px;padding:10px 11px;font-size:10px;color:#303844;outline:none}.conditionMetrics{margin-top:0}.conditionRowBtn{width:100%;border:0;background:#fff;text-align:left;cursor:pointer}.conditionRowBtn:hover,.conditionRowBtn.selected{background:#f4f7ff}.conditionPointPanel{margin-top:12px}.conditionPointGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;padding:13px}.conditionPointCard{border:1px solid #e2e6ed;background:#fff;border-radius:9px;padding:11px;text-align:left;display:flex;flex-direction:column;gap:4px}.conditionPointCard:hover{border-color:#9eafff;box-shadow:0 4px 14px rgba(40,60,120,.08)}.conditionPointCard b{font-size:13px}.conditionPointCard span,.conditionPointCard small{font-size:8px;color:#89929f}.conditionPointCard strong{font-size:8px}.conditionPointCard.residue strong{color:#c64550}.conditionPointCard.nonresidue strong{color:#1d865e}.conditionPointCard.ambiguous strong{color:#b57b12}.comparePicker{margin-bottom:12px}.compareChoices{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:13px}.compareChoice{position:relative;border:1px solid #e1e5eb;background:#fff;border-radius:9px;padding:11px;text-align:left}.compareChoice b,.compareChoice span{display:block}.compareChoice b{font-size:10px}.compareChoice span{font-size:8px;color:#89929f;margin-top:4px}.compareChoice i{position:absolute;right:9px;top:9px;font-style:normal;font-size:10px;color:#8c96a4}.compareChoice.selected{background:#edf2ff;border-color:#aebcff;color:#425ec8}.compareChoice.selected i{color:#425ec8;font-weight:900}.compareActions{display:flex;justify-content:space-between;align-items:center;padding:0 13px 13px;font-size:8px;color:#89929f}.compareGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:13px}.compareCard{border:1px solid #e3e7ee;border-radius:10px;padding:14px;background:#fff}.compareCard h3{font-size:12px;margin:0 0 10px}.compareBig{font-size:27px;font-weight:900}.compareBig small{font-size:9px;font-weight:600;color:#89929f}.compareStats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:12px 0;font-size:8px;color:#89929f}.compareStats b{display:block;font-size:13px;color:#303844}.compareBar{height:7px;background:#edf0f4;border-radius:10px;overflow:hidden}.compareBar i{display:block;height:100%;background:#5268d8;border-radius:10px}.compareFoot{display:grid;grid-template-columns:1fr auto;gap:5px 12px;margin-top:10px;font-size:8px;color:#89929f}.compareFoot strong{color:#303844}
+@media(max-width:1100px){.conditionPointGrid{grid-template-columns:repeat(4,1fr)}.compareChoices{grid-template-columns:repeat(3,1fr)}.compareGrid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:800px){.conditionViewToolbar{display:block}.conditionViewToolbar .secondary{margin-top:9px}.conditionPointGrid{grid-template-columns:repeat(2,1fr)}.compareChoices{grid-template-columns:repeat(2,1fr)}.compareGrid{grid-template-columns:1fr}}
+@media(max-width:520px){.conditionPointGrid,.compareChoices{grid-template-columns:1fr}}
+
+/* v23.7.31 condition comparison expansion */
+.compareDeltaGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;padding:13px}
+.compareDeltaGrid>div{border:1px solid #e2e7ee;border-radius:9px;background:#f8fafc;padding:11px}
+.compareDeltaGrid small{display:block;font-size:7px;color:#7d8896;font-weight:800}
+.compareDeltaGrid b{display:block;font-size:18px;color:#24344a;margin-top:5px}
+.compareRank{display:grid;grid-template-columns:145px 1fr 62px;gap:8px;align-items:center;margin:10px 13px;font-size:9px}
+.compareRank>div{height:9px;background:#edf1f5;border-radius:8px;overflow:hidden}
+.compareRank i{display:block;height:100%;background:#5268d8;border-radius:8px}
+.compareRank strong{text-align:right}
+.scoreDistBlock{padding:10px 13px;border-bottom:1px solid #edf0f4}
+.scoreDistBlock>b{font-size:9px}
+.scoreDistRow{display:grid;grid-template-columns:45px 1fr 85px;gap:7px;align-items:center;margin:6px 0;font-size:8px;color:#7d8896}
+.scoreDistRow>div{height:7px;background:#edf1f5;border-radius:8px;overflow:hidden}
+.scoreDistRow i{display:block;height:100%;background:#7187a1;border-radius:8px}
+.scoreDistRow strong{text-align:right;color:#4a5665;font-size:8px}
+.compareMatrix{overflow:auto}
+.compareMatrix table{min-width:420px}
+.transitionGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;padding:13px}
+.transitionCard{border:1px solid #e2e7ee;border-radius:9px;padding:10px;background:#fff}
+.transitionCard b{display:block;font-size:8px;color:#68768a}
+.transitionCard strong{display:block;font-size:22px;margin-top:5px}
+.transitionCard span{font-size:8px;color:#8b95a2}
+.compareFindings{margin:0;padding:0 30px 14px 34px}
+.compareFindings li{font-size:9px;line-height:1.7;color:#536274;margin:5px 0}
+@media(max-width:1000px){
+ .compareDeltaGrid{grid-template-columns:repeat(2,1fr)}
+ .transitionGrid{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:600px){
+ .compareDeltaGrid{grid-template-columns:1fr 1fr}
+ .compareRank{grid-template-columns:100px 1fr 55px}
+ .transitionGrid{grid-template-columns:1fr}
+}
