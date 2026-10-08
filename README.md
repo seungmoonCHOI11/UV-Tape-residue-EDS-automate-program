@@ -74,3 +74,6 @@ See `README_V15.md` for the current production patch: verified v3 CROP coordinat
 
 ## v21.6 patch
 See `V21.6_RELEASE.md`. v21.6 strengthens visual-first ROI/score behavior, suppresses broad SEM shadows, and reduces false high scores from edge-only substrate features while preserving the existing application flows.
+
+## V23.7.27
+Batch Analysis Queue and Project Delete were added.

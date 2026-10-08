@@ -341,3 +341,15 @@
 @media(max-width:560px){
   .verificationImages .visual img,.v21ElementStrip .focusPanel img{height:260px!important}
 }
+
+/* v23.7.26 project history + per-position substrate mapping */
+.projectPicker{display:block;width:100%;margin-top:9px;height:30px;border:1px solid #303846;border-radius:7px;background:#111720;color:#dbe2ec;padding:0 7px;font-size:9px}
+.positionSubstrateGrid{margin-top:12px;padding-top:11px;border-top:1px solid #e7ebf0;display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:7px}
+.positionSubstrateTitle{grid-column:1/-1;font-size:10px;font-weight:800;color:#566170}
+.positionSubstrateGrid label{display:flex;flex-direction:column;gap:4px;font-size:9px;font-weight:800;color:#566170}
+.positionSubstrateGrid select{height:32px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;padding:0 5px;font-size:9px;color:#273142}
+@media(max-width:1000px){.positionSubstrateGrid{grid-template-columns:repeat(5,minmax(0,1fr))}}
+@media(max-width:650px){.positionSubstrateGrid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+
+/* V23.7.27 batch queue + project deletion */
+.projectDeleteBtn{width:100%;justify-content:center;margin-top:8px;padding:7px 9px;font-size:9px}.queuePanel{margin-top:13px}.queueEmpty{padding:18px;color:#8a94a2;font-size:9px;text-align:center}.analysisQueueList{padding:0 17px 12px}.analysisQueueItem{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #edf0f4}.analysisQueueItem>div{min-width:0}.analysisQueueItem b,.analysisQueueItem span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.analysisQueueItem b{font-size:9px}.analysisQueueItem span{font-size:8px;color:#87919e;margin-top:3px}.analysisQueueItem strong{font-size:10px;color:#4d66d1;min-width:42px;text-align:right}

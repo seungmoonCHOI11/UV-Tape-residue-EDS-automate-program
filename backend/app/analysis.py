@@ -45,8 +45,14 @@ def normalize_conditions(conditions):
     return normalized
 
 
-def condition_point_sequence(conditions):
-    """Create the exact Point sequence implied by the user-entered conditions."""
+def condition_point_sequence(conditions, position_substrates=None):
+    """Create the exact Point sequence implied by the user-entered conditions.
+
+    position_substrates maps point/position number to the physical substrate used at
+    that location. It is metadata only; the existing CV/EDS ratio calculation remains
+    unchanged. Missing positions default to SiCN for backward compatibility.
+    """
+    position_substrates = {str(k): str(v) for k, v in (position_substrates or {}).items()}
     seq = []
     for c in conditions:
         for wafer in c["wafers"]:
@@ -58,6 +64,7 @@ def condition_point_sequence(conditions):
                     "wafer": wafer,
                     "point": point,
                     "zone": ZONE_MAP.get(point, "Unknown"),
+                    "substrate_type": position_substrates.get(str(point), "SiCN"),
                 })
     return seq
 
@@ -80,7 +87,7 @@ def _build_page_locations(pdf_paths):
     return locations, sum(counts)
 
 
-def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None):
+def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None, position_substrates=None):
     """Analyze one Point per isolated subprocess.
 
     v8 deliberately does NOT keep PyMuPDF/OpenCV objects in the FastAPI process.
@@ -91,7 +98,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
     if pages_per_point < 1:
         raise ValueError("pages_per_point must be at least 1")
     conditions = normalize_conditions(conditions)
-    sequence = condition_point_sequence(conditions)
+    sequence = condition_point_sequence(conditions, position_substrates)
     pdf_paths = [Path(p) for p in pdf_paths]
     locations, total_pages = _build_page_locations(pdf_paths)
     expected_pages = len(sequence) * pages_per_point
@@ -135,6 +142,7 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
             "wafer": meta["wafer"],
             "point": meta["point"],
             "zone": meta["zone"],
+            "substrate_type": meta.get("substrate_type", "SiCN"),
             "condition": meta["condition"],
             "page": {"start": start + 1, "end": start + pages_per_point},
             "pages_per_point": pages_per_point,

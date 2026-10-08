@@ -1,5 +1,5 @@
 
-import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re
+import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
@@ -27,6 +27,8 @@ PROJECTS={}
 RECORDS={}
 JOBS={}
 JOB_LOCK=threading.Lock()
+UPLOAD_QUEUE=queue.Queue()
+CANCELLED_PROJECTS=set()
 
 def set_job(job_id, **updates):
     with JOB_LOCK:
@@ -37,6 +39,25 @@ def get_job(job_id):
         return dict(JOBS.get(job_id, {}))
 
 
+def normalize_position_substrates(value):
+    """Normalize per-position substrate settings. Unknown/missing positions default to SiCN."""
+    allowed={"SiCN","Si","SiN","SiO2"}
+    try:
+        raw=json.loads(value) if isinstance(value,str) else (value or {})
+    except Exception as e:
+        raise ValueError(f"position_substrates_json must be valid JSON: {e}")
+    if not isinstance(raw,dict):
+        raise ValueError("position_substrates_json must be an object")
+    out={str(i):"SiCN" for i in range(1,10)}
+    for k,v in raw.items():
+        try: pos=int(k)
+        except Exception: continue
+        if pos<1 or pos>9: continue
+        vv=str(v or "SiCN")
+        if vv not in allowed:
+            raise ValueError(f"Unsupported substrate for P{pos}: {vv}")
+        out[str(pos)]=vv
+    return out
 
 
 def co_ratio_score(limiting: float) -> float:
@@ -120,6 +141,7 @@ def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: 
         "wafer": row["wafer"],
         "point": row["point"],
         "zone": row.get("position") or "Unknown",
+        "substrate_type": features.get("substrate_type") or "SiCN",
         "page": features.get("page"),
         "human_result": row.get("human_result"),
         "human_verified_at": row.get("human_verified_at"),
@@ -144,7 +166,7 @@ def health():
         "supabase_configured":db.configured(),
     }
 
-def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no):
+def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, position_substrates, sample_category, treatment, repeat_no):
     """Background processor so the browser is not held open for the full PDF analysis."""
     try:
         normalized = normalize_conditions(conditions)
@@ -166,6 +188,12 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                 source_keys[path.name] = key
         else:
             source_keys = {}
+        if db.configured:
+            try:
+                meta=json.loads((db.get_project(project_id) or {}).get("description") or "{}")
+                meta["source_keys"]=source_keys; meta["queue_status"]="processing"
+                db.update_project(project_id, description=json.dumps(meta,ensure_ascii=False), status="Processing")
+            except Exception as e: print(f"[project] queue metadata update failed: {e}")
 
         # Validate page count in the background, so a large PDF never blocks the
         # upload HTTP request.
@@ -202,15 +230,21 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
         all_records = extract_pdfs(
             pdf_paths, pdir / "assets", conditions, pages_per_point,
             progress_callback=point_progress, roi_reference_examples=gt_examples,
+            position_substrates=position_substrates,
         )
         if not all_records:
             raise ValueError("No analyzable PDF points were found.")
 
         set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
         if db.configured():
-            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps({"files": saved, "conditions": conditions, "substrate_type": substrate_type, "sample_category": sample_category, "repeat_no": repeat_no, "pages_per_point": pages_per_point, "source_hashes": source_hashes, "source_keys": source_keys}, ensure_ascii=False))
+            try:
+                db.update_project(project_id, status="Processing")
+            except Exception as e:
+                print(f"[project] status update failed: {e}")
 
         for i, r in enumerate(all_records, 1):
+            if project_id in CANCELLED_PROJECTS:
+                raise RuntimeError("분석 중 프로젝트가 삭제되어 작업을 취소했습니다.")
             source_point_id = r["id"]
             if r2.configured:
                 assets = list(r.get("assets", {}).items())
@@ -231,6 +265,9 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             pct = 76 + int((i / max(len(all_records), 1)) * 23)
             set_job(job_id, phase="database", progress=min(99, pct), completed=i, total=len(all_records), message=f"데이터 저장 중 · {i}/{len(all_records)}")
 
+        if db.configured():
+            try: db.update_project(project_id, status="Ready")
+            except Exception as e: print(f"[project] completion status update failed: {e}")
         PROJECTS[project_id] = {
             "id": project_id,
             "condition_count": len(conditions),
@@ -238,6 +275,9 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             "pages_per_point": pages_per_point,
             "files": saved,
             "records": [r["id"] for r in all_records],
+            "position_substrates": position_substrates,
+            "substrate_type": substrate_type,
+            "repeat_no": repeat_no,
         }
         set_job(job_id, status="completed", phase="complete", progress=100, completed=len(all_records), total=len(all_records),
                 project_id=project_id, count=len(all_records), message="분석이 완료되었습니다.")
@@ -245,12 +285,31 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
         traceback.print_exc()
         set_job(job_id, status="failed", phase="error", progress=0, error=str(e), message=f"분석 실패: {e}")
 
+def upload_queue_worker():
+    while True:
+        task=UPLOAD_QUEUE.get()
+        if task is None:
+            UPLOAD_QUEUE.task_done(); break
+        try:
+            if task["project_id"] in CANCELLED_PROJECTS:
+                set_job(task["job_id"],status="cancelled",phase="cancelled",progress=0,message="삭제 요청으로 작업이 취소되었습니다.")
+                continue
+            process_upload_job(**task)
+        except Exception as e:
+            traceback.print_exc()
+            set_job(task["job_id"],status="failed",phase="error",progress=0,error=str(e),message=f"분석 실패: {e}")
+        finally:
+            UPLOAD_QUEUE.task_done()
+
+threading.Thread(target=upload_queue_worker,daemon=True,name="uvtape-analysis-queue").start()
+
 @app.post("/api/upload")
 async def upload(
     files: list[UploadFile] = File(...),
     conditions_json: str = Form(...),
     pages_per_point: int = Form(3),
     substrate_type: str = Form("SiCN"),
+    position_substrates_json: str = Form("{}"),
     sample_category: str = Form("MAIN"),
     treatment: str = Form("CMP"),
 ):
@@ -264,6 +323,10 @@ async def upload(
         raise HTTPException(400, f"Invalid condition settings: {e}")
     if pages_per_point < 1:
         raise HTTPException(400, "pages_per_point must be at least 1")
+    try:
+        position_substrates = normalize_position_substrates(position_substrates_json)
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
     project_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
@@ -306,13 +369,13 @@ async def upload(
     if db.configured():
         try:
             existing = db.get_client().table("projects").select("id,description").execute().data or []
-            signature = json.dumps({"substrate_type": substrate_type, "conditions": normalized}, sort_keys=True, separators=(",", ":"))
+            signature = json.dumps({"substrate_type": substrate_type, "position_substrates": position_substrates, "conditions": normalized}, sort_keys=True, separators=(",", ":"))
             for row in existing:
                 try:
                     meta = json.loads(row.get("description") or "{}")
                 except Exception:
                     continue
-                old_sig = json.dumps({"substrate_type": meta.get("substrate_type", "SiCN"), "conditions": meta.get("conditions", [])}, sort_keys=True, separators=(",", ":"))
+                old_sig = json.dumps({"substrate_type": meta.get("substrate_type", "SiCN"), "position_substrates": normalize_position_substrates(meta.get("position_substrates") or {}), "conditions": meta.get("conditions", [])}, sort_keys=True, separators=(",", ":"))
                 if old_sig == signature:
                     repeat_no = max(repeat_no, int(meta.get("repeat_no", 0) or 0) + 1)
                     old_hashes = meta.get("source_hashes") or {}
@@ -322,14 +385,17 @@ async def upload(
                             source_reuse[name] = old_keys[name]
         except Exception as e:
             print(f"[repeat] lookup failed: {e}")
+    metadata={"files": saved, "conditions": conditions, "substrate_type": substrate_type, "position_substrates": position_substrates, "sample_category": sample_category, "repeat_no": repeat_no, "pages_per_point": pages_per_point, "source_hashes": source_hashes, "source_keys": source_reuse, "queue_job_id": job_id, "queue_status": "queued"}
+    if db.configured():
+        try:
+            db.create_project(project_id, f"UV Tape Residue · {substrate_type} · Repeat {repeat_no}", json.dumps(metadata, ensure_ascii=False), status="Queued")
+        except Exception as e:
+            shutil.rmtree(pdir, ignore_errors=True)
+            raise HTTPException(503, f"Project queue registration failed: {e}")
     set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
             total=expected_points, project_id=project_id,
-            message=f"파일 업로드 완료 · Repeat {repeat_no} · 분석 대기 중")
-    threading.Thread(
-        target=process_upload_job,
-        args=(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, sample_category, treatment, repeat_no),
-        daemon=True,
-    ).start()
+            message=f"파일 업로드 완료 · Repeat {repeat_no} · 분석 대기열에 추가되었습니다.")
+    UPLOAD_QUEUE.put({"job_id":job_id,"project_id":project_id,"pdir":pdir,"pdf_paths":pdf_paths,"saved":saved,"source_hashes":source_hashes,"source_reuse":source_reuse,"conditions":conditions,"pages_per_point":pages_per_point,"substrate_type":substrate_type,"position_substrates":position_substrates,"sample_category":sample_category,"treatment":treatment,"repeat_no":repeat_no})
 
     return {
         "job_id": job_id,
@@ -342,6 +408,7 @@ async def upload(
         "expected_pages": expected_pages,
         "repeat_no": repeat_no,
         "substrate_type": substrate_type,
+        "position_substrates": position_substrates,
         "sample_category": sample_category,
         "treatment": treatment,
     }
@@ -363,7 +430,7 @@ def _download_r2_source(key: str, destination: Path):
 
 def process_reanalysis_job(job_id,project_id,meta):
     try:
-        conditions=meta.get("conditions") or []; pages_per_point=int(meta.get("pages_per_point",3) or 3); files=meta.get("files") or []; keys=meta.get("source_keys") or {}
+        conditions=meta.get("conditions") or []; pages_per_point=int(meta.get("pages_per_point",3) or 3); files=meta.get("files") or []; keys=meta.get("source_keys") or {}; position_substrates=normalize_position_substrates(meta.get("position_substrates") or {})
         if not files: raise ValueError("Stored source PDF metadata was not found.")
         temp=UPLOAD/"_reanalyze"/project_id
         if temp.exists(): shutil.rmtree(temp)
@@ -380,7 +447,7 @@ def process_reanalysis_job(job_id,project_id,meta):
                 gt_examples=db.get_ground_truth_examples(project_id, limit=8)
             except Exception as e:
                 print(f"[ground_truth] reanalysis context lookup failed: {e}")
-        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,roi_reference_examples=gt_examples)
+        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,roi_reference_examples=gt_examples,position_substrates=position_substrates)
         set_job(job_id,phase="database",progress=76,completed=0,total=len(records),message="재분석 결과를 기존 Point에 반영하고 있습니다.")
         for i,r in enumerate(records,1):
             source_point_id=r["id"]
@@ -447,6 +514,57 @@ def reanalyze_project(project_id: str):
     threading.Thread(target=process_reanalysis_job,args=(job_id,project_id,meta),daemon=True).start()
     return {"job_id":job_id,"project_id":project_id,"expected_points":expected}
 
+@app.get("/api/projects")
+def list_projects():
+    """Return project history so uploading a new dataset does not hide older projects."""
+    if not db.configured():
+        rows=[]
+        for pid,p in PROJECTS.items():
+            rows.append({"id":pid,"name":p.get("name") or "UV Tape Residue","created_at":None,"point_count":len(p.get("records") or [])})
+        return {"projects":rows}
+    try:
+        rows=db.get_projects(limit=100)
+        out=[]
+        for row in rows:
+            try: meta=json.loads(row.get("description") or "{}")
+            except Exception: meta={}
+            try: count=db.get_project_point_count(row["id"])
+            except Exception: count=0
+            out.append({"id":row["id"],"name":row.get("name") or "UV Tape Residue","created_at":row.get("created_at"),"updated_at":row.get("updated_at"),"status":row.get("status"),"point_count":count,"repeat_no":meta.get("repeat_no"),"files":meta.get("files") or [],"conditions":meta.get("conditions") or [],"substrate_type":meta.get("substrate_type") or "SiCN","position_substrates":normalize_position_substrates(meta.get("position_substrates") or {})})
+        return {"projects":out}
+    except Exception as e:
+        print(f"[projects] Supabase lookup failed: {type(e).__name__}: {e}")
+        raise HTTPException(503,"Project history could not be loaded.")
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str):
+    if project_id in CANCELLED_PROJECTS:
+        pass
+    CANCELLED_PROJECTS.add(project_id)
+    job_ids=[]
+    with JOB_LOCK:
+        for jid,job in JOBS.items():
+            if job.get("project_id")==project_id and job.get("status") not in ("completed","failed","cancelled"):
+                job_ids.append(jid)
+                job.update(status="cancelled",phase="cancelled",message="프로젝트 삭제로 작업이 취소되었습니다.")
+    old_project=PROJECTS.get(project_id,{})
+    old_record_ids=set(old_project.get("records") or [])
+    if db.configured():
+        try:
+            db.delete_project(project_id)
+        except Exception as e:
+            CANCELLED_PROJECTS.discard(project_id)
+            raise HTTPException(500,f"프로젝트 삭제 실패: {e}")
+    if r2.configured:
+        try: r2.delete_prefix(f"projects/{project_id}/")
+        except Exception as e: print(f"[delete] R2 cleanup failed: {e}")
+    shutil.rmtree(UPLOAD/project_id, ignore_errors=True)
+    PROJECTS.pop(project_id,None)
+    for rid in old_record_ids:
+        RECORDS.pop(rid,None)
+    return {"ok":True,"project_id":project_id,"cancelled_jobs":job_ids}
+
 @app.get("/api/projects/latest")
 def latest_project():
     if not db.configured():
@@ -463,13 +581,19 @@ def latest_project():
     recs = [db_record(project_id, row, analysis, assets) for row, analysis, assets in packed]
     for r in recs:
         RECORDS[r["id"]] = r
+    try: meta=json.loads(p.get("description") or "{}")
+    except Exception: meta={}
     PROJECTS[project_id] = {
         "id": project_id,
-        "condition_count": None,
-        "files": [],
+        "condition_count": len(meta.get("conditions") or []),
+        "conditions": meta.get("conditions") or [],
+        "files": meta.get("files") or [],
         "records": [r["id"] for r in recs],
+        "position_substrates": normalize_position_substrates(meta.get("position_substrates") or {}),
+        "substrate_type": meta.get("substrate_type") or "SiCN",
+        "repeat_no": meta.get("repeat_no"),
     }
-    return {"project_id": project_id, "points": [public_record(r) for r in recs]}
+    return {"project_id": project_id, "points": [public_record(r) for r in recs], "position_substrates": PROJECTS[project_id]["position_substrates"], "substrate_type": PROJECTS[project_id]["substrate_type"]}
 
 @app.get("/api/projects/{project_id}")
 def project(project_id:str):
@@ -486,7 +610,9 @@ def project(project_id:str):
     recs=[db_record(project_id,row,analysis,assets) for row,analysis,assets in packed]
     for r in recs:
         RECORDS[r["id"]]=r
-    PROJECTS[project_id]={"id":project_id,"condition_count":None,"files":[],"records":[r["id"] for r in recs]}
+    try: meta=json.loads(p.get("description") or "{}")
+    except Exception: meta={}
+    PROJECTS[project_id]={"id":project_id,"condition_count":len(meta.get("conditions") or []),"conditions":meta.get("conditions") or [],"files":meta.get("files") or [],"records":[r["id"] for r in recs],"position_substrates":normalize_position_substrates(meta.get("position_substrates") or {}),"substrate_type":meta.get("substrate_type") or "SiCN","repeat_no":meta.get("repeat_no")}
     return {**PROJECTS[project_id],"points":[public_record(r) for r in recs]}
 
 @app.get("/api/points/{point_id}")

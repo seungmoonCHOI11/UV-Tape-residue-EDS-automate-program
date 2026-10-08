@@ -18,10 +18,29 @@ def get_client() -> Client:
 def configured() -> bool:
     return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 
-def create_project(project_id: str, name: str, description: str = ""):
+def create_project(project_id: str, name: str, description: str = "", status: str = "Ready"):
     return get_client().table("projects").insert({
-        "id": project_id, "name": name, "description": description
+        "id": project_id, "name": name, "description": description, "status": status
     }).execute()
+
+def update_project(project_id: str, **values):
+    values["updated_at"] = "now()" if False else values.get("updated_at")
+    values.pop("updated_at", None)
+    return get_client().table("projects").update(values).eq("id", project_id).execute()
+
+def delete_project(project_id: str):
+    client=get_client()
+    points=client.table("points").select("id").eq("project_id",project_id).execute().data or []
+    ids=[str(x["id"]) for x in points]
+    for start in range(0,len(ids),100):
+        chunk=ids[start:start+100]
+        if chunk:
+            client.table("point_review_history").delete().in_("point_id",chunk).execute()
+            client.table("point_assets").delete().in_("point_id",chunk).execute()
+            client.table("analysis_results").delete().in_("point_id",chunk).execute()
+    if ids:
+        client.table("points").delete().in_("id",ids).execute()
+    return client.table("projects").delete().eq("id",project_id).execute()
 
 def upsert_point(project_id: str, r: dict):
     power = int(re_digits(r.get("power")))
@@ -74,6 +93,15 @@ def update_point(point_id: str, **values):
 
 def get_project(project_id: str):
     return get_client().table("projects").select("*").eq("id", project_id).single().execute().data
+
+
+def get_projects(limit=100):
+    return (get_client().table("projects").select("id,name,description,created_at,updated_at,status")
+            .order("created_at", desc=True).limit(limit).execute().data or [])
+
+def get_project_point_count(project_id: str):
+    res = get_client().table("points").select("id", count="exact").eq("project_id", project_id).execute()
+    return int(res.count or 0)
 
 def get_latest_project():
     rows = get_client().table("projects").select("*").order("created_at", desc=True).limit(1).execute().data or []

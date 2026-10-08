@@ -50,6 +50,22 @@ class R2Storage:
             ExpiresIn=expires,
         )
 
+    def delete_prefix(self, prefix: str):
+        if not self.client:
+            return 0
+        deleted=0
+        paginator=self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            objs=page.get("Contents") or []
+            if not objs: continue
+            keys=[{"Key":o["Key"]} for o in objs]
+            for start in range(0,len(keys),1000):
+                batch=keys[start:start+1000]
+                if batch:
+                    self.client.delete_objects(Bucket=self.bucket,Delete={"Objects":batch,"Quiet":True})
+                    deleted += len(batch)
+        return deleted
+
     def download_file(self, key: str, local_path: str | Path):
         if not self.client:
             raise RuntimeError("R2 is not configured.")
