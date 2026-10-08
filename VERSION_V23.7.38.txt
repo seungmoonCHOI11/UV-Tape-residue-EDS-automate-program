@@ -1,0 +1,8 @@
+V23.7.38
+
+- Hardened frontend/backend cross-origin connectivity for Vercel frontend + Render backend.
+- Added Vercel origin regex to FastAPI CORS configuration.
+- Disabled browser credential mode because the API does not use cookie credentials.
+- Added 3-attempt upload retry for transient Render cold-start/network failures.
+- Upload failure notifications now show the actual error reason.
+- Preserved v23.7.37 Point-group fallback and multi-condition analysis modal.

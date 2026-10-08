@@ -20,8 +20,19 @@ OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
 app=FastAPI(title="UV Tape Residue EDS API",version="18.0.0")
+# Browser frontend is hosted on Vercel while this API is hosted separately.
+# The API does not use browser credentials/cookies, so allow cross-origin requests
+# from Vercel and other configured origins. This prevents XHR from surfacing a
+# misleading "server connection failed" when the response is otherwise healthy.
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").split(",") if x.strip()]
-app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins if origins else ["*"],
+    allow_origin_regex=r"https://([a-zA-Z0-9-]+\\.)*vercel\\.app$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 PROJECTS={}
 RECORDS={}

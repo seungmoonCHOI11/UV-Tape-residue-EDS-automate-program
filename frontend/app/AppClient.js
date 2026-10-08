@@ -128,15 +128,27 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
        setProgressPhase("upload");setProgress(0);setProgressMessage(`분석 대기열 등록 중 · ${i+1}/${batch.length} · ${file.name}`);
        const fd=new FormData();fd.append("files",file);fd.append("conditions_json",JSON.stringify([{power:itemConfig.power,time:itemConfig.time,wafers:itemConfig.wafers,points:itemConfig.points}]));fd.append("pages_per_point",String(pagesPerPoint));fd.append("substrate_type",substrateType);fd.append("position_substrates_json",JSON.stringify(positionSubstrates));fd.append("sample_category",sampleCategory);
        try{
-         const j=await new Promise((resolve,reject)=>{
-           const xhr=new XMLHttpRequest();xhr.open("POST",`${API}/api/upload`);
-           xhr.upload.onprogress=e=>{if(e.lengthComputable){const pct=Math.round((e.loaded/e.total)*100);setProgress(pct);setProgressMessage(`업로드 중 · ${i+1}/${batch.length} · ${file.name} · ${pct}%`);}};
-           xhr.onerror=()=>reject(new Error("서버 연결에 실패했습니다."));xhr.ontimeout=()=>reject(new Error("업로드 시간이 초과되었습니다."));
-           xhr.onload=()=>{let body=xhr.responseText,data={};try{data=JSON.parse(body)}catch{}if(xhr.status<200||xhr.status>=300){reject(new Error(`HTTP ${xhr.status}: ${data.detail||body||"server error"}`));return}resolve(data)};xhr.send(fd);
-         });
+         const j=await (async()=>{
+           let lastErr=null;
+           for(let attempt=1;attempt<=3;attempt++){
+             try{
+               const result=await new Promise((resolve,reject)=>{
+                 const xhr=new XMLHttpRequest();xhr.open("POST",`${API}/api/upload`);xhr.timeout=180000;
+                 xhr.upload.onprogress=e=>{if(e.lengthComputable){const pct=Math.round((e.loaded/e.total)*100);setProgress(pct);setProgressMessage(`업로드 중 · ${i+1}/${batch.length} · ${file.name} · ${pct}%`);}};
+                 xhr.onerror=()=>reject(new Error("서버 연결에 실패했습니다."));xhr.ontimeout=()=>reject(new Error("업로드 시간이 초과되었습니다."));
+                 xhr.onload=()=>{let body=xhr.responseText,data={};try{data=JSON.parse(body)}catch{}if(xhr.status<200||xhr.status>=300){reject(new Error(`HTTP ${xhr.status}: ${data.detail||body||"server error"}`));return}resolve(data)};xhr.send(fd);
+               });
+               return result;
+             }catch(err){
+               lastErr=err;
+               if(attempt<3){setProgressMessage(`서버 연결 재시도 중 · ${attempt}/2 · ${file.name}`);await new Promise(r=>setTimeout(r,2500));}
+             }
+           }
+           throw lastErr||new Error("서버 연결에 실패했습니다.");
+         })();
          const queueItem={job_id:j.job_id,project_id:j.project_id,files:j.files||[file.name],total:j.expected_points||n,status:"queued",progress:5,message:"분석 대기 중"};
          setAnalysisQueue(q=>[...q.filter(x=>x.job_id!==queueItem.job_id),queueItem]);added++;
-       }catch(e){failed++;setAnalysisQueue(q=>[...q,{job_id:`local-failed-${Date.now()}-${i}`,project_id:null,files:[file.name],total:n,status:"failed",progress:0,message:`등록 실패: ${e?.message||"server error"}`}]);notify(`${file.name} 등록 실패 · 다음 조건을 계속 등록합니다.`);}
+       }catch(e){failed++;const reason=e?.message||"server error";setAnalysisQueue(q=>[...q,{job_id:`local-failed-${Date.now()}-${i}`,project_id:null,files:[file.name],total:n,status:"failed",progress:0,message:`등록 실패: ${reason}`}]);notify(`${file.name} 등록 실패 · ${reason}`);}
      }
      setProgressPhase("queued");setProgress(100);setProgressMessage(`${added}개 PDF가 순차 분석 대기열에 등록되었습니다.${failed?` ${failed}개는 등록 실패했습니다.`:""}`);await loadProjectList();notify(`${added}개 PDF를 순차 분석 대기열에 추가했습니다.${failed?` (${failed}개 실패)`:""}`);
      if(added>0)setConditions([{...DEFAULT_CONDITION,file:null}]);
