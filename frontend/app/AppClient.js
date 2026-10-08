@@ -28,17 +28,19 @@ export default function App(){
      return list;
    }catch(e){return []}
  }
- async function loadData(preferredId=null){
-   setInitialLoading(true);
+ async function loadData(preferredId=null, opts={}){
+   const silent=!!opts.silent;
+   // Full-screen loading is reserved for the initial mount only.
+   // Background refreshes, queue completion, re-analysis, and navigation
+   // must never replace an already rendered dashboard with the loading screen.
    const savedId=preferredId||(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);
    let lastError=null;
    try{
-     // Render can take a little time to wake from sleep. Retry before showing
-     // an error so a transient cold-start does not look like lost project data.
+     // During an active analysis queue, refresh data silently. Never replace a
+     // working dashboard with the full-screen initial loader just because the
+     // backend is waking up or a background job has just completed.
      for(let attempt=0;attempt<4;attempt++){
        try{
-         // v23.7.29: the user-facing dataset is cumulative across uploads.
-         // Project IDs remain internal for queue/re-analysis/delete bookkeeping.
          const target=`${API}/api/workspace`;
          let r=await fetch(target,{cache:"no-store"});
          if(!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -52,15 +54,20 @@ export default function App(){
            if(typeof window!=="undefined") localStorage.setItem("uvtape:selectedProject",pid);
            return arr;
          }
-         setProject(null);setPoints([]);return [];
+         // An empty workspace is valid. Do not erase currently displayed data
+         // during a silent background refresh.
+         if(!silent){setProject(null);setPoints([]);}
+         return [];
        }catch(e){
          lastError=e;
          if(attempt<3) await new Promise(r=>setTimeout(r,[1200,2500,4500][attempt]));
        }
      }
-     notify(`프로젝트 데이터를 불러오지 못했습니다. ${lastError?.message||""}`.trim());
-     return [];
-   }finally{setInitialLoading(false);}
+     // Background refresh failures must not look like data loss. Keep the
+     // current points and only surface a small toast for an explicit load.
+     if(!silent) notify(`프로젝트 데이터를 불러오지 못했습니다. ${lastError?.message||""}`.trim());
+     return points;
+   }finally{if(!silent)setInitialLoading(false);}
  }
  useEffect(()=>{setMounted(true);(async()=>{const list=await loadProjectList();await loadData(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);if(!list.length)await loadProjectList()})()},[]);
  useEffect(()=>{
@@ -87,7 +94,7 @@ export default function App(){
      if(!stopped)setAnalysisQueue(next);
      if(!stopped){
        await loadProjectList();
-       if(hadCompleted) await loadData();
+       if(hadCompleted) await loadData(null,{silent:true});
      }
    };
    tick(); const timer=setInterval(tick,2500); return()=>{stopped=true;clearInterval(timer)};

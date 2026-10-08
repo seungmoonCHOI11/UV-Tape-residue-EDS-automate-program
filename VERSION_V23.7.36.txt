@@ -1,0 +1,7 @@
+V23.7.36
+
+Loading stability patch.
+- Full-screen Project data loading is used only during the initial app mount.
+- loadData refreshes no longer set initialLoading=true.
+- Dashboard/Verification/Gallery remain visible during background refresh, queue polling, completion refresh, and re-analysis.
+- Existing v23.7.35 condition queue workflow is preserved.
