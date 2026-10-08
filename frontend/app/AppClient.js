@@ -127,7 +127,7 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
          setAnalysisQueue(q=>[...q.filter(x=>x.job_id!==queueItem.job_id),queueItem]);added++;
        }catch(e){failed++;setAnalysisQueue(q=>[...q,{job_id:`local-failed-${Date.now()}-${i}`,project_id:null,files:[file.name],total:n,status:"failed",progress:0,message:`등록 실패: ${e?.message||"server error"}`}]);notify(`${file.name} 등록 실패 · 다음 조건을 계속 등록합니다.`);}
      }
-     setProgressPhase("queued");setProgress(100);setProgressMessage(`${added}개 PDF가 순차 분석 대기열에 등록되었습니다.${failed?` ${failed}개는 등록 실패했습니다.`:""}`);await loadProjectList();notify(`${added}개 PDF를 순차 분석 대기열에 추가했습니다.${failed?` (${failed}개 실패)":""}`);
+     setProgressPhase("queued");setProgress(100);setProgressMessage(`${added}개 PDF가 순차 분석 대기열에 등록되었습니다.${failed?` ${failed}개는 등록 실패했습니다.`:""}`);await loadProjectList();notify(`${added}개 PDF를 순차 분석 대기열에 추가했습니다.${failed?` (${failed}개 실패)`:""}`);
      if(added>0)setConditions([{...DEFAULT_CONDITION,file:null}]);
    }finally{setBusy(false);setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},900);}
  }
