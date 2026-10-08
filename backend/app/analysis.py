@@ -1,3 +1,13 @@
+import os
+# Keep the API parent and Point worker within Render's memory budget.
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 import base64
 import json
 import re

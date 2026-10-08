@@ -1,11 +1,28 @@
 
-import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
+import os
+# Render free/small instances can hit the cgroup memory limit when the API
+# process and the one-Point OpenCV/PyMuPDF worker briefly coexist. Keep native
+# allocators/thread pools conservative before importing NumPy/OpenCV.
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
+import json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 import cv2, numpy as np
+cv2.setNumThreads(1)
+try:
+    cv2.ocl.setUseOpenCL(False)
+except Exception:
+    pass
 from dotenv import load_dotenv
 
 from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
@@ -19,7 +36,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="18.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.7.41")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a

@@ -10,7 +10,7 @@ v16 changes:
 """
 import gc, json, os, sys
 from pathlib import Path
-os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
+os.environ.setdefault("MALLOC_ARENA_MAX","2"); os.environ.setdefault("MALLOC_TRIM_THRESHOLD_","131072"); os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("VECLIB_MAXIMUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
 import cv2, numpy as np, pymupdf as fitz
 cv2.setNumThreads(1)
 try: cv2.ocl.setUseOpenCL(False)
