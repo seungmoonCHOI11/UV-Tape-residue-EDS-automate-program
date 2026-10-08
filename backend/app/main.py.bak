@@ -609,19 +609,15 @@ def workspace():
         latest=next(reversed(list(PROJECTS.keys())),None) if PROJECTS else None
         return {"project_id":latest,"latest_project_id":latest,"points":[public_record(r) for r in all_recs]}
     try:
-        packed=db.get_all_points_with_data(page_size=100)
-        # Project history is metadata only; do not load up to 1000 full project
-        # descriptions into the same Render request as the Point/analysis data.
-        projects=db.get_projects(limit=100)
+        packed=db.get_all_points_with_data()
+        projects=db.get_projects(limit=1000)
         # Do not let a newer empty/queued project become the workspace identity.
         # The user-facing workspace is cumulative, so the selected project must
         # be a project that actually owns stored Point data.
         latest=db.get_latest_project_with_points()
     except Exception as e:
         print(f"[workspace] Supabase lookup failed: {type(e).__name__}: {e}")
-        # Keep the public error useful during deployment diagnostics instead of
-        # masking the actual Supabase/DB failure behind a generic 503.
-        raise HTTPException(503, f"Cumulative workspace data could not be loaded: {type(e).__name__}: {e}")
+        raise HTTPException(503,"Cumulative workspace data could not be loaded.")
     all_recs=[]
     for row,analysis,assets in packed:
         pid=str(row.get("project_id"))
