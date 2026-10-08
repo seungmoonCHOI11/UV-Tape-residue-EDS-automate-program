@@ -176,6 +176,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
         # Persist the original source PDF outside the Render filesystem. This is
         # intentionally done after the HTTP request has returned.
         source_keys = {}
+        storage_warnings = []
         if r2.configured:
             set_job(job_id, phase="storage", progress=7, message="원본 PDF를 저장하고 있습니다.", total=expected_points, completed=0)
             for path in pdf_paths:
@@ -184,8 +185,15 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                     continue
                 content_type = mimetypes.guess_type(path.name)[0] or "application/pdf"
                 key = f"projects/{project_id}/source/{path.name}"
-                r2.upload_file(path, key, content_type)
-                source_keys[path.name] = key
+                try:
+                    r2.upload_file(path, key, content_type)
+                    source_keys[path.name] = key
+                except Exception as e:
+                    # R2 is used for durable source reuse, but a transient storage
+                    # failure must not discard an otherwise valid analysis job.
+                    # Keep the local PDF for this run and continue to validation/analysis.
+                    storage_warnings.append(f"{path.name}: {e}")
+                    print(f"[r2] source upload failed; continuing analysis: {path.name}: {e}")
         else:
             source_keys = {}
         if db.configured:
@@ -200,7 +208,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
         # every usable Point instead of shifting the remaining 3-page groups.
         set_job(job_id, phase="validation", progress=9, message="PDF Point 구조를 확인하고 있습니다.", total=expected_points, completed=0)
 
-        set_job(job_id, status="processing", phase="analysis", progress=10, message="PDF 분석을 시작했습니다.", total=expected_points, completed=0)
+        set_job(job_id, status="processing", phase="analysis", progress=10, message=("PDF 분석을 시작했습니다. R2 원본 저장 일부 실패 · 분석은 계속합니다." if storage_warnings else "PDF 분석을 시작했습니다."), total=expected_points, completed=0)
 
         def point_progress(done, total, phase):
             # Analysis occupies roughly 10-75% of the visible progress bar.

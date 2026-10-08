@@ -1,0 +1,9 @@
+V23.7.34
+
+Batch draft workflow and resilient source storage patch.
+- One PDF is paired with one Analysis Condition.
+- Add condition creates another PDF + condition card.
+- Final Analysis submits conditions in order as independent backend jobs.
+- Backend queue continues sequentially even when a prior PDF job fails.
+- R2 source-upload failure no longer aborts the analysis; the local PDF continues through validation/analysis.
+- Existing dashboard, verification, gallery, human ROI, re-analysis, Supabase, R2 and condition comparison features preserved.
