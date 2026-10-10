@@ -1,3 +1,7 @@
+# v23.7.51 Verification hotfix
+
+This version fixes a client-side Verification crash caused by legacy/malformed result values while preserving the v23.7.50 engineering comparison/report features.
+
 # Current release: v23.7.50
 
 **먼저 [START_HERE_V23.7.50.md](START_HERE_V23.7.50.md)를 읽으세요.** 아래 내용은 과거 버전 기록입니다.

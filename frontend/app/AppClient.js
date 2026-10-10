@@ -309,22 +309,45 @@ function coRatioRuleResult(cRatio,oRatio){
 function hasHumanROI(f={}){
  return (Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
 }
+function finiteNumber(v){
+ if(v===null||v===undefined||v==="")return null;
+ const n=Number(v);
+ return Number.isFinite(n)?n:null;
+}
+function normalizeResultLabel(v){
+ // v23.7.51: legacy rows can contain stale/non-string result payloads.
+ // Never allow one malformed Point to crash Verification or other aggregate views.
+ if(typeof v!=="string")return null;
+ const raw=v.trim();
+ const k=raw.toLowerCase().replace(/[\s_]+/g,"-");
+ if(["residue","r"].includes(k))return "Residue";
+ if(["non-residue","nonresidue","non-res","n"].includes(k))return "Non-residue";
+ if(["ambiguous","review","unknown","a"].includes(k))return "Ambiguous";
+ return null;
+}
 function currentRatios(p){
  const f=p?.features||{};
- const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
- if(hasHumanROI(f) && Number.isFinite(Number(f.human_c_ratio)) && Number.isFinite(Number(f.human_o_ratio))) return {c:Number(f.human_c_ratio),o:Number(f.human_o_ratio),source:"Human ROI"};
- let c=Number.isFinite(Number(f.c_roi_global_ratio))?Number(f.c_roi_global_ratio):ratio(f.c_roi_mean,f.c_global_mean);
- let o=Number.isFinite(Number(f.o_roi_global_ratio))?Number(f.o_roi_global_ratio):ratio(f.o_roi_mean,f.o_global_mean);
- return {c:Number.isFinite(c)?c:null,o:Number.isFinite(o)?o:null,source:"Auto ROI"};
+ const ratio=(roi,global)=>{const a=finiteNumber(roi),b=finiteNumber(global);return a!=null&&b!=null&&b!==0?a/b:null};
+ const hc=finiteNumber(f.human_c_ratio),ho=finiteNumber(f.human_o_ratio);
+ if(hasHumanROI(f) && hc!=null && ho!=null) return {c:hc,o:ho,source:"Human ROI"};
+ const storedC=finiteNumber(f.c_roi_global_ratio),storedO=finiteNumber(f.o_roi_global_ratio);
+ const c=storedC!=null?storedC:ratio(f.c_roi_mean,f.c_global_mean);
+ const o=storedO!=null?storedO:ratio(f.o_roi_mean,f.o_global_mean);
+ return {c,o,source:"Auto ROI"};
 }
 function autoPointClass(p){
  const f=p?.features||{},r=currentRatios(p),live=coRatioRuleResult(r.c,r.o);
  if(live)return live;
- const fallback=p?.cv_result||p?.result||f.result||f.human_roi_rule_result||"Ambiguous";
- return fallback==="Review"?"Ambiguous":fallback;
+ const candidates=[p?.cv_result,p?.result,f.result,f.human_roi_rule_result];
+ for(const v of candidates){const normalized=normalizeResultLabel(v);if(normalized)return normalized;}
+ return "Ambiguous";
 }
-function pointClass(p){return p?.human_result||autoPointClass(p)}
+function pointClass(p){
+ const human=normalizeResultLabel(p?.human_result);
+ return human||autoPointClass(p);
+}
 function verificationResult(x){return pointClass(x)}
+function resultCssClass(v){return pointClass({human_result:v,features:{}}).toLowerCase().replace(/[^a-z]+/g,"-")}
 
 function displayScore(p){
  const f=p?.features||{}, ratios=currentRatios(p);
@@ -359,7 +382,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const score=hasHumanROI&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
  const coverage=hasHumanROI&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
  const maskQuality=hasHumanROI&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
- const resultLabel=autoPointClass(p);
+ const resultLabel=pointClass(p);
  const confidence=hasHumanROI?"Human ROI":(f.confidence||"-");
  const maps={
    // If Human ROI is already saved, never fall back to the old AI/CV overlay.
@@ -377,7 +400,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  return <div className="verificationPanel">
   <div className="verificationTop v21Top">
    <div><b>Point {idx+1} / {total}</b><span>{p.power} · {p.time} · W{p.wafer} · P{p.point} · {p.substrate_type||f.substrate_type||"SiCN"}</span></div>
-   <div className="verificationTopActions"><span className={`autoBadge ${resultLabel.toLowerCase().replace(/[^a-z]+/g,"-")}`}>{resultLabel} (Auto)</span><button className="iconBtn" onClick={prev}><ChevronLeft size={16}/></button><button className="iconBtn" onClick={next}><ChevronRight size={16}/></button></div>
+   <div className="verificationTopActions"><span className={`autoBadge ${resultCssClass(resultLabel)}`}>{resultLabel} (Auto)</span><button className="iconBtn" onClick={prev}><ChevronLeft size={16}/></button><button className="iconBtn" onClick={next}><ChevronRight size={16}/></button></div>
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
@@ -389,7 +412,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
     <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
    </div>
    <section className="analysisResultCard" aria-label="Analysis Result">
-    <div className="analysisResultHead"><small>ANALYSIS RESULT</small><strong className={`resultTitle ${resultLabel.toLowerCase().replace(/[^a-z]+/g,"-")}`}>{resultLabel}</strong></div>
+    <div className="analysisResultHead"><small>ANALYSIS RESULT</small><strong className={`resultTitle ${resultCssClass(resultLabel)}`}>{resultLabel}</strong></div>
     <div className={`bigScore ${scoreClass(score)}`}>{score==null?"—":score}<span>/ 100</span></div>
     <div className="confidenceText">{confidence} confidence</div>
     <div className="metricBars">
@@ -464,7 +487,7 @@ function VerificationModal({p,idx,total,points,close,setIdx,condition,setConditi
  const goVisible=delta=>{if(!visible.length)return;const n=Math.min(visible.length-1,Math.max(0,currentPos+delta));const ni=points.findIndex(x=>x.id===visible[n].id);if(ni>=0)setIdx(ni)};
  const conditions=[...new Set(points.map(x=>`${x.power} · ${x.time}`).filter(Boolean))];
  const wafers=[...new Set(points.map(x=>x.wafer).filter(v=>v!==undefined&&v!==null&&String(v)!==""))].sort((a,b)=>Number(a)-Number(b));
- return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><div className="verificationHeadTools"><span>{visible.length} points shown</span><button className="secondary" onClick={close}>Close</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point Navigator</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>Condition<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">All Conditions</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>Wafer<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">All Wafers</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>Result<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">All Results</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>P{Number(x.point)||i+1}</span><em>{x.power}W · {x.time}s · W{x.wafer} · {x.substrate_type||"SiCN"}</em><strong className={r.toLowerCase().replace(/[^a-z]+/g,"-")}>{r}</strong></button>})}</div></aside><div className="verificationMain"><Review p={p} idx={idx} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={human} saveHumanRoi={saveHumanRoi}/></div></div></div></div>}
+ return <div className="verificationOverlay" onClick={close}><div className="verificationModal" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>Verification</b><div className="verificationHeadTools"><span>{visible.length} points shown</span><button className="secondary" onClick={close}>Close</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point Navigator</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>Condition<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">All Conditions</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>Wafer<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">All Wafers</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>Result<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">All Results</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>P{Number(x.point)||i+1}</span><em>{x.power}W · {x.time}s · W{x.wafer} · {x.substrate_type||"SiCN"}</em><strong className={resultCssClass(r)}>{r}</strong></button>})}</div></aside><div className="verificationMain"><Review p={p} idx={idx} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={human} saveHumanRoi={saveHumanRoi}/></div></div></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).filter(Boolean))];
@@ -508,7 +531,7 @@ function ConditionView({points,selected,setSelected,go}){
  <section className="panel conditionViewToolbar"><div className="conditionViewSelect"><label>Condition</label><select value={selected} onChange={e=>setSelected(e.target.value)}><option value="ALL">All Conditions · {points.length} Points</option>{keys.map(k=><option key={k} value={k}>{k} · {groups[k].length} Points</option>)}</select></div><button className="secondary" onClick={()=>go("Condition Compare")}><GitCompare size={14}/> Compare Conditions</button></section>
  <div className="dashboardMetrics conditionMetrics"><Metric t="Points" v={active.length} s={selected==="ALL"?"cumulative":"selected condition"}/><Metric t="Residue" v={residue} s={active.length?`${Math.round(residue/active.length*100)}%`:"—"}/><Metric t="Non-residue" v={non} s={active.length?`${Math.round(non/active.length*100)}%`:"—"}/><Metric t="Ambiguous" v={amb} s="needs review"/><Metric t="Human Verified" v={active.filter(p=>!!p.human_result).length} s="ground truth"/><Metric t="Wafers" v={wafers.length} s={wafers.map(w=>`W${w}`).join(", ")||"—"}/></div>
  <section className="panel"><div className="panelHead"><b>{selected==="ALL"?"All Conditions":"Condition · "+selected}</b><small>Result distribution and wafer summary</small></div><div className="dashTable"><div className="dashTr dashTh"><span>Condition</span><span>Points</span><span>Residue</span><span>Non</span><span>Ambiguous</span><span>Residue %</span></div>{keys.map(k=>{const a=groups[k],r=a.filter(p=>pointClass(p)==="Residue").length,n=a.filter(p=>pointClass(p)==="Non-residue").length,q=a.length-r-n;return <button className={`dashTr conditionRowBtn ${selected===k?"selected": ""}`} key={k} onClick={()=>setSelected(k)}><span>{k}</span><span>{a.length}</span><span>{r}</span><span>{n}</span><span>{q}</span><strong>{a.length?Math.round(r/a.length*100):0}%</strong></button>})}</div></section>
- {selected!=="ALL"&&<section className="panel conditionPointPanel"><div className="panelHead"><b>{selected} · Point List</b><small>Point를 클릭하면 Verification에서 해당 결과를 확인합니다.</small></div><div className="conditionPointGrid">{active.map(p=>{const c=pointClass(p);return <button className={`conditionPointCard ${c.toLowerCase().replace("-","")}`} key={p.id} onClick={()=>{const i=points.findIndex(x=>x.id===p.id);if(i>=0){go("Verification");setTimeout(()=>window.dispatchEvent(new CustomEvent("uvtape:open-point",{detail:{index:i}})),0)}}}><b>P{p.point}</b><span>W{p.wafer} · {p.power} · {p.time}</span><strong>{c}</strong><small>Score {displayScore(p)==null?"-":displayScore(p)}</small></button>})}</div></section>}
+ {selected!=="ALL"&&<section className="panel conditionPointPanel"><div className="panelHead"><b>{selected} · Point List</b><small>Point를 클릭하면 Verification에서 해당 결과를 확인합니다.</small></div><div className="conditionPointGrid">{active.map(p=>{const c=pointClass(p);return <button className={`conditionPointCard ${resultCssClass(c).replace(/-/g,"")}`} key={p.id} onClick={()=>{const i=points.findIndex(x=>x.id===p.id);if(i>=0){go("Verification");setTimeout(()=>window.dispatchEvent(new CustomEvent("uvtape:open-point",{detail:{index:i}})),0)}}}><b>P{p.point}</b><span>W{p.wafer} · {p.power} · {p.time}</span><strong>{c}</strong><small>Score {displayScore(p)==null?"-":displayScore(p)}</small></button>})}</div></section>}
  </div>
 }
 function compareRatio(p,kind){

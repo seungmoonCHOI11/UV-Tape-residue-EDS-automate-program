@@ -1,0 +1,9 @@
+UV Tape Residue EDS v23.7.51
+
+Verification crash hotfix
+- Normalizes every classification result to Residue / Ambiguous / Non-residue before rendering.
+- Ignores malformed legacy result payloads instead of calling string methods on them.
+- Fixes null ratio values being interpreted as numeric zero.
+- Keeps current classification rule: C >= 2.40x AND O >= 3.00x = Residue; both >= 2.00x otherwise Ambiguous; either < 2.00x = Non-residue.
+- Human Verified remains highest priority.
+- Verification Analysis Result now uses the same unified classifier as Dashboard / Compare / Reports.
