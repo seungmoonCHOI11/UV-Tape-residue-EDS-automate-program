@@ -19,7 +19,7 @@ class R2Storage:
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
                 region_name="auto",
-                config=Config(signature_version="s3v4"),
+                config=Config(signature_version="s3v4", retries={"max_attempts": 4, "mode": "standard"}, max_pool_connections=4),
             )
 
     @property
@@ -49,6 +49,16 @@ class R2Storage:
             Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=expires,
         )
+
+
+    def list_keys(self, prefix: str) -> list[str]:
+        if not self.client:
+            raise RuntimeError("R2 is not configured.")
+        out=[]
+        paginator=self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            out.extend(str(o.get("Key")) for o in (page.get("Contents") or []) if o.get("Key"))
+        return out
 
     def delete_prefix(self, prefix: str):
         if not self.client:

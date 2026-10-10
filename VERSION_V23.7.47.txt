@@ -1,0 +1,12 @@
+UV-Tape-residue-EDS v23.7.47
+
+Key changes
+- Manifest-locked Point mapping: W/P slots are fixed before analysis; a failed Point can never shift later data forward.
+- Image-only PDF safety: if the number of 3-page groups does not match the expected Point count, analysis stops instead of silently shifting labels.
+- Per-Point save retry: R2 + Supabase writes retry up to 3 times with 1s / 2s / 4s backoff.
+- Read-after-write verification for Point row, analysis row, DB asset rows, and R2 objects.
+- End-of-job reconciliation compares the expected manifest with actual Supabase + R2 state.
+- Missing/incomplete Points are repaired from already-generated local images first; only unresolved Points are selectively re-analyzed.
+- COMPLETED is emitted only when every expected Point and its generated assets are verified.
+- Human ROI preservation hardened: machine re-analysis/save retry no longer clears stored human_result or Human ROI feature data.
+- C/O residue rule remains C >= 2.50x and O >= 3.00x.

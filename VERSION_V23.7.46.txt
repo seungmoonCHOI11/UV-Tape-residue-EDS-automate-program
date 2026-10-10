@@ -1,0 +1,8 @@
+UV Tape Residue EDS v23.7.46
+
+- Residue threshold changed to C ROI/Global >= 2.50x AND O ROI/Global >= 3.00x.
+- Ambiguous remains both C/O >= 2.00x while either residue threshold is unmet.
+- Non-residue remains either C or O < 2.00x.
+- Score calibration now respects element-specific thresholds: C 2.50x and O 3.00x each map to the 70-point residue boundary.
+- Existing saved Human ROI and automatic records are re-evaluated on load using the new rule when C/O ratio data are available.
+- Verification UI text and C/O ratio coloring updated to match the new rule.

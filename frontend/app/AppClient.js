@@ -230,6 +230,8 @@ function AnalysisBatchModal({items,open,close}){
  const labels={completed:"분석 완료",partial:"일부 Point만 저장됨",failed:"분석 실패",interrupted:"분석 중단",cancelled:"분석 취소",queued:"분석 대기",processing:"분석 중"};
  const failures=Array.isArray(item?.failed_points)?item.failed_points:[];
  const missing=Array.isArray(item?.missing_points)?item.missing_points:[];
+ const incomplete=Array.isArray(item?.incomplete_points)?item.incomplete_points:[];
+ const recovered=Array.isArray(item?.recovered_points)?item.recovered_points:[];
  const detected=Number.isFinite(Number(item?.detected_points))?Number(item.detected_points):null;
  const total=Number(item?.total||0);
  const mode=item?.recognition_mode==="point_label"?"PDF Point label 기준":item?.recognition_mode==="page_order"?"3-page 순서 기준":"";
@@ -240,12 +242,14 @@ function AnalysisBatchModal({items,open,close}){
   <div className="analysisStatusGrid">
    <div><small>저장 완료</small><b>{item?.completed||0} / {total||0}</b></div>
    <div><small>PDF Point 인식</small><b>{detected==null?"확인 중":`${detected} / ${total||detected}`}</b>{mode&&<span>{mode}</span>}</div>
-   <div><small>실패 Point</small><b>{item?.failed_count||0}</b></div>
+   <div><small>미완성 / 오류</small><b>{item?.failed_count||incomplete.length||0}</b></div>
   </div>
+  {recovered.length>0&&<div className="analysisRecovered"><b>자동 복구 {recovered.length} Point</b><span>{recovered.join(", ")}</span></div>}
+  {incomplete.length>0&&<div className="analysisIssueBox"><b>최종 저장 검증 미완성 {incomplete.length}개</b><p>{incomplete.map(x=>`${x.id}${x.missing?.length?` (${x.missing.join(" / ")})`:""}`).join(", ")}</p></div>}
   {missing.length>0&&<div className="analysisIssueBox"><b>PDF에서 매칭되지 않은 Point {missing.length}개</b><p>{missing.map(x=>x.id||`W${x.wafer}-P${x.point}`).join(", ")}</p></div>}
   {failures.length>0&&<div className="analysisFailureList"><b>실패 Point / 원인</b>{failures.map((f,i)=><div className="analysisFailureItem" key={`${f.id||i}-${i}`}><div><strong>{f.id||`W${f.wafer}-P${f.point}`}</strong><span>{f.stage||"analysis"}</span></div><p>{f.error||"Unknown error"}</p></div>)}</div>}
   {item?.storage_warning&&<p className="analysisWarning">{item.storage_warning}</p>}
-  <div className="batchProgressBottom"><span>{active?"한 Point가 실패해도 해당 Point만 기록하고 다음 Point 분석을 계속합니다.":"저장된 결과와 실패 원인은 이 상태 창에서 확인할 수 있습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+  <div className="batchProgressBottom"><span>{active?"Point 슬롯을 고정하고 저장 실패는 자동 재시도합니다. 마지막에는 Supabase/R2 27개를 다시 대조합니다.":"완료 수치는 최종 저장 검증 결과입니다. 자동 복구/미완성 Point도 여기서 확인할 수 있습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
  </div></div>
 }
 function Dashboard({points,go}){
@@ -279,14 +283,20 @@ function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCo
  const setDragging=v=>setDraggingCondition(v?0:null);
  const addFiles=fs=>{if(fs?.length===1)setConditionFile(0,fs[0]);else if(fs?.length>1)window.alert("PDF는 한 번에 하나만 선택하세요.")};
  return <div className="content"><div className="intro"><div><h2>New Analysis</h2><p>PDF 하나를 업로드하고 백그라운드로 분석합니다. 다음 PDF는 현재 작업이 끝난 뒤 등록하세요.</p></div></div><section className="panel"><div className="panelHead"><b>1. EDS source upload</b><small>PDF · drag & drop supported</small></div><div className={`drop ${dragging?"dragging":""}`} onClick={()=>conditionInputs.current[0]?.click()} onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);addFiles(e.dataTransfer.files)}}><FileUp size={30}/><b>{dragging?"여기에 PDF를 놓으세요":"EDS PDF를 끌어다 놓거나 클릭해서 선택하세요"}</b><small>PDF 1개 · 업로드 완료 후 다른 메뉴로 이동할 수 있습니다.</small><input ref={el=>{conditionInputs.current[0]=el}} hidden type="file" accept=".pdf,application/pdf" onChange={e=>addFiles(e.target.files)}/></div>{files.map((f,i)=><div className="file" key={`${f.name}-${i}`}><FileText size={14}/><span>{f.name}</span><small>{(f.size/1024/1024).toFixed(1)} MB</small><button className="iconBtn" onClick={()=>updateCondition(0,"file",null)}><Trash2 size={13}/></button></div>)}</section><section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b><small>선택한 PDF에 적용됩니다. 위치별 기판을 지정할 수 있습니다.</small></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Default Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">Position / Substrate</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>P{pos}<select value={positionSubstrates[String(pos)]||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section><section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>3. Analysis conditions</b><small>한 PDF에 여러 조건이 있으면 PDF에 나오는 순서대로 추가하세요.</small></div><button className="secondary" onClick={addCondition}><Plus size={13}/> Add condition</button></div></div>{conditions.map((c,i)=><div className="conditionRow" key={i}><div className="conditionTitle">Condition {i+1}</div><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label><div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div><div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>{conditions.length>1&&<button className="iconBtn" onClick={()=>{if(i===0&&conditions[0].file)updateCondition(1,"file",conditions[0].file);removeCondition(i)}}><Trash2 size={14}/></button>}</div>)}<div className="mappingSummary"><span>Pages / Point <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>Total Points: {expectedPoints()}</b><span>Total Pages: {expectedPoints()*pagesPerPoint}</span></div></section><div className="actions"><button className="primary" disabled={busy} onClick={upload}><Play size={14}/>{busy?"현재 작업 처리 중...":"Upload + Analyze (PDF 1개)"}</button></div></div>}
-function coRatioDisplayScore(limiting){
- const x=Number(limiting);
+function elementRatioDisplayScore(ratio,strong){
+ const x=Number(ratio);
  if(!Number.isFinite(x))return null;
- if(x<2)return Math.max(0,Math.min(59,Math.round((x/2)*59)));
- if(x<3)return Math.round(60+(x-2)*10);
+ if(x<2)return Math.max(0,Math.min(59,(x/2)*59));
+ if(x<strong)return 60+((x-2)/(strong-2))*10;
+ const equivalent=x*(3/strong);
  const k=0.23, denom=1-Math.exp(-k*17);
- const normalized=(1-Math.exp(-k*(x-3)))/denom;
- return Math.round(Math.min(100,70+30*Math.max(0,normalized)));
+ const normalized=(1-Math.exp(-k*(equivalent-3)))/denom;
+ return Math.min(100,70+30*Math.max(0,normalized));
+}
+function coRatioDisplayScore(cRatio,oRatio){
+ const c=elementRatioDisplayScore(cRatio,2.40), o=elementRatioDisplayScore(oRatio,3.00);
+ if(c==null||o==null)return null;
+ return Math.round(Math.min(c,o));
 }
 function verificationResult(x){
  const f=x?.features||{};
@@ -328,7 +338,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const ratio=(roi,global)=>typeof roi==='number'&&typeof global==='number'&&global!==0?roi/global:null;
  const hasHumanROI=(Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
  const cRatio=hasHumanROI?f.human_c_ratio:ratio(f.c_roi_mean,f.c_global_mean), oRatio=hasHumanROI?f.human_o_ratio:ratio(f.o_roi_mean,f.o_global_mean);
- const score=hasHumanROI&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(Math.min(cRatio,oRatio)):(hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
+ const score=hasHumanROI&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
  const coverage=hasHumanROI&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
  const maskQuality=hasHumanROI&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
  const autoResult=f.result||"Ambiguous";
@@ -344,7 +354,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
    o:hasHumanROI?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
- const ratioClass=(x)=>x==null?"neutral":x>=3.00?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
+ const ratioClass=(x,strong)=>x==null?"neutral":x>=strong?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
  const ratioText=(x)=>x==null?"-":fmtRatio(x);
  const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
  return <div className="verificationPanel">
@@ -372,13 +382,13 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio)}`} style={{color:cRatio==null?'#667386':cRatio>=3.00?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio,2.40)}`} style={{color:cRatio==null?'#667386':cRatio>=2.40?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio,3.00)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
-    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C와 O가 모두 3.00× 이상</strong>이면 Residue, 둘 다 2.00× 이상이면서 하나라도 3.00× 미만이면 Ambiguous로 계산합니다.</span></div>
+    <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C ≥ 2.40× + O ≥ 3.00×</strong>이면 Residue, 둘 다 2.00× 이상이지만 둘 중 하나라도 Residue 기준에 못 미치면 Ambiguous로 계산합니다.</span></div>
     <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{hasHumanROI?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
     <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(hasHumanROI?f.human_roi_area_px:f.roi_area_px)?`${(hasHumanROI?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{hasHumanROI&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{hasHumanROI&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
-    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: &lt;2.00× = Non-residue, 2.00–2.99× = Ambiguous, ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
+    <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: 둘 중 하나라도 &lt;2.00× = Non-residue, C 2.00–2.39× 또는 O 2.00–2.99× = Ambiguous, C ≥2.40× + O ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
    </section>
   </div>
   <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 Ground Truth 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>

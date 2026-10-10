@@ -43,40 +43,74 @@ def delete_project(project_id: str):
     return client.table("projects").delete().eq("id",project_id).execute()
 
 def upsert_point(project_id: str, r: dict):
+    """Upsert the immutable Point key and machine-generated metadata only.
+
+    Human verification columns are intentionally omitted unless the caller explicitly
+    supplies a non-null value.  This prevents re-analysis / transient retry from
+    clearing work already completed in Verification.
+    """
     power = int(re_digits(r.get("power")))
     time_sec = int(re_digits(r.get("time")))
     payload={
         "project_id": project_id, "power": power,
         "time_sec": time_sec, "wafer": int(r["wafer"]), "point": int(r["point"]),
-        "position": r.get("zone"), "human_result": r.get("human_result"),
-        "human_confidence": r.get("human_confidence"),
-        "ai_result": r.get("ai_result"),
-        "ai_confidence": r.get("ai_confidence") or r.get("confidence"),
-        "ai_rationale": r.get("ai_rationale"),
+        "position": r.get("zone"),
     }
+    for key in ("human_result","human_confidence","human_verified_at","human_updated_at",
+                "ai_result","ai_confidence","ai_rationale"):
+        value=r.get(key)
+        if value is not None:
+            payload[key]=value
+    if "ai_confidence" not in payload and r.get("confidence") is not None:
+        payload["ai_confidence"]=r.get("confidence")
     response = get_client().table("points").upsert(payload, on_conflict="project_id,power,time_sec,wafer,point").execute()
     rows = response.data or []
     if not rows or not rows[0].get("id"):
         raise RuntimeError("Supabase point upsert did not return the point UUID.")
     return rows[0]
 
+
+def _merge_human_features(existing: dict, incoming: dict) -> dict:
+    """Keep a saved Human ROI when a machine re-analysis does not include one."""
+    existing=dict(existing or {})
+    incoming=dict(incoming or {})
+    incoming_has_human=bool(incoming.get("human_roi_polygons") or incoming.get("human_roi_polygon"))
+    existing_has_human=bool(existing.get("human_roi_polygons") or existing.get("human_roi_polygon"))
+    if not existing_has_human or incoming_has_human:
+        return incoming
+    merged=dict(incoming)
+    preserve_extra={"ai_cv_result_before_human","ai_cv_score_before_human"}
+    for key,value in existing.items():
+        if key.startswith("human_") or key in preserve_extra:
+            merged[key]=value
+    if existing.get("human_roi_rule_result"):
+        merged["result"]=existing.get("human_roi_rule_result")
+        merged["confidence"]="Human ROI"
+        if existing.get("human_residue_score") is not None:
+            merged["residue_score"]=existing.get("human_residue_score")
+    merged["human_reanalysis_preserved"]=True
+    return merged
+
+
 def upsert_analysis(point_id: str, features: dict):
     client=get_client()
-    existing=client.table("analysis_results").select("id").eq("point_id",point_id).order("created_at",desc=True).limit(1).execute().data or []
+    existing=client.table("analysis_results").select("id,features").eq("point_id",point_id).order("created_at",desc=True).limit(1).execute().data or []
+    merged_features=_merge_human_features((existing[0].get("features") or {}) if existing else {}, features or {})
     payload={
-        "residue_score": features.get("residue_score"),
-        "c_enrichment": features.get("c_enrichment"),
-        "o_enrichment": features.get("o_enrichment"),
-        "c_coverage": features.get("c_coverage"),
-        "o_coverage": features.get("o_coverage"),
-        "cluster_score": features.get("cluster_score"),
-        "cv_result": features.get("result"),
-        "cv_confidence": features.get("confidence"),
-        "features": features,
+        "residue_score": merged_features.get("residue_score"),
+        "c_enrichment": merged_features.get("c_enrichment"),
+        "o_enrichment": merged_features.get("o_enrichment"),
+        "c_coverage": merged_features.get("c_coverage"),
+        "o_coverage": merged_features.get("o_coverage"),
+        "cluster_score": merged_features.get("cluster_score"),
+        "cv_result": merged_features.get("result"),
+        "cv_confidence": merged_features.get("confidence"),
+        "features": merged_features,
     }
     if existing:
         return client.table("analysis_results").update(payload).eq("id",existing[0]["id"]).execute()
     return client.table("analysis_results").insert({"point_id":point_id,**payload}).execute()
+
 
 def upsert_asset(point_id: str, asset_type: str, storage_path: str):
     client=get_client()

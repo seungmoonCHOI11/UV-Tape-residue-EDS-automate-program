@@ -1,5 +1,5 @@
 
-import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
+import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue, time
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
 from .ai import ai_available
 from .r2_storage import r2
+from .persistence import persist_point, reconcile_project, build_manifest, PersistenceError
 from . import db
 
 load_dotenv()
@@ -19,7 +20,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="18.0.0")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.7.48")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -88,44 +89,84 @@ def normalize_position_substrates(value):
     return out
 
 
-def co_ratio_score(limiting: float) -> float:
-    """Map the limiting C/O ratio to a 0-100 score without saturating too early.
+C_RESIDUE_RATIO = 2.40
+O_RESIDUE_RATIO = 3.00
+MODERATE_RATIO = 2.00
 
-    Classification gates remain unchanged: <2x Non-residue, 2-3x Ambiguous,
-    and both C/O >=3x Residue. Above 3x, the score rises gradually so that
-    only very strong enrichment (around 20x+) reaches 100.
+def _element_ratio_score(ratio: float, strong_ratio: float) -> float:
+    """Convert one element ROI/Global ratio to the common 0-100 residue scale.
+
+    Below 2x is Non-residue (<60), 2x to the element-specific residue
+    threshold is Ambiguous (60-69), and the threshold itself is 70.
+    Above the threshold, enrichment rises gradually toward 100.
     """
-    x=float(limiting)
-    if x < 2.00:
-        return max(0.0, min(59.0, (x/2.00)*59.0))
-    if x < 3.00:
-        return 60.0 + ((x-2.00)/1.00)*10.0
-    # 3x -> 70, 5x -> ~80, 10x -> ~93, 15x -> ~97, 20x -> 100.
     import math
+    x=max(0.0, float(ratio))
+    strong=float(strong_ratio)
+    if x < MODERATE_RATIO:
+        return max(0.0, min(59.0, (x/MODERATE_RATIO)*59.0))
+    if x < strong:
+        return 60.0 + ((x-MODERATE_RATIO)/(strong-MODERATE_RATIO))*10.0
+    # Normalize each element's residue threshold to the old 3x score anchor.
+    # C: 2.4x -> 70, O: 3.0x -> 70.
+    equivalent=x*(3.0/strong)
     k=0.23
     denom=1.0-math.exp(-k*(20.0-3.0))
-    normalized=(1.0-math.exp(-k*(x-3.0)))/denom if denom else 0.0
+    normalized=(1.0-math.exp(-k*(equivalent-3.0)))/denom if denom else 0.0
     return min(100.0, 70.0 + 30.0*max(0.0, normalized))
+
+def co_ratio_score(c_ratio: float, o_ratio: float) -> float:
+    """Score using the weaker element after element-specific threshold scaling."""
+    return min(
+        _element_ratio_score(c_ratio, C_RESIDUE_RATIO),
+        _element_ratio_score(o_ratio, O_RESIDUE_RATIO),
+    )
+
+def co_rule_result(c_ratio: float, o_ratio: float) -> str:
+    c=float(c_ratio); o=float(o_ratio)
+    if c >= C_RESIDUE_RATIO and o >= O_RESIDUE_RATIO:
+        return "Residue"
+    if c >= MODERATE_RATIO and o >= MODERATE_RATIO:
+        return "Ambiguous"
+    return "Non-residue"
 
 def public_record(r: dict) -> dict:
     out=dict(r)
     features=dict(out.get("features") or {})
-    # v23.6: saved Human ROI records are always rendered using the current
-    # 3x C/O rule, including records created under older 2x versions. This
-    # prevents an old cached human_residue_score/result from remaining visible.
+    # v23.7.46: element-specific residue gates. Saved records are re-evaluated
+    # at read time so existing Human ROI and automatic results immediately use
+    # C >= 2.40x and O >= 3.00x without requiring a full re-analysis.
     hcr=features.get("human_c_ratio")
     hor=features.get("human_o_ratio")
     has_human=bool(features.get("human_roi_polygons") or features.get("human_roi_polygon"))
     if has_human and isinstance(hcr,(int,float)) and isinstance(hor,(int,float)):
-        limiting=min(float(hcr),float(hor))
-        hscore=round(co_ratio_score(limiting),1)
-        hresult="Residue" if hcr>=3.00 and hor>=3.00 else ("Ambiguous" if hcr>=2.00 and hor>=2.00 else "Non-residue")
+        hscore=round(co_ratio_score(float(hcr),float(hor)),1)
+        hresult=co_rule_result(float(hcr),float(hor))
         features["human_residue_score"]=hscore
         features["human_roi_rule_result"]=hresult
-        features["human_score_rule"]="C and O both >=3.00x -> Residue; both >=2.00x but either <3.00x -> Ambiguous; otherwise Non-residue"
+        features["human_score_rule"]="C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue"
         features["residue_score"]=hscore/100.0
         features["result"]=hresult
         features["confidence"]="Human ROI"
+    elif not has_human:
+        acr=features.get("c_roi_global_ratio")
+        aor=features.get("o_roi_global_ratio")
+        if not isinstance(acr,(int,float)):
+            crm, cgm=features.get("c_roi_mean"),features.get("c_global_mean")
+            if isinstance(crm,(int,float)) and isinstance(cgm,(int,float)) and cgm:
+                acr=float(crm)/float(cgm)
+        if not isinstance(aor,(int,float)):
+            orm, ogm=features.get("o_roi_mean"),features.get("o_global_mean")
+            if isinstance(orm,(int,float)) and isinstance(ogm,(int,float)) and ogm:
+                aor=float(orm)/float(ogm)
+        if isinstance(acr,(int,float)) and isinstance(aor,(int,float)):
+            ascore=round(co_ratio_score(float(acr),float(aor)),1)
+            aresult=co_rule_result(float(acr),float(aor))
+            features["residue_score"]=ascore/100.0
+            features["result"]=aresult
+            features["classification_note"]="v23.7.48 rule: C ROI/Global >=2.40x AND O ROI/Global >=3.00x -> Residue; both >=2.00x with either residue gate unmet -> Ambiguous; otherwise Non-residue."
+            features["c_residue_ratio_threshold"]=C_RESIDUE_RATIO
+            features["o_residue_ratio_threshold"]=O_RESIDUE_RATIO
     # Keep score/result/confidence both at the top level and inside features so
     # freshly analyzed in-memory records and Supabase-loaded records render identically.
     out["features"]=features
@@ -196,18 +237,23 @@ def health():
 
 
 def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, position_substrates, sample_category, treatment, repeat_no):
-    """Background processor so the browser is not held open for the full PDF analysis.
+    """Background PDF processor with manifest-locked persistence.
 
-    v23.7.45: Point failures are isolated. A worker/save failure is recorded and the
-    remaining Points continue. PDF structure detection is persisted before analysis.
+    v23.7.47 rules:
+      * PDF-to-Point mapping is fixed before analysis. A failed Point never shifts later Points.
+      * Every Point save is idempotently retried and read-after-write verified.
+      * After the first pass the actual Supabase + R2 dataset is reconciled against the manifest.
+      * Missing/incomplete Points are repaired from cached generated assets, then selectively re-run.
+      * COMPLETED means the final stored dataset is complete, not merely that 27 workers ran.
     """
     try:
         normalized = normalize_conditions(conditions)
-        expected_points = len(condition_point_sequence(normalized))
-        expected_pages = expected_points * pages_per_point
+        sequence = condition_point_sequence(normalized, position_substrates)
+        manifest = build_manifest(sequence)
+        expected_points = len(manifest)
+        manifest_by_id = {m["id"]: m for m in manifest}
 
-        # Persist the original source PDF outside the Render filesystem. This is
-        # intentionally done after the HTTP request has returned.
+        # Persist the original source PDF outside Render's ephemeral filesystem.
         source_keys = {}
         storage_warnings = []
         if r2.configured:
@@ -224,21 +270,21 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                 except Exception as e:
                     storage_warnings.append(f"{path.name}: {e}")
                     print(f"[r2] source upload failed; continuing analysis: {path.name}: {e}")
-        else:
-            source_keys = {}
         if db.configured():
             try:
                 meta=json.loads((db.get_project(project_id) or {}).get("description") or "{}")
                 meta["source_keys"]=source_keys
                 meta["queue_status"]="processing"
+                meta["point_manifest"]=[{k:v for k,v in m.items() if k in {"id","sequence_index","power","time","wafer","point","zone","substrate_type"}} for m in manifest]
                 db.update_project(project_id, description=json.dumps(meta,ensure_ascii=False), status="Processing")
             except Exception as e:
                 print(f"[project] queue metadata update failed: {e}")
 
         set_job(
             job_id, phase="validation", progress=9,
-            message="PDF Point 구조를 확인하고 있습니다.",
-            total=expected_points, completed=0, failed_count=0, failed_points=[]
+            message="PDF Point 구조와 고정 매핑을 확인하고 있습니다.",
+            total=expected_points, completed=0, failed_count=0, failed_points=[],
+            recovered_count=0, recovered_points=[], incomplete_points=[]
         )
 
         gt_examples=[]
@@ -248,90 +294,118 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             except Exception as e:
                 print(f"[ground_truth] upload context lookup failed: {e}")
 
-        saved_ids=[]
-        failures=[]
+        saved_by_source={}
+        failure_map={}
+        recovered_ids=set()
+        record_cache={}
+        expected_assets_by_id={}
         structure_info={
             "expected_points": expected_points,
             "detected_points": None,
             "missing_count": None,
             "missing_points": [],
             "recognition_mode": None,
+            "mapping_safe": True,
         }
+
+        def _completed_count():
+            return len(saved_by_source)
+
+        def _unresolved_failures():
+            return [failure_map[k] for k in sorted(failure_map, key=lambda x: int(manifest_by_id.get(x,{}).get("sequence_index") or 10**9))]
 
         def report_structure(info):
             structure_info.update(info or {})
             detected=int(structure_info.get("detected_points") or 0)
             missing=int(structure_info.get("missing_count") or 0)
             mode=structure_info.get("recognition_mode")
-            mode_text="Point label" if mode=="point_label" else "page order"
-            if detected == expected_points:
-                message=f"PDF Point 구성 확인 · {detected}/{expected_points} Points 인식됨 · 분석을 시작합니다."
+            mode_text="Point label" if mode=="point_label" else "3-page order"
+            safe=structure_info.get("mapping_safe",True)
+            if not safe:
+                message=f"PDF Point 고정 매핑 중단 · {detected}/{expected_points} groups · 순번 밀림 방지를 위해 분석하지 않습니다."
+            elif detected == expected_points:
+                message=f"PDF Point 고정 매핑 완료 · {detected}/{expected_points} · W/P 슬롯을 잠그고 분석을 시작합니다."
             else:
-                message=f"PDF Point 구성 확인 · {detected}/{expected_points} Points 인식됨 · 누락 {missing} · 인식된 Point만 계속 분석합니다."
+                message=f"PDF Point 구성 확인 · {detected}/{expected_points} 인식 · 누락 {missing} · 인식된 슬롯만 분석합니다."
             set_job(
                 job_id, status="processing", phase="analysis", progress=10,
-                message=message, total=expected_points, completed=0,
+                message=message, total=expected_points, completed=_completed_count(),
                 detected_points=detected, missing_count=missing,
                 missing_points=structure_info.get("missing_points") or [],
                 recognition_mode=mode, recognition_mode_text=mode_text,
-                failed_count=0, failed_points=[],
+                mapping_safe=safe, manifest_locked=True,
+                failed_count=len(failure_map), failed_points=_unresolved_failures(),
             )
 
         def report_point_failure(failure):
-            failures.append(failure)
-            processed=len(saved_ids)+len(failures)
+            fid=str(failure.get("id") or "")
+            if fid:
+                failure_map[fid]=failure
+            processed=min(expected_points,_completed_count()+len(failure_map))
             detected=int(structure_info.get("detected_points") or expected_points or 1)
             set_job(
                 job_id, phase="analysis",
-                completed=len(saved_ids), total=expected_points,
-                failed_count=len(failures), failed_points=list(failures),
+                completed=_completed_count(), total=expected_points,
+                failed_count=len(failure_map), failed_points=_unresolved_failures(),
                 processed=processed,
-                progress=min(99,10+int(processed/max(detected,1)*89)),
+                progress=min(94,10+int(processed/max(detected,1)*82)),
                 message=(
-                    f"{failure.get('id')} 실패 · 다음 Point 계속 분석 중 · "
-                    f"저장 {len(saved_ids)}/{expected_points} · 실패 {len(failures)}"
+                    f"{failure.get('id')} · {failure.get('stage','analysis')} 오류 · 슬롯 유지 후 다음 Point 계속 · "
+                    f"저장 {_completed_count()}/{expected_points}"
+                ),
+            )
+
+        def persistence_status(ev):
+            if ev.get("status") != "retry":
+                return
+            set_job(
+                job_id, phase="save_retry",
+                completed=_completed_count(), total=expected_points,
+                failed_count=len(failure_map), failed_points=_unresolved_failures(),
+                message=(
+                    f"{ev.get('point_id')} 저장 재시도 {ev.get('attempt')}/{ev.get('max_attempts')} · "
+                    f"{ev.get('stage')} · {ev.get('retry_in')}s 후 재시도"
                 ),
             )
 
         def save_point(r):
             if project_id in CANCELLED_PROJECTS:
                 raise RuntimeError("분석 중 프로젝트가 삭제되어 작업을 취소했습니다.")
-            source_point_id=r["id"]
+            source_id=str(r.get("source_point_id") or r.get("manifest_id") or r.get("id"))
+            r["source_point_id"]=source_id
+            record_cache[source_id]=r
+            expected_assets_by_id[source_id]=set((r.get("assets") or {}).keys())
+            try:
+                result=persist_point(
+                    project_id,r,db,r2,attempts=3,backoff=(1,2,4),verify=True,
+                    status_callback=persistence_status,
+                )
+            except PersistenceError:
+                # Keep the generated images in record_cache. Reconciliation will retry
+                # this exact Point without allowing the following Point to take its slot.
+                raise
 
-            # Treat persistence as part of this Point. If an asset/database write fails,
-            # extract_pdfs() records this Point as failed and moves to the next Point.
-            for asset_type, local_path in r.get("assets",{}).items():
-                if r2.configured:
-                    lp=Path(local_path)
-                    key=f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"
-                    r2.upload_file(lp,key,"image/jpeg")
-                    r.setdefault("r2_assets",{})[asset_type]=key
-            if db.configured():
-                row=db.upsert_point(project_id,r)
-                r["db_id"]=str(row["id"])
-                r["id"]=str(row["id"])
-                db.upsert_analysis(r["id"],r.get("features",{}))
-                for asset_type,key in r.get("r2_assets",{}).items():
-                    db.upsert_asset(r["id"],asset_type,key)
-
-            RECORDS[r["id"]]=r
-            saved_ids.append(r["id"])
-            PROJECTS[project_id]["records"]=list(saved_ids)
-            processed=len(saved_ids)+len(failures)
+            db_id=str(result["db_id"])
+            saved_by_source[source_id]=db_id
+            if source_id in failure_map:
+                failure_map.pop(source_id,None)
+                recovered_ids.add(source_id)
+            RECORDS[db_id]=r
+            PROJECTS.setdefault(project_id,{})["records"]=list(saved_by_source.values())
+            processed=min(expected_points,_completed_count()+len(failure_map))
             detected=int(structure_info.get("detected_points") or expected_points or 1)
             set_job(
-                job_id, phase="analysis", completed=len(saved_ids), total=expected_points,
-                failed_count=len(failures), failed_points=list(failures),
+                job_id, phase="analysis", completed=_completed_count(), total=expected_points,
+                failed_count=len(failure_map), failed_points=_unresolved_failures(),
+                recovered_count=len(recovered_ids), recovered_points=sorted(recovered_ids),
                 processed=processed,
-                progress=min(99,10+int(processed/max(detected,1)*89)),
-                message=(
-                    f"Point 분석 및 저장 완료 · 저장 {len(saved_ids)}/{expected_points}"
-                    + (f" · 실패 {len(failures)}" if failures else "")
-                ),
+                progress=min(94,10+int(processed/max(detected,1)*82)),
+                message=f"Point 저장 검증 완료 · {_completed_count()}/{expected_points}"
             )
 
-        PROJECTS[project_id]={"id":project_id,"records":[],"files":saved,"conditions":conditions}
+        PROJECTS[project_id]={"id":project_id,"records":[],"files":saved,"conditions":conditions,"manifest":manifest}
 
+        # First pass: analyze every mapped Point. Worker/save failures are isolated.
         extract_pdfs(
             pdf_paths,pdir/"assets",conditions,pages_per_point,
             roi_reference_examples=gt_examples,
@@ -343,44 +417,135 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             cancel_callback=lambda: project_id in CANCELLED_PROJECTS,
         )
 
+        def run_reconciliation(label):
+            set_job(job_id,phase="reconcile",progress=95,completed=_completed_count(),total=expected_points,message=label)
+            last_exc=None
+            rec=None
+            for reconcile_attempt,delay in enumerate((1,2,4),1):
+                try:
+                    rec=reconcile_project(
+                        project_id,manifest,db,r2,
+                        expected_assets_by_id=expected_assets_by_id,
+                        essential_assets={"sem","eds_map","c_map","o_map"},
+                    )
+                    break
+                except Exception as exc:
+                    last_exc=exc
+                    if reconcile_attempt>=3:
+                        raise
+                    set_job(job_id,phase="reconcile",message=f"최종 저장 확인 통신 재시도 {reconcile_attempt}/3 · {type(exc).__name__}: {exc}")
+                    time.sleep(delay)
+            if rec is None:
+                raise RuntimeError(f"Reconciliation failed: {last_exc}")
+            # The database/R2 truth, not callback counts, defines completion.
+            complete_set=set(rec.get("complete_ids") or [])
+            for mid in complete_set:
+                if mid in failure_map:
+                    failure_map.pop(mid,None)
+                    recovered_ids.add(mid)
+            for item in rec.get("complete") or []:
+                if item.get("db_id"):
+                    saved_by_source[item["id"]]=str(item["db_id"])
+            set_job(
+                job_id,phase="reconcile",completed=rec["complete_count"],total=expected_points,
+                failed_count=len(failure_map),failed_points=_unresolved_failures(),
+                recovered_count=len(recovered_ids),recovered_points=sorted(recovered_ids),
+                incomplete_points=rec.get("incomplete") or [],
+                message=f"저장 데이터 전수 확인 · {rec['complete_count']}/{expected_points} complete"
+            )
+            return rec
+
+        reconciliation=run_reconciliation("1차 분석 결과를 Supabase/R2와 대조하고 있습니다.")
+
+        # Repair 1: if a worker already produced images, reuse those exact images.
+        cached_targets=[mid for mid in reconciliation.get("incomplete_ids",[]) if mid in record_cache]
+        if cached_targets:
+            set_job(job_id,phase="repair",progress=96,message=f"누락/부분저장 {len(cached_targets)} Point를 생성된 이미지로 복구합니다.")
+            for mid in cached_targets:
+                try:
+                    save_point(record_cache[mid])
+                    recovered_ids.add(mid)
+                except Exception as exc:
+                    meta=manifest_by_id.get(mid,{})
+                    failure_map[mid]={
+                        "id":mid,"power":f"{meta.get('power',0)}W","time":f"{meta.get('time',0)}s",
+                        "wafer":meta.get("wafer"),"point":meta.get("point"),"sequence_index":meta.get("sequence_index"),
+                        "stage":getattr(exc,"stage","repair_save"),"error":f"{type(exc).__name__}: {exc}",
+                    }
+            reconciliation=run_reconciliation("저장 재시도 결과를 다시 확인하고 있습니다.")
+
+        # Repair 2: Points without a usable cached worker result are selectively re-run.
+        retry_ids=[mid for mid in reconciliation.get("incomplete_ids",[]) if mid not in record_cache]
+        retry_indexes={int(manifest_by_id[mid]["sequence_index"])-1 for mid in retry_ids if mid in manifest_by_id}
+        if retry_indexes:
+            set_job(job_id,phase="repair",progress=97,message=f"미완성 {len(retry_indexes)} Point만 선택 재분석합니다.")
+            try:
+                extract_pdfs(
+                    pdf_paths,pdir/"assets",conditions,pages_per_point,
+                    roi_reference_examples=gt_examples,
+                    position_substrates=position_substrates,
+                    record_callback=save_point,collect_records=False,
+                    point_error_callback=report_point_failure,
+                    cancel_callback=lambda: project_id in CANCELLED_PROJECTS,
+                    target_sequence_indexes=retry_indexes,
+                )
+            except Exception as exc:
+                print(f"[repair] selective retry failed: {exc}")
+            reconciliation=run_reconciliation("선택 재분석 결과를 최종 확인하고 있습니다.")
+
+        # A final cached retry covers odd cases such as a Point row committed but an
+        # asset response being lost late in the job (the W1-P2/W5-P9 type symptom).
+        final_cached=[mid for mid in reconciliation.get("incomplete_ids",[]) if mid in record_cache]
+        if final_cached:
+            set_job(job_id,phase="repair",progress=98,message=f"최종 누락 {len(final_cached)} Point 저장을 한 번 더 복구합니다.")
+            for mid in final_cached:
+                try:
+                    save_point(record_cache[mid])
+                    recovered_ids.add(mid)
+                except Exception as exc:
+                    meta=manifest_by_id.get(mid,{})
+                    failure_map[mid]={
+                        "id":mid,"power":f"{meta.get('power',0)}W","time":f"{meta.get('time',0)}s",
+                        "wafer":meta.get("wafer"),"point":meta.get("point"),"sequence_index":meta.get("sequence_index"),
+                        "stage":getattr(exc,"stage","final_repair"),"error":f"{type(exc).__name__}: {exc}",
+                    }
+            reconciliation=run_reconciliation("최종 저장 상태를 검증하고 있습니다.")
+
+        # Reconciliation issues are surfaced even if no callback exception existed.
+        for issue in reconciliation.get("incomplete") or []:
+            mid=issue.get("id")
+            if mid not in failure_map:
+                failure_map[mid]={
+                    "id":mid,"wafer":issue.get("wafer"),"point":issue.get("point"),
+                    "sequence_index":issue.get("sequence_index"),"stage":"reconciliation",
+                    "error":"Final storage incomplete: " + "; ".join(issue.get("missing") or ["unknown"]),
+                }
+
         detected=int(structure_info.get("detected_points") or 0)
         missing=int(structure_info.get("missing_count") or max(0,expected_points-detected))
+        final_count=int(reconciliation.get("complete_count") or 0)
         complete=(
-            len(saved_ids)==expected_points and
-            detected==expected_points and
-            not failures and
-            missing==0
+            final_count==expected_points and detected==expected_points and missing==0 and
+            structure_info.get("mapping_safe",True) and not reconciliation.get("incomplete")
         )
 
-        if not saved_ids:
-            final_status="failed"
-            project_status="Failed"
-            if failures:
-                final_message=(
-                    f"분석 실패 · 저장 0/{expected_points} · 실패 {len(failures)} · "
-                    f"PDF 인식 {detected}/{expected_points}. 실패 Point 원인을 확인하세요."
-                )
-            else:
-                final_message=(
-                    f"분석 가능한 Point가 저장되지 않았습니다. "
-                    f"PDF 인식 {detected}/{expected_points} · 누락 {missing}."
-                )
+        if final_count == 0:
+            final_status="failed"; project_status="Failed"
+            final_message=f"분석 실패 · 최종 저장 검증 0/{expected_points} · PDF 인식 {detected}/{expected_points}."
         elif complete:
-            final_status="completed"
-            project_status="Ready"
-            final_message=f"모든 Point와 이미지 저장이 완료되었습니다. · PDF 인식 {detected}/{expected_points}"
+            final_status="completed"; project_status="Ready"
+            if recovered_ids:
+                final_message=f"완료 · {expected_points}/{expected_points} Point 및 이미지 저장 검증 완료 · 자동 복구 {len(recovered_ids)} Point"
+            else:
+                final_message=f"완료 · {expected_points}/{expected_points} Point 및 이미지 저장 검증 완료"
         else:
-            final_status="partial"
-            project_status="Partial"
-            parts=[f"부분 완료 · 저장 {len(saved_ids)}/{expected_points}"]
-            if failures:
-                parts.append(f"실패 {len(failures)}")
-            if missing:
-                parts.append(f"PDF 미인식/누락 {missing}")
-            parts.append(f"PDF 인식 {detected}/{expected_points}")
-            if failures:
-                parts.append("실패 Point는 건너뛰고 나머지 분석을 완료했습니다.")
-            final_message=" · ".join(parts)
+            final_status="partial"; project_status="Partial"
+            incomplete_ids=reconciliation.get("incomplete_ids") or []
+            final_message=(
+                f"부분 완료 · 최종 저장 검증 {final_count}/{expected_points} · "
+                f"미완성 {len(incomplete_ids)} Point"
+                + (f" ({', '.join(incomplete_ids[:6])}{'…' if len(incomplete_ids)>6 else ''})" if incomplete_ids else "")
+            )
 
         if db.configured():
             db.update_project(project_id,status=project_status)
@@ -391,27 +556,34 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             "conditions": conditions,
             "pages_per_point": pages_per_point,
             "files": saved,
-            "records": saved_ids,
+            "records": list(saved_by_source.values()),
             "position_substrates": position_substrates,
             "substrate_type": substrate_type,
             "repeat_no": repeat_no,
-            "analysis_failures": list(failures),
+            "analysis_failures": _unresolved_failures(),
+            "recovered_points": sorted(recovered_ids),
             "point_structure": dict(structure_info),
+            "reconciliation": reconciliation,
+            "manifest": manifest,
         }
 
         set_job(
             job_id,
             status=final_status,
             phase="complete" if final_status=="completed" else ("partial" if final_status=="partial" else "error"),
-            progress=100 if final_status=="completed" else min(99,max(1,int((len(saved_ids)+len(failures))/max(expected_points,1)*100))),
-            completed=len(saved_ids), total=expected_points,
-            project_id=project_id, count=len(saved_ids),
+            progress=100 if final_status=="completed" else 99,
+            completed=final_count, total=expected_points,
+            project_id=project_id, count=final_count,
             detected_points=detected, missing_count=missing,
             missing_points=structure_info.get("missing_points") or [],
             recognition_mode=structure_info.get("recognition_mode"),
-            failed_count=len(failures), failed_points=list(failures),
+            mapping_safe=structure_info.get("mapping_safe",True), manifest_locked=True,
+            failed_count=len(failure_map), failed_points=_unresolved_failures(),
+            recovered_count=len(recovered_ids), recovered_points=sorted(recovered_ids),
+            incomplete_points=reconciliation.get("incomplete") or [],
+            reconciliation_complete_count=final_count,
             message=final_message,
-            error=(failures[-1]["error"] if final_status=="failed" and failures else None),
+            error=(_unresolved_failures()[-1]["error"] if final_status=="failed" and _unresolved_failures() else None),
             storage_warning="원본 PDF의 R2 저장에 실패했습니다. 원본 재분석은 사용할 수 없을 수 있습니다." if storage_warnings else "",
         )
     except Exception as e:
@@ -427,7 +599,8 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             total=current.get("total",0) or 0,
             failed_count=current.get("failed_count",0),
             failed_points=current.get("failed_points",[]),
-            message=f"분석/저장 중단: {e}. 이미 저장된 Point는 유지됩니다."
+            incomplete_points=current.get("incomplete_points",[]),
+            message=f"분석/저장 중단: {e}. 이미 검증 완료된 Point는 유지됩니다."
         )
 
 def upload_queue_worker():

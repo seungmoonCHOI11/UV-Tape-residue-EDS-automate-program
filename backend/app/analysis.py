@@ -170,6 +170,7 @@ def extract_pdfs(
     point_error_callback=None,
     structure_callback=None,
     cancel_callback=None,
+    target_sequence_indexes=None,
 ):
     """Analyze every usable Point and isolate per-Point failures.
 
@@ -189,6 +190,28 @@ def extract_pdfs(
     groups = _build_point_groups(pdf_paths, pages_per_point)
     if not groups:
         raise ValueError("No analyzable Point groups were found in the PDF.")
+
+    recognition_mode = "point_label" if any(g.get("point_number") is not None for g in groups) else "page_order"
+    # In image-only PDFs we cannot know which Point disappeared if the number of
+    # 3-page groups differs from the configured manifest. Sequentially shifting
+    # every later Point would silently mislabel the dataset, so stop instead.
+    if recognition_mode == "page_order" and len(groups) != len(sequence):
+        missing=max(0,len(sequence)-len(groups))
+        structure={
+            "expected_points":len(sequence),
+            "detected_points":len(groups),
+            "missing_count":missing,
+            "missing_points":[],
+            "recognition_mode":recognition_mode,
+            "source_group_count":len(groups),
+            "mapping_safe":False,
+        }
+        if structure_callback:
+            structure_callback(structure)
+        raise ValueError(
+            f"Image-only PDF has {len(groups)} Point groups but {len(sequence)} are expected. "
+            "Sequential mapping was stopped to prevent a one-Point shift. Check the source PDF pages/Points."
+        )
 
     # Align observed Point labels to the next matching expected Point. This allows
     # P4 to be absent while P5 still maps to P5, and supports repeated wafer/condition
@@ -235,7 +258,6 @@ def extract_pdfs(
                 "point": meta["point"],
                 "id": f"{meta['power']}W_{meta['time']}s_W{meta['wafer']}_P{meta['point']}",
             })
-    recognition_mode = "point_label" if any(g.get("point_number") is not None for g in groups) else "page_order"
     structure = {
         "expected_points": len(sequence),
         "detected_points": len(aligned),
@@ -243,9 +265,16 @@ def extract_pdfs(
         "missing_points": missing_points,
         "recognition_mode": recognition_mode,
         "source_group_count": len(groups),
+        "mapping_safe": True,
     }
     if structure_callback:
         structure_callback(structure)
+
+    if target_sequence_indexes is not None:
+        targets={int(x) for x in target_sequence_indexes}
+        aligned=[item for item in aligned if int(item[0]) in targets]
+        if not aligned:
+            raise ValueError("Requested retry Point(s) were not found in the PDF mapping.")
 
     worker = Path(__file__).with_name("point_worker.py")
     records = []
@@ -270,6 +299,8 @@ def extract_pdfs(
             "point":meta['point'],"zone":meta['zone'],
             "substrate_type":meta.get('substrate_type','SiCN'),
             "condition":meta['condition'],
+            "sequence_index":sequence_index+1,
+            "manifest_id":point_id,
             "page":{"start":group[0][1]+1,"end":group[-1][1]+1},
             "pages_per_point":pages_per_point,
             "source_pages":[{"file":Path(src).name,"page":page_index+1} for src,page_index in group],
@@ -294,6 +325,9 @@ def extract_pdfs(
 
             stage = "result"
             record=json.loads(result_path.read_text(encoding='utf-8'))
+            record["sequence_index"]=sequence_index+1
+            record["manifest_id"]=point_id
+            record["source_point_id"]=point_id
 
             # AI ROI refinement is optional. AI failure is recorded in the Point
             # features and must not turn a valid CV result into a failed Point.
@@ -341,6 +375,9 @@ def extract_pdfs(
                 record.setdefault('features',{})['ai_roi_used']=False
                 record['features']['ai_roi_error']=f'{type(ai_exc).__name__}: {ai_exc}'
             payload.pop('ai_roi_boxes',None)
+            record["sequence_index"]=sequence_index+1
+            record["manifest_id"]=point_id
+            record["source_point_id"]=point_id
 
             stage = "save"
             if record_callback:
@@ -359,6 +396,9 @@ def extract_pdfs(
                 detail = f"Worker timeout after {int(point_exc.timeout or 240)} seconds"
                 stage = "worker_timeout"
             else:
+                exc_stage=getattr(point_exc,"stage",None)
+                if exc_stage:
+                    stage=str(exc_stage)
                 detail = f"{type(point_exc).__name__}: {point_exc}"
             failure = {
                 "id": point_id,

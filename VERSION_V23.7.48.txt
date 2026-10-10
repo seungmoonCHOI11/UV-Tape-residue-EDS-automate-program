@@ -1,0 +1,8 @@
+UV-Tape-residue-EDS v23.7.48
+
+- Carbon Residue threshold changed from 2.50x to 2.40x.
+- Oxygen Residue threshold remains 3.00x.
+- C 2.40x and O 3.00x each map to the 70-point Residue boundary.
+- Ambiguous remains both C/O >= 2.00x while either Residue threshold is unmet.
+- v23.7.47 reliable 27-Point save/retry/reconciliation logic is unchanged.
+- Existing Human ROI data is preserved and re-evaluated with the new threshold when loaded.

@@ -421,3 +421,4 @@
 .analysisFailureItem p{margin:4px 0 0;font-size:8px;line-height:1.45;color:#745c5c;white-space:pre-wrap;word-break:break-word}
 .analysisWarning{margin-top:10px;border:1px solid #f0d8a4;border-radius:9px;background:#fffaf0;padding:9px 10px;font-size:9px;color:#7c6b48}
 @media(max-width:700px){.analysisStatusGrid{grid-template-columns:1fr}}
+.analysisRecovered{margin:10px 0;padding:9px 11px;border:1px solid #dce9df;border-radius:8px;background:#f6fbf7}.analysisRecovered b,.analysisRecovered span{display:block}.analysisRecovered b{font-size:9px;color:#2f6f45}.analysisRecovered span{margin-top:4px;font-size:8px;color:#69766d;white-space:normal;word-break:break-word}
