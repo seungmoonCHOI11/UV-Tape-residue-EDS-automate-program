@@ -1,0 +1,10 @@
+V23.7.44
+Base: v23.7.38; legacy New Analysis layout reference: v23.7.25.
+Single PDF per upload; multiple ordered conditions within that PDF remain supported.
+One upload/reanalysis at a time; server-side execution with background status UI.
+Save each point and its assets before analyzing the next point.
+Persist new-upload job status in existing project metadata; report interruptions honestly.
+Partial results are not marked complete; stop terminal polling and repeated full-data refreshes.
+Preserve v23.7.38 analysis/scoring/ROI and other screens.
+Fix Vercel origin regex; avoid blind POST retries; fix Docker data directory setup.
+Workspace Pro is independent of server RAM. See START_HERE_V23.7.44.md.

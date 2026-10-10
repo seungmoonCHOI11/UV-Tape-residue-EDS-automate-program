@@ -1,28 +1,11 @@
 
-import os
-# Render free/small instances can hit the cgroup memory limit when the API
-# process and the one-Point OpenCV/PyMuPDF worker briefly coexist. Keep native
-# allocators/thread pools conservative before importing NumPy/OpenCV.
-os.environ.setdefault("MALLOC_ARENA_MAX", "2")
-os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
-import json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
+import os, json, uuid, shutil, mimetypes, threading, traceback, hashlib, re, queue
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 import cv2, numpy as np
-cv2.setNumThreads(1)
-try:
-    cv2.ocl.setUseOpenCL(False)
-except Exception:
-    pass
 from dotenv import load_dotenv
 
 from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
@@ -36,7 +19,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.7.41")
+app=FastAPI(title="UV Tape Residue EDS API",version="18.0.0")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -45,7 +28,7 @@ origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000").sp
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins if origins else ["*"],
-    allow_origin_regex=r"https://([a-zA-Z0-9-]+\\.)*vercel\\.app$",
+    allow_origin_regex=r"https://([a-zA-Z0-9-]+\.)*vercel\.app$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,11 +39,28 @@ RECORDS={}
 JOBS={}
 JOB_LOCK=threading.Lock()
 UPLOAD_QUEUE=queue.Queue()
+ANALYSIS_SLOT=threading.Lock()
+JOB_PERSIST_LOCK=threading.Lock()
 CANCELLED_PROJECTS=set()
 
 def set_job(job_id, **updates):
     with JOB_LOCK:
         JOBS.setdefault(job_id, {}).update(updates)
+        snapshot=dict(JOBS[job_id])
+    # New uploads use existing project metadata: no schema migration is required.
+    if snapshot.get("persist_upload") and db.configured():
+        try:
+            with JOB_PERSIST_LOCK:
+                project=db.get_project(snapshot["project_id"])
+                meta=json.loads(project.get("description") or "{}")
+                meta["upload_job"]={**snapshot,"job_id":job_id}
+                meta["queue_status"]=snapshot.get("status")
+                db.update_project(snapshot["project_id"],description=json.dumps(meta,ensure_ascii=False))
+        except Exception as exc:
+            print(f"[job] progress persistence failed: {exc}")
+            with JOB_LOCK:
+                JOBS[job_id]["storage_warning"]="진행 상태 저장에 실패했습니다. 현재 서버에서는 분석을 계속하지만 재접속 시 상태가 오래된 값일 수 있습니다."
+
 
 def get_job(job_id):
     with JOB_LOCK:
@@ -224,7 +224,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                     print(f"[r2] source upload failed; continuing analysis: {path.name}: {e}")
         else:
             source_keys = {}
-        if db.configured:
+        if db.configured():
             try:
                 meta=json.loads((db.get_project(project_id) or {}).get("description") or "{}")
                 meta["source_keys"]=source_keys; meta["queue_status"]="processing"
@@ -238,12 +238,6 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
 
         set_job(job_id, status="processing", phase="analysis", progress=10, message=("PDF 분석을 시작했습니다. R2 원본 저장 일부 실패 · 분석은 계속합니다." if storage_warnings else "PDF 분석을 시작했습니다."), total=expected_points, completed=0)
 
-        def point_progress(done, total, phase):
-            # Analysis occupies roughly 10-75% of the visible progress bar.
-            pct = 10 + int((done / max(total, 1)) * 65)
-            set_job(job_id, phase="analysis", progress=min(75, pct), completed=done, total=total,
-                    message=f"Point 분석 중 · {done}/{total}")
-
         gt_examples=[]
         if db.configured():
             try:
@@ -253,63 +247,64 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                 gt_examples=db.get_ground_truth_examples(project_id, limit=8)
             except Exception as e:
                 print(f"[ground_truth] upload context lookup failed: {e}")
-        all_records = extract_pdfs(
-            pdf_paths, pdir / "assets", conditions, pages_per_point,
-            progress_callback=point_progress, roi_reference_examples=gt_examples,
-            position_substrates=position_substrates,
-        )
-        if not all_records:
-            raise ValueError("No analyzable PDF points were found.")
-
-        set_job(job_id, phase="database", progress=76, completed=0, total=len(all_records), message="분석 결과를 저장하고 있습니다.")
-        if db.configured():
-            try:
-                db.update_project(project_id, status="Processing")
-            except Exception as e:
-                print(f"[project] status update failed: {e}")
-
-        for i, r in enumerate(all_records, 1):
+        saved_ids=[]
+        def save_point(r):
             if project_id in CANCELLED_PROJECTS:
                 raise RuntimeError("분석 중 프로젝트가 삭제되어 작업을 취소했습니다.")
-            source_point_id = r["id"]
-            if r2.configured:
-                assets = list(r.get("assets", {}).items())
-                for asset_type, local_path in assets:
-                    lp = Path(local_path)
-                    key = f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"
-                    r2.upload_file(lp, key, "image/jpeg")
-                    r.setdefault("r2_assets", {})[asset_type] = key
+            source_point_id=r["id"]
+            for asset_type, local_path in r.get("assets",{}).items():
+                if r2.configured:
+                    lp=Path(local_path)
+                    key=f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                    r2.upload_file(lp,key,"image/jpeg")
+                    r.setdefault("r2_assets",{})[asset_type]=key
             if db.configured():
-                db_row = db.upsert_point(project_id, r)
-                db_point_id = str(db_row["id"])
-                r["db_id"] = db_point_id
-                r["id"] = db_point_id
-                db.upsert_analysis(db_point_id, r.get("features", {}))
-                for asset_type, key in r.get("r2_assets", {}).items():
-                    db.upsert_asset(db_point_id, asset_type, key)
-            RECORDS[r["id"]] = r
-            pct = 76 + int((i / max(len(all_records), 1)) * 23)
-            set_job(job_id, phase="database", progress=min(99, pct), completed=i, total=len(all_records), message=f"데이터 저장 중 · {i}/{len(all_records)}")
+                row=db.upsert_point(project_id,r)
+                r["db_id"]=str(row["id"]); r["id"]=str(row["id"])
+                db.upsert_analysis(r["id"],r.get("features",{}))
+                for asset_type,key in r.get("r2_assets",{}).items():
+                    db.upsert_asset(r["id"],asset_type,key)
+            RECORDS[r["id"]]=r
+            saved_ids.append(r["id"])
+            PROJECTS[project_id]["records"]=list(saved_ids)
+            done=len(saved_ids)
+            set_job(job_id,phase="analysis",completed=done,total=expected_points,
+                    progress=min(99,10+int(done/max(expected_points,1)*89)),
+                    message=f"Point 분석 및 이미지·결과 저장 완료 · {done}/{expected_points}")
 
+        PROJECTS[project_id]={"id":project_id,"records":[],"files":saved,"conditions":conditions}
+        extract_pdfs(
+            pdf_paths,pdir/"assets",conditions,pages_per_point,
+            roi_reference_examples=gt_examples,position_substrates=position_substrates,
+            record_callback=save_point,collect_records=False,
+        )
+        if not saved_ids:
+            raise ValueError("No analyzable PDF points were found.")
+        complete=len(saved_ids)==expected_points
         if db.configured():
-            try: db.update_project(project_id, status="Ready")
-            except Exception as e: print(f"[project] completion status update failed: {e}")
+            db.update_project(project_id,status="Ready" if complete else "Partial")
         PROJECTS[project_id] = {
             "id": project_id,
             "condition_count": len(conditions),
             "conditions": conditions,
             "pages_per_point": pages_per_point,
             "files": saved,
-            "records": [r["id"] for r in all_records],
+            "records": saved_ids,
             "position_substrates": position_substrates,
             "substrate_type": substrate_type,
             "repeat_no": repeat_no,
         }
-        set_job(job_id, status="completed", phase="complete", progress=100, completed=len(all_records), total=len(all_records),
-                project_id=project_id, count=len(all_records), message="분석이 완료되었습니다.")
+        set_job(job_id,status="completed" if complete else "partial",phase="complete" if complete else "partial",
+                progress=100 if complete else min(99,int(len(saved_ids)/max(expected_points,1)*100)),
+                completed=len(saved_ids),total=expected_points,project_id=project_id,count=len(saved_ids),
+                message="모든 Point와 이미지 저장이 완료되었습니다." if complete else f"일부 저장: {len(saved_ids)}/{expected_points} Points. PDF 구성과 조건을 확인하세요. 누락 Point를 완료로 처리하지 않았습니다.",
+                storage_warning="원본 PDF의 R2 저장에 실패했습니다. 원본 재분석은 사용할 수 없을 수 있습니다." if storage_warnings else "")
     except Exception as e:
         traceback.print_exc()
-        set_job(job_id, status="failed", phase="error", progress=0, error=str(e), message=f"분석 실패: {e}")
+        if db.configured():
+            try: db.update_project(project_id,status="Failed")
+            except Exception: pass
+        set_job(job_id,status="failed",phase="error",error=str(e),message=f"분석/저장 중단: {e}. 이미 저장된 Point는 유지됩니다.")
 
 def upload_queue_worker():
     while True:
@@ -325,12 +320,12 @@ def upload_queue_worker():
             traceback.print_exc()
             set_job(task["job_id"],status="failed",phase="error",progress=0,error=str(e),message=f"분석 실패: {e}")
         finally:
+            ANALYSIS_SLOT.release()
             UPLOAD_QUEUE.task_done()
 
 threading.Thread(target=upload_queue_worker,daemon=True,name="uvtape-analysis-queue").start()
 
-@app.post("/api/upload")
-async def upload(
+def register_upload(
     files: list[UploadFile] = File(...),
     conditions_json: str = Form(...),
     pages_per_point: int = Form(3),
@@ -340,6 +335,8 @@ async def upload(
     treatment: str = Form("CMP"),
 ):
     """Receive source PDFs, validate mapping, then process them in the background."""
+    if len(files)!=1 or Path(files[0].filename or "").suffix.lower()!=".pdf":
+        raise HTTPException(400,"PDF는 한 번에 하나만 업로드하세요.")
     try:
         conditions = json.loads(conditions_json)
         if not isinstance(conditions, list):
@@ -354,6 +351,12 @@ async def upload(
     except Exception as e:
         raise HTTPException(400, str(e))
 
+    if not db.configured() or not r2.configured:
+        raise HTTPException(503,"새 분석에는 Supabase와 R2 설정이 모두 필요합니다. 이미지와 결과 저장 설정을 확인하세요.")
+    sequence=condition_point_sequence(normalized)
+    keys=[(m["power"],m["time"],m["wafer"],m["point"]) for m in sequence]
+    if len(keys)!=len(set(keys)):
+        raise HTTPException(400,"같은 PDF 안에 중복된 Power/Time/Wafer/Point 조건이 있습니다.")
     project_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     pdir = UPLOAD / project_id
@@ -418,7 +421,7 @@ async def upload(
         except Exception as e:
             shutil.rmtree(pdir, ignore_errors=True)
             raise HTTPException(503, f"Project queue registration failed: {e}")
-    set_job(job_id, status="queued", phase="queued", progress=5, completed=0,
+    set_job(job_id, persist_upload=True, files=saved, status="queued", phase="queued", progress=5, completed=0,
             total=expected_points, project_id=project_id,
             message=f"파일 업로드 완료 · Repeat {repeat_no} · 분석 대기열에 추가되었습니다.")
     UPLOAD_QUEUE.put({"job_id":job_id,"project_id":project_id,"pdir":pdir,"pdf_paths":pdf_paths,"saved":saved,"source_hashes":source_hashes,"source_reuse":source_reuse,"conditions":conditions,"pages_per_point":pages_per_point,"substrate_type":substrate_type,"position_substrates":position_substrates,"sample_category":sample_category,"treatment":treatment,"repeat_no":repeat_no})
@@ -439,12 +442,55 @@ async def upload(
         "treatment": treatment,
     }
 
+@app.post("/api/upload")
+def upload(files: list[UploadFile]=File(...), conditions_json: str=Form(...),
+           pages_per_point: int=Form(3), substrate_type: str=Form("SiCN"),
+           position_substrates_json: str=Form("{}"), sample_category: str=Form("MAIN"), treatment: str=Form("CMP")):
+    if not ANALYSIS_SLOT.acquire(blocking=False):
+        raise HTTPException(409,"현재 PDF 분석 또는 재분석이 진행 중입니다. 완료 후 다음 PDF를 올려주세요.")
+    try:
+        return register_upload(files,conditions_json,pages_per_point,substrate_type,position_substrates_json,sample_category,treatment)
+    except BaseException:
+        ANALYSIS_SLOT.release()
+        raise
+
+
+def persisted_upload_job(project_id,job_id=None):
+    if not db.configured() or not project_id:
+        return None
+    project=db.get_project(project_id)
+    meta=json.loads(project.get("description") or "{}")
+    saved=meta.get("upload_job")
+    if not saved or (job_id and saved.get("job_id")!=job_id):
+        return None
+    if saved.get("status") in {"queued","processing"}:
+        saved={**saved,"status":"interrupted","phase":"interrupted",
+               "message":"서버가 재시작되어 분석이 중단되었습니다. 저장 완료 Point는 유지됩니다. 자동 재개는 수행하지 않습니다."}
+    return saved
+
+
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
-    job = get_job(job_id)
+def job_status(job_id: str, project_id: str=None):
+    job=get_job(job_id)
     if not job:
-        raise HTTPException(404, "job not found")
+        try: job=persisted_upload_job(project_id,job_id)
+        except Exception as exc: raise HTTPException(503,"작업 상태 저장소에 연결할 수 없습니다.") from exc
+    if not job: raise HTTPException(404,"job not found")
     return job
+
+
+@app.get("/api/analysis/current")
+def current_upload():
+    with JOB_LOCK:
+        jobs=[{**v,"job_id":k} for k,v in JOBS.items() if v.get("persist_upload")]
+    if jobs:
+        return {"job":jobs[-1]}
+    if db.configured():
+        try:
+            project=db.get_latest_project()
+            return {"job":persisted_upload_job(project["id"]) if project else None}
+        except Exception as exc: raise HTTPException(503,"최근 분석 상태를 불러올 수 없습니다.") from exc
+    return {"job":None}
 
 def _r2_client():
     import boto3
@@ -536,8 +582,17 @@ def reanalyze_project(project_id: str):
     except Exception: meta={}
     if not meta.get("files"): raise HTTPException(400,"Stored source PDF metadata was not found for this project.")
     job_id=str(uuid.uuid4()); expected=len(condition_point_sequence(normalize_conditions(meta.get("conditions") or [])))
-    set_job(job_id,status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
-    threading.Thread(target=process_reanalysis_job,args=(job_id,project_id,meta),daemon=True).start()
+    if not ANALYSIS_SLOT.acquire(blocking=False):
+        raise HTTPException(409,"현재 PDF 분석 또는 재분석이 진행 중입니다.")
+    def run_reanalysis():
+        try: process_reanalysis_job(job_id,project_id,meta)
+        finally: ANALYSIS_SLOT.release()
+    try:
+        set_job(job_id,status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
+        threading.Thread(target=run_reanalysis,daemon=True).start()
+    except BaseException:
+        ANALYSIS_SLOT.release()
+        raise
     return {"job_id":job_id,"project_id":project_id,"expected_points":expected}
 
 @app.get("/api/projects")
@@ -609,19 +664,12 @@ def workspace():
         latest=next(reversed(list(PROJECTS.keys())),None) if PROJECTS else None
         return {"project_id":latest,"latest_project_id":latest,"points":[public_record(r) for r in all_recs]}
     try:
-        packed=db.get_all_points_with_data(page_size=100)
-        # Project history is metadata only; do not load up to 1000 full project
-        # descriptions into the same Render request as the Point/analysis data.
-        projects=db.get_projects(limit=100)
-        # Do not let a newer empty/queued project become the workspace identity.
-        # The user-facing workspace is cumulative, so the selected project must
-        # be a project that actually owns stored Point data.
-        latest=db.get_latest_project_with_points()
+        packed=db.get_all_points_with_data()
+        projects=db.get_projects(limit=1000)
+        latest=projects[0] if projects else None
     except Exception as e:
         print(f"[workspace] Supabase lookup failed: {type(e).__name__}: {e}")
-        # Keep the public error useful during deployment diagnostics instead of
-        # masking the actual Supabase/DB failure behind a generic 503.
-        raise HTTPException(503, f"Cumulative workspace data could not be loaded: {type(e).__name__}: {e}")
+        raise HTTPException(503,"Cumulative workspace data could not be loaded.")
     all_recs=[]
     for row,analysis,assets in packed:
         pid=str(row.get("project_id"))

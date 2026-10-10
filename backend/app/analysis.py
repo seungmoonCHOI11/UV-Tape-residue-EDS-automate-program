@@ -1,13 +1,3 @@
-import os
-# Keep the API parent and Point worker within Render's memory budget.
-os.environ.setdefault("MALLOC_ARENA_MAX", "2")
-os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 import base64
 import json
 import re
@@ -166,7 +156,7 @@ def _build_point_groups(pdf_paths, pages_per_point=3):
     return fallback
 
 
-def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None, position_substrates=None):
+def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None, position_substrates=None, record_callback=None, collect_records=True):
     """Analyze available Points without requiring an exact PDF page count.
 
     Whole-Point duplicates that occur consecutively are skipped. Missing Points are
@@ -259,7 +249,9 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                     else: record.setdefault('features',{})['ai_roi_used']=False
             except Exception as ai_exc:
                 record.setdefault('features',{})['ai_roi_used']=False; record['features']['ai_roi_error']=f'{type(ai_exc).__name__}: {ai_exc}'
-            payload.pop('ai_roi_boxes',None); records.append(record)
+            payload.pop('ai_roi_boxes',None)
+            if record_callback: record_callback(record)
+            if collect_records: records.append(record)
             if progress_callback: progress_callback(done_index,len(aligned),'point_analysis')
         finally:
             try: payload_path.unlink(missing_ok=True)

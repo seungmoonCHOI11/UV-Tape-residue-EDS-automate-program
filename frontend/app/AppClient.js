@@ -3,6 +3,8 @@ import {useEffect,useRef,useState} from "react";
 import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2,MousePointer2,RotateCcw} from "lucide-react";
 
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
+const TERMINAL_JOBS=new Set(["completed","partial","failed","cancelled","interrupted"]);
+const isActiveJob=x=>!TERMINAL_JOBS.has(x.status);
 const DEFAULT_CONDITION={power:"150",time:"30",wafers:"1,4,5",points:"1-9",file:null};
 
 function parseSelection(value){
@@ -17,6 +19,9 @@ function parseSelection(value){
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),conditionInputs=useRef({});
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>Object.fromEntries(Array.from({length:9},(_,i)=>[String(i+1),"SiCN"]))),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]),[analysisModalOpen,setAnalysisModalOpen]=useState(false);
+ const [queueLoaded,setQueueLoaded]=useState(false);
+ const uploadingRef=useRef(false);
+ const activeAnalysis=analysisQueue.some(isActiveJob);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -71,34 +76,41 @@ export default function App(){
  }
  useEffect(()=>{setMounted(true);(async()=>{const list=await loadProjectList();await loadData(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);if(!list.length)await loadProjectList()})()},[]);
  useEffect(()=>{
-   try{const raw=localStorage.getItem("uvtape:analysisQueue");if(raw)setAnalysisQueue(JSON.parse(raw)||[])}catch{}
+   try{const raw=JSON.parse(localStorage.getItem("uvtape:singleAnalysis")||localStorage.getItem("uvtape:analysisQueue")||"[]");if(Array.isArray(raw))setAnalysisQueue(raw.filter(x=>x?.job_id).slice(-1))}catch{}
+   let cancelled=false;
+   fetch(`${API}/api/analysis/current`,{cache:"no-store",signal:AbortSignal.timeout(20000)}).then(r=>r.ok?r.json():null).then(data=>{
+     if(!cancelled&&data?.job)setAnalysisQueue([data.job]);
+   }).catch(()=>{}).finally(()=>{if(!cancelled)setQueueLoaded(true)});
+   return()=>{cancelled=true};
  },[]);
- useEffect(()=>{try{localStorage.setItem("uvtape:analysisQueue",JSON.stringify(analysisQueue))}catch{}},[analysisQueue]);
+ useEffect(()=>{if(queueLoaded)try{localStorage.setItem("uvtape:singleAnalysis",JSON.stringify(analysisQueue))}catch{}},[analysisQueue,queueLoaded]);
+ const pollingKey=analysisQueue.filter(isActiveJob).map(x=>x.job_id).join(",");
  useEffect(()=>{
-   if(!analysisQueue.length)return;
-   let stopped=false;
+   if(!queueLoaded||!pollingKey)return;
+   let stopped=false,timer;
    const tick=async()=>{
-     const next=[];
-     for(const item of analysisQueue){
+     let terminal=false;
+     for(const item of analysisQueue.filter(isActiveJob)){
        try{
-         const r=await fetch(`${API}/api/jobs/${item.job_id}`,{cache:"no-store"});
-         if(r.ok){const st=await r.json(); next.push({...item,status:st.status||item.status,progress:st.progress||0,message:st.message||item.message||"" ,completed:st.completed||0,total:st.total||item.total||0}); continue;}
-       }catch{}
-       try{
-         const pr=await fetch(`${API}/api/projects/${item.project_id}`,{cache:"no-store"});
-         if(pr.ok){next.push({...item,status:"completed",progress:100,message:"분석 완료",completed:item.total||0,total:item.total||0});continue;}
-       }catch{}
-       next.push(item);
+         const r=await fetch(`${API}/api/jobs/${item.job_id}?project_id=${encodeURIComponent(item.project_id||"")}`,{cache:"no-store",signal:AbortSignal.timeout(20000)});
+         if(stopped)return;
+         if(r.status===404){
+           setAnalysisQueue(q=>q.map(x=>x.job_id===item.job_id?{...x,status:"interrupted",message:"작업 상태를 찾을 수 없습니다. 서버 재시작 또는 이전 버전 작업일 수 있습니다. 저장된 결과를 확인하세요."}:x));
+           terminal=true;continue;
+         }
+         if(!r.ok)throw new Error(`HTTP ${r.status}`);
+         const st=await r.json();
+         terminal=terminal||TERMINAL_JOBS.has(st.status);
+         setAnalysisQueue(q=>q.map(x=>x.job_id===item.job_id?{...x,...st,job_id:item.job_id,files:item.files}:x));
+       }catch(e){if(!stopped)setAnalysisQueue(q=>q.map(x=>x.job_id===item.job_id?{...x,message:"서버 연결 확인 중 · 연결 실패를 분석 완료로 처리하지 않습니다."}:x))}
      }
-     const hadCompleted=next.some((x,i)=>x.status==="completed" && analysisQueue[i]?.status!=="completed");
-     if(!stopped)setAnalysisQueue(next);
-     if(!stopped){
-       await loadProjectList();
-       if(hadCompleted) await loadData(null,{silent:true});
-     }
+     if(stopped)return;
+     if(!stopped&&!terminal)timer=setTimeout(tick,document.hidden?15000:5000);
    };
-   tick(); const timer=setInterval(tick,2500); return()=>{stopped=true;clearInterval(timer)};
- },[analysisQueue.length]);
+   tick();return()=>{stopped=true;clearTimeout(timer)};
+ },[pollingKey,queueLoaded]);
+ const terminalKey=analysisQueue.filter(x=>TERMINAL_JOBS.has(x.status)).map(x=>`${x.job_id}:${x.status}`).join(",");
+ useEffect(()=>{if(queueLoaded&&terminalKey){loadProjectList();loadData(null,{silent:true});}},[terminalKey,queueLoaded]);
  useEffect(()=>{const h=e=>{if(typeof e.detail?.index!=="number")return;setIdx(e.detail.index);setVerificationOpen(true)};window.addEventListener("uvtape:open-point",h);return()=>window.removeEventListener("uvtape:open-point",h)},[]);
 function nextUnverified(start=0){
  for(let i=Math.max(0,start);i<points.length;i++) if(!points[i].human_result) return i;
@@ -111,48 +123,27 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
  function expectedPointsForCondition(c){const wafers=parseSelection(c.wafers),pts=parseSelection(c.points);return new Set(wafers).size*new Set(pts).size;}
  function expectedPoints(){return conditions.reduce((sum,c)=>sum+expectedPointsForCondition(c),0)}
  async function upload(){
-   const missing=conditions.findIndex(c=>!c.file);
-   if(missing>=0)return notify(`Condition ${missing+1}에 PDF를 먼저 추가하세요.`);
-   const invalid=conditions.findIndex(c=>!expectedPointsForCondition(c));
-   if(invalid>=0)return notify(`Condition ${invalid+1}의 Power / Time / Wafer / Point 조건을 확인하세요.`);
-   const batch=[...conditions];
-   // Start a fresh visible analysis batch. Previous test jobs should not be mixed
-   // into the new progress window.
-   setAnalysisQueue([]);
-   setAnalysisModalOpen(true);
-   setBusy(true);setProgressPhase("queued");setProgress(0);setProgressMessage(`${batch.length}개 조건을 순차적으로 분석 대기열에 등록합니다.`);
-   let added=0,failed=0;
+   if(uploadingRef.current||activeAnalysis)return notify("진행 중인 분석이 끝난 후 다음 PDF를 올려주세요.");
+   const file=conditions[0]?.file;
+   if(!file)return notify("PDF 하나를 먼저 선택하세요.");
+   if(conditions.some(c=>!expectedPointsForCondition(c)||!Number(c.power)||!Number(c.time)))return notify("Power / Time / Wafer / Point 조건을 확인하세요.");
+   uploadingRef.current=true;setBusy(true);setProgress(0);setProgressPhase("upload");setProgressMessage("PDF 업로드 중 · 업로드가 끝날 때까지 이 탭을 열어 두세요.");
    try{
-     for(let i=0;i<batch.length;i++){
-       const itemConfig=batch[i],file=itemConfig.file,n=expectedPointsForCondition(itemConfig);
-       setProgressPhase("upload");setProgress(0);setProgressMessage(`분석 대기열 등록 중 · ${i+1}/${batch.length} · ${file.name}`);
-       const fd=new FormData();fd.append("files",file);fd.append("conditions_json",JSON.stringify([{power:itemConfig.power,time:itemConfig.time,wafers:itemConfig.wafers,points:itemConfig.points}]));fd.append("pages_per_point",String(pagesPerPoint));fd.append("substrate_type",substrateType);fd.append("position_substrates_json",JSON.stringify(positionSubstrates));fd.append("sample_category",sampleCategory);
-       try{
-         const j=await (async()=>{
-           let lastErr=null;
-           for(let attempt=1;attempt<=3;attempt++){
-             try{
-               const result=await new Promise((resolve,reject)=>{
-                 const xhr=new XMLHttpRequest();xhr.open("POST",`${API}/api/upload`);xhr.timeout=180000;
-                 xhr.upload.onprogress=e=>{if(e.lengthComputable){const pct=Math.round((e.loaded/e.total)*100);setProgress(pct);setProgressMessage(`업로드 중 · ${i+1}/${batch.length} · ${file.name} · ${pct}%`);}};
-                 xhr.onerror=()=>reject(new Error("서버 연결에 실패했습니다."));xhr.ontimeout=()=>reject(new Error("업로드 시간이 초과되었습니다."));
-                 xhr.onload=()=>{let body=xhr.responseText,data={};try{data=JSON.parse(body)}catch{}if(xhr.status<200||xhr.status>=300){reject(new Error(`HTTP ${xhr.status}: ${data.detail||body||"server error"}`));return}resolve(data)};xhr.send(fd);
-               });
-               return result;
-             }catch(err){
-               lastErr=err;
-               if(attempt<3){setProgressMessage(`서버 연결 재시도 중 · ${attempt}/2 · ${file.name}`);await new Promise(r=>setTimeout(r,2500));}
-             }
-           }
-           throw lastErr||new Error("서버 연결에 실패했습니다.");
-         })();
-         const queueItem={job_id:j.job_id,project_id:j.project_id,files:j.files||[file.name],total:j.expected_points||n,status:"queued",progress:5,message:"분석 대기 중"};
-         setAnalysisQueue(q=>[...q.filter(x=>x.job_id!==queueItem.job_id),queueItem]);added++;
-       }catch(e){failed++;const reason=e?.message||"server error";setAnalysisQueue(q=>[...q,{job_id:`local-failed-${Date.now()}-${i}`,project_id:null,files:[file.name],total:n,status:"failed",progress:0,message:`등록 실패: ${reason}`}]);notify(`${file.name} 등록 실패 · ${reason}`);}
-     }
-     setProgressPhase("queued");setProgress(100);setProgressMessage(`${added}개 PDF가 순차 분석 대기열에 등록되었습니다.${failed?` ${failed}개는 등록 실패했습니다.`:""}`);await loadProjectList();notify(`${added}개 PDF를 순차 분석 대기열에 추가했습니다.${failed?` (${failed}개 실패)`:""}`);
-     if(added>0)setConditions([{...DEFAULT_CONDITION,file:null}]);
-   }finally{setBusy(false);}
+     const fd=new FormData();fd.append("files",file);fd.append("conditions_json",JSON.stringify(conditions.map(({file,...c})=>c)));fd.append("pages_per_point",String(pagesPerPoint));fd.append("substrate_type",substrateType);fd.append("position_substrates_json",JSON.stringify(positionSubstrates));fd.append("sample_category",sampleCategory);
+     // Do not retry POST automatically: a lost response may already have registered a job.
+     const j=await new Promise((resolve,reject)=>{
+       const xhr=new XMLHttpRequest();xhr.open("POST",`${API}/api/upload`);xhr.timeout=180000;
+       xhr.upload.onprogress=e=>{if(e.lengthComputable){setProgress(Math.round(e.loaded/e.total*100));setProgressMessage(e.loaded===e.total?"서버에서 작업을 등록하고 있습니다.":"PDF 업로드 중 · 이 탭을 열어 두세요.")}};
+       xhr.onerror=()=>reject(new Error("서버 연결 실패. 다시 올리기 전에 진행 중인 작업을 확인하세요."));xhr.ontimeout=()=>reject(new Error("등록 응답 시간 초과. 다시 올리기 전에 진행 중인 작업을 확인하세요."));
+       xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText)}catch{}if(xhr.status<200||xhr.status>=300){reject(new Error(typeof data.detail==="string"?data.detail:`HTTP ${xhr.status}`));return}resolve(data)};xhr.send(fd);
+     });
+     setAnalysisQueue([{job_id:j.job_id,project_id:j.project_id,files:j.files||[file.name],total:j.expected_points,status:"queued",progress:5,completed:0,message:"서버에서 분석을 시작합니다."}]);
+     setAnalysisModalOpen(true);setConditions([{...DEFAULT_CONDITION}]);notify("업로드 완료 · 서버에서 백그라운드 분석 중입니다.");
+   }catch(e){
+     notify(e.message||"업로드 실패");
+     try{const r=await fetch(`${API}/api/analysis/current`,{cache:"no-store",signal:AbortSignal.timeout(20000)});if(r.ok){const data=await r.json();if(data.job){setAnalysisQueue([data.job]);setAnalysisModalOpen(true)}}}catch{}
+   }
+   finally{uploadingRef.current=false;setBusy(false);setProgressPhase("idle")}
  }
  async function deleteProjectById(projectId,meta){
    if(!projectId)return;
@@ -219,14 +210,14 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  if(!mounted)return <div className="app"><main><InitialLoading/></main></div>;
  if(initialLoading)return <div className="app"><main><InitialLoading/></main></div>;
  const p=points[idx],filtered=points.filter(x=>(result==="All"||(x.human_result||x.features?.result)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition View",Activity],["Condition Compare",GitCompare],["Reports",FileText],["Delete Data",Trash2]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
+ return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition View",Activity],["Condition Compare",GitCompare],["Reports",FileText],["Delete Data",Trash2]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={13}/>{activeAnalysis?`분석 진행 ${analysisQueue[0]?.progress||0}%`:"최근 분석 상태"}</button>}{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy||activeAnalysis}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={setPage}/>}
- {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
+ {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy||activeAnalysis||!queueLoaded} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
  {page==="Verification"&&(p?<Review p={p} idx={idx} total={points.length} prev={()=>setIdx(Math.max(0,idx-1))} next={()=>setIdx(Math.min(points.length-1,idx+1))} human={human} saveHumanRoi={saveHumanRoi}/>:<Empty title="분석 데이터가 없습니다" text="EDS PDF를 업로드하면 Point별 분석 결과가 이 화면에 표시됩니다." go={()=>setPage("New Analysis")}/>)}
  {page==="AI Analysis"&&<AIAnalysis points={points} analysis={aiAnalysis} busy={aiBusy} run={runProjectAI}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
  {page==="Condition View"&&<ConditionView points={points} selected={conditionView} setSelected={setConditionView} go={setPage}/>}
- {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} project={project}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">Project data loading</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>Loading project data</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -235,13 +226,14 @@ function AnalysisProgress({progress,phase,message}){
 }
 function AnalysisBatchModal({items,open,close}){
  if(!open)return null;
- const active=items.length===0 || items.some(x=>!["completed","failed","cancelled"].includes(x.status));
- const overall=items.length?Math.round(items.reduce((sum,x)=>sum+Math.max(0,Math.min(100,Number(x.progress)||0)),0)/items.length):0;
+ const item=items[0],active=item&&isActiveJob(item),pct=Math.round(item?.progress||0);
+ const labels={completed:"분석 완료",partial:"일부 Point만 저장됨",failed:"분석 실패",interrupted:"분석 중단",cancelled:"분석 취소",queued:"분석 대기",processing:"분석 중"};
  return <div className="progressOverlay"><div className="progressModal batchProgressModal">
-   <div className="progressTop"><div><span className="badge"><Activity size={13}/> ANALYSIS IN PROGRESS</span><h3>{active?"등록된 PDF를 순서대로 분석하고 있습니다.":"분석 작업이 완료되었습니다."}</h3></div><b>{overall}%</b></div>
-   <div className="progressTrack"><div className="progressBar" style={{width:`${Math.max(2,Math.min(100,overall))}%`}}/></div>
-   <div className="batchProgressList">{items.map((x,i)=>{const pct=Math.round(x.progress||0);const terminal=x.status==="completed"||x.status==="failed"||x.status==="cancelled";const label=x.status==="completed"?"완료":x.status==="failed"?"실패":x.status==="cancelled"?"취소":x.status==="queued"?"대기 중":"분석 중";return <div className="batchProgressItem" key={x.job_id||i}><div className="batchProgressMain"><div><b>{i+1}. {x.files?.join(", ")||"PDF"}</b><span>{x.message||label}</span></div><strong className={terminal?`status-${x.status}`:""}>{pct}%</strong></div><div className="miniProgressTrack"><div className="miniProgressBar" style={{width:`${Math.max(0,Math.min(100,pct))}%`}}/></div></div>})}</div>
-   <div className="batchProgressBottom"><span>{active?"분석은 서버에서 순차적으로 계속 진행됩니다.":"모든 등록 작업이 종료되었습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+  <div className="progressTop"><div><span className="badge"><Activity size={13}/> PDF ANALYSIS</span><h3>{labels[item?.status]||"작업 상태 확인"}</h3></div><b>{pct}%</b></div>
+  <p>{item?.files?.join(", ")}</p><div className="progressTrack"><div className="progressBar" style={{width:`${pct}%`}}/></div>
+  <p>{item?.message}</p><p><b>저장 완료 {item?.completed||0} / {item?.total||0} Points</b></p>
+  {item?.storage_warning&&<p className="analysisWarning">{item.storage_warning}</p>}
+  <div className="batchProgressBottom"><span>{active?"다른 메뉴로 이동해도 분석은 계속됩니다. 서버 재시작 시에는 중단될 수 있습니다.":"저장된 결과는 Dashboard에서 확인할 수 있습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
  </div></div>
 }
 function Dashboard({points,go}){
@@ -269,27 +261,12 @@ function Dashboard({points,go}){
  </div>
 }
 function Metric({t,v,s}){return <div className="metric"><small>{t}</small><b>{v}</b><span>{s}</span></div>}
-function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCondition,addCondition,removeCondition,pagesPerPoint,setPagesPerPoint,draggingCondition,setDraggingCondition,expectedPointsForCondition,expectedPoints,busy,analysisQueue,substrateType,setSubstrateType,sampleCategory,setSampleCategory,positionSubstrates,setPositionSubstrates}){
- return <div className="content">
-  <div className="intro"><div><h2>New Analysis</h2><p>PDF와 분석 조건을 1:1로 등록한 뒤 <b>Analysis</b>를 누르면 등록된 순서대로 서버가 하나씩 분석합니다.</p></div><span>{conditions.length} conditions</span></div>
-  <section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>1. PDF / Analysis conditions</b><small>각 Condition에 PDF 1개와 해당 Power / Time / Wafer / Point를 지정하세요. Add condition으로 원하는 만큼 추가할 수 있습니다.</small></div><button className="secondary" type="button" onClick={addCondition}><Plus size={13}/> Add condition</button></div></div>
-   {conditions.map((c,i)=><div className="conditionCard" key={i}>
-    <div className="conditionCardTop"><div className="conditionTitle">Condition {i+1}</div>{conditions.length>1&&<button className="iconBtn" type="button" onClick={()=>removeCondition(i)} title="Remove condition"><Trash2 size={14}/></button>}</div>
-    <div className={`conditionDrop ${draggingCondition===i?"dragging":""}`} onClick={()=>conditionInputs.current[i]?.click()} onDragOver={e=>{e.preventDefault();setDraggingCondition(i)}} onDragLeave={()=>setDraggingCondition(null)} onDrop={e=>{e.preventDefault();setDraggingCondition(null);setConditionFile(i,e.dataTransfer.files?.[0])}}>
-      <input ref={el=>{conditionInputs.current[i]=el}} hidden type="file" accept=".pdf,application/pdf" onChange={e=>{setConditionFile(i,e.target.files?.[0]);e.target.value=""}}/>
-      <FileUp size={24}/><b>{c.file?c.file.name:"EDS PDF를 선택하거나 여기에 끌어다 놓으세요"}</b><small>{c.file?`${(c.file.size/1024/1024).toFixed(1)} MB · 이 Condition에 연결됨`:"PDF 1개 = Condition 1개"}</small>
-    </div>
-    <div className="conditionFields"><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label></div>
-    <div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div>
-    <div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>
-    <div className="conditionSummary"><span>Pages / Point <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>{expectedPointsForCondition(c)} points</b><span>{expectedPointsForCondition(c)*pagesPerPoint} pages expected</span></div>
-   </div>)}
-   <div className="batchSummary"><b>Total: {conditions.length} PDFs · {expectedPoints()} points · {expectedPoints()*pagesPerPoint} pages expected</b><span>PDF가 없는 Condition은 Analysis를 시작할 수 없습니다.</span></div>
-  </section>
-  <section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b><small>전체 배치에 적용됩니다. 위치별 기판을 지정할 수 있습니다.</small></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Default Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">Position / Substrate</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>P{pos}<select value={positionSubstrates[String(pos)]||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section>
-  <div className="actions"><button className="primary analysisStartBtn" disabled={busy} onClick={upload}><Play size={14}/>{busy?"Analysis 준비 중...":`Analysis 시작 (${conditions.length}개 PDF)`}</button></div>
- </div>
-}
+function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCondition,addCondition,removeCondition,pagesPerPoint,setPagesPerPoint,draggingCondition,setDraggingCondition,expectedPoints,busy,substrateType,setSubstrateType,sampleCategory,setSampleCategory,positionSubstrates,setPositionSubstrates}){
+ const files=conditions[0]?.file?[conditions[0].file]:[];
+ const dragging=draggingCondition===0;
+ const setDragging=v=>setDraggingCondition(v?0:null);
+ const addFiles=fs=>{if(fs?.length===1)setConditionFile(0,fs[0]);else if(fs?.length>1)window.alert("PDF는 한 번에 하나만 선택하세요.")};
+ return <div className="content"><div className="intro"><div><h2>New Analysis</h2><p>PDF 하나를 업로드하고 백그라운드로 분석합니다. 다음 PDF는 현재 작업이 끝난 뒤 등록하세요.</p></div></div><section className="panel"><div className="panelHead"><b>1. EDS source upload</b><small>PDF · drag & drop supported</small></div><div className={`drop ${dragging?"dragging":""}`} onClick={()=>conditionInputs.current[0]?.click()} onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);addFiles(e.dataTransfer.files)}}><FileUp size={30}/><b>{dragging?"여기에 PDF를 놓으세요":"EDS PDF를 끌어다 놓거나 클릭해서 선택하세요"}</b><small>PDF 1개 · 업로드 완료 후 다른 메뉴로 이동할 수 있습니다.</small><input ref={el=>{conditionInputs.current[0]=el}} hidden type="file" accept=".pdf,application/pdf" onChange={e=>addFiles(e.target.files)}/></div>{files.map((f,i)=><div className="file" key={`${f.name}-${i}`}><FileText size={14}/><span>{f.name}</span><small>{(f.size/1024/1024).toFixed(1)} MB</small><button className="iconBtn" onClick={()=>updateCondition(0,"file",null)}><Trash2 size={13}/></button></div>)}</section><section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b><small>선택한 PDF에 적용됩니다. 위치별 기판을 지정할 수 있습니다.</small></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Default Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">Position / Substrate</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>P{pos}<select value={positionSubstrates[String(pos)]||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section><section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>3. Analysis conditions</b><small>한 PDF에 여러 조건이 있으면 PDF에 나오는 순서대로 추가하세요.</small></div><button className="secondary" onClick={addCondition}><Plus size={13}/> Add condition</button></div></div>{conditions.map((c,i)=><div className="conditionRow" key={i}><div className="conditionTitle">Condition {i+1}</div><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label><div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div><div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>{conditions.length>1&&<button className="iconBtn" onClick={()=>{if(i===0&&conditions[0].file)updateCondition(1,"file",conditions[0].file);removeCondition(i)}}><Trash2 size={14}/></button>}</div>)}<div className="mappingSummary"><span>Pages / Point <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>Total Points: {expectedPoints()}</b><span>Total Pages: {expectedPoints()*pagesPerPoint}</span></div></section><div className="actions"><button className="primary" disabled={busy} onClick={upload}><Play size={14}/>{busy?"현재 작업 처리 중...":"Upload + Analyze (PDF 1개)"}</button></div></div>}
 function coRatioDisplayScore(limiting){
  const x=Number(limiting);
  if(!Number.isFinite(x))return null;
