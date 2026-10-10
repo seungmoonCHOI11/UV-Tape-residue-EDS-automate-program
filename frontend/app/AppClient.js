@@ -198,7 +198,7 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
    }catch(e){notify(e.message||"ROI 저장 실패");throw e;}
  }
  async function runProjectAI(){if(!project)return notify("먼저 분석 데이터를 불러오세요.");setAiBusy(true);notify("OpenAI가 전체 실험 결과를 분석하고 있습니다...");try{const r=await fetch(`${API}/api/projects/${project}/ai-analysis`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"AI analysis failed");setAiAnalysis(j);setPage("AI Analysis");notify("AI 연구 분석 완료")}catch(e){notify("AI 분석 오류: "+e.message)}finally{setAiBusy(false)}}
-async function reanalyzeProject(){if(!project)return notify("현재 프로젝트가 없습니다.");if(!window.confirm("R2에 저장된 원본 PDF로 현재 프로젝트를 다시 분석할까요? 기존 분석 결과가 새 분석 결과로 갱신됩니다."))return;setBusy(true);try{const r=await fetch(`${API}/api/projects/${project}/reanalyze`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"re-analysis failed");const poll=async()=>{const pr=await fetch(`${API}/api/jobs/${j.job_id}`);const st=await pr.json();setProgress(st.progress||0);setProgressPhase(st.phase||"reanalysis");setProgressMessage(st.message||"재분석 중...");if(st.status==="completed"){setBusy(false);const loaded=await loadData(project);const ni=loaded.findIndex(z=>!z.human_result);if(ni>=0)setIdx(ni);setVerificationOpen(loaded.length>0);notify("기존 데이터 재분석 완료");setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},700);return;}if(st.status==="failed"){setBusy(false);throw new Error(st.error||"재분석 실패");}setTimeout(poll,1200)};await poll()}catch(e){setBusy(false);notify("재분석 오류: "+e.message)}}
+async function reanalyzeProject(){if(!project)return notify("현재 프로젝트가 없습니다.");if(!window.confirm("R2에 저장된 원본 PDF로 현재 프로젝트를 다시 분석할까요? 기존 분석 결과가 새 분석 결과로 갱신됩니다."))return;setBusy(true);try{const r=await fetch(`${API}/api/projects/${project}/reanalyze`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"re-analysis failed");const poll=async()=>{const pr=await fetch(`${API}/api/jobs/${j.job_id}`);const st=await pr.json();setProgress(st.progress||0);setProgressPhase(st.phase||"reanalysis");setProgressMessage(st.message||"재분석 중...");if(st.status==="completed"||st.status==="partial"){setBusy(false);const loaded=await loadData(project);const ni=loaded.findIndex(z=>!z.human_result);if(ni>=0)setIdx(ni);setVerificationOpen(loaded.length>0);notify(st.status==="partial"?`재분석 부분 완료 · 실패 ${st.failed_count||0} Point`:"기존 데이터 재분석 완료");setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},700);return;}if(st.status==="failed"){setBusy(false);throw new Error(st.error||"재분석 실패");}setTimeout(poll,1200)};await poll()}catch(e){setBusy(false);notify("재분석 오류: "+e.message)}}
 
  async function openVerification(){
  const ni=points.findIndex(z=>!z.human_result);
@@ -228,12 +228,24 @@ function AnalysisBatchModal({items,open,close}){
  if(!open)return null;
  const item=items[0],active=item&&isActiveJob(item),pct=Math.round(item?.progress||0);
  const labels={completed:"분석 완료",partial:"일부 Point만 저장됨",failed:"분석 실패",interrupted:"분석 중단",cancelled:"분석 취소",queued:"분석 대기",processing:"분석 중"};
+ const failures=Array.isArray(item?.failed_points)?item.failed_points:[];
+ const missing=Array.isArray(item?.missing_points)?item.missing_points:[];
+ const detected=Number.isFinite(Number(item?.detected_points))?Number(item.detected_points):null;
+ const total=Number(item?.total||0);
+ const mode=item?.recognition_mode==="point_label"?"PDF Point label 기준":item?.recognition_mode==="page_order"?"3-page 순서 기준":"";
  return <div className="progressOverlay"><div className="progressModal batchProgressModal">
   <div className="progressTop"><div><span className="badge"><Activity size={13}/> PDF ANALYSIS</span><h3>{labels[item?.status]||"작업 상태 확인"}</h3></div><b>{pct}%</b></div>
   <p>{item?.files?.join(", ")}</p><div className="progressTrack"><div className="progressBar" style={{width:`${pct}%`}}/></div>
-  <p>{item?.message}</p><p><b>저장 완료 {item?.completed||0} / {item?.total||0} Points</b></p>
+  <p>{item?.message}</p>
+  <div className="analysisStatusGrid">
+   <div><small>저장 완료</small><b>{item?.completed||0} / {total||0}</b></div>
+   <div><small>PDF Point 인식</small><b>{detected==null?"확인 중":`${detected} / ${total||detected}`}</b>{mode&&<span>{mode}</span>}</div>
+   <div><small>실패 Point</small><b>{item?.failed_count||0}</b></div>
+  </div>
+  {missing.length>0&&<div className="analysisIssueBox"><b>PDF에서 매칭되지 않은 Point {missing.length}개</b><p>{missing.map(x=>x.id||`W${x.wafer}-P${x.point}`).join(", ")}</p></div>}
+  {failures.length>0&&<div className="analysisFailureList"><b>실패 Point / 원인</b>{failures.map((f,i)=><div className="analysisFailureItem" key={`${f.id||i}-${i}`}><div><strong>{f.id||`W${f.wafer}-P${f.point}`}</strong><span>{f.stage||"analysis"}</span></div><p>{f.error||"Unknown error"}</p></div>)}</div>}
   {item?.storage_warning&&<p className="analysisWarning">{item.storage_warning}</p>}
-  <div className="batchProgressBottom"><span>{active?"다른 메뉴로 이동해도 분석은 계속됩니다. 서버 재시작 시에는 중단될 수 있습니다.":"저장된 결과는 Dashboard에서 확인할 수 있습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+  <div className="batchProgressBottom"><span>{active?"한 Point가 실패해도 해당 Point만 기록하고 다음 Point 분석을 계속합니다.":"저장된 결과와 실패 원인은 이 상태 창에서 확인할 수 있습니다."}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
  </div></div>
 }
 function Dashboard({points,go}){

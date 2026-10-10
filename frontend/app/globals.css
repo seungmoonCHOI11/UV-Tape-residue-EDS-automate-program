@@ -408,3 +408,16 @@
 .batchProgressMain>strong{font-size:11px;color:#4d66d1;min-width:42px;text-align:right}.batchProgressMain>strong.status-completed{color:#25845b}.batchProgressMain>strong.status-failed{color:#c34242}.batchProgressMain>strong.status-cancelled{color:#8a94a3}
 .miniProgressTrack{height:5px;background:#e9edf3;border-radius:999px;overflow:hidden;margin-top:8px}.miniProgressBar{height:100%;background:#5b6ee1;border-radius:999px;transition:width .35s ease}
 .batchProgressBottom{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:15px;padding-top:12px;border-top:1px solid #edf0f4;font-size:9px;color:#7f8997}
+
+/* v23.7.45 analysis diagnostics */
+.analysisStatusGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin:13px 0}
+.analysisStatusGrid>div{border:1px solid #e7ebf1;border-radius:10px;padding:10px 11px;background:#fbfcfe;display:flex;flex-direction:column;gap:3px}
+.analysisStatusGrid small{font-size:9px;color:#8b95a5}.analysisStatusGrid b{font-size:13px;color:#202936}.analysisStatusGrid span{font-size:8px;color:#8b95a5}
+.analysisIssueBox,.analysisFailureList{margin-top:11px;border:1px solid #f0d8a4;border-radius:10px;background:#fffaf0;padding:10px 11px}
+.analysisIssueBox>b,.analysisFailureList>b{font-size:10px;color:#6e5320}.analysisIssueBox p{font-size:9px;color:#7c6b48;line-height:1.5;margin:5px 0 0;word-break:break-word}
+.analysisFailureList{border-color:#efc6c6;background:#fff8f8;max-height:220px;overflow:auto}
+.analysisFailureList>b{color:#9c3535}.analysisFailureItem{padding:8px 0;border-top:1px solid #f3dada}.analysisFailureItem:first-of-type{margin-top:5px}
+.analysisFailureItem>div{display:flex;align-items:center;gap:8px}.analysisFailureItem strong{font-size:9px;color:#9c3535}.analysisFailureItem span{font-size:8px;color:#9a7a7a;text-transform:uppercase}
+.analysisFailureItem p{margin:4px 0 0;font-size:8px;line-height:1.45;color:#745c5c;white-space:pre-wrap;word-break:break-word}
+.analysisWarning{margin-top:10px;border:1px solid #f0d8a4;border-radius:9px;background:#fffaf0;padding:9px 10px;font-size:9px;color:#7c6b48}
+@media(max-width:700px){.analysisStatusGrid{grid-template-columns:1fr}}

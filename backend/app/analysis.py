@@ -156,13 +156,30 @@ def _build_point_groups(pdf_paths, pages_per_point=3):
     return fallback
 
 
-def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_callback=None, roi_reference_examples=None, position_substrates=None, record_callback=None, collect_records=True):
-    """Analyze available Points without requiring an exact PDF page count.
 
-    Whole-Point duplicates that occur consecutively are skipped. Missing Points are
-    not fabricated and are simply absent from the returned records. The sequence is
-    aligned by the Point number printed in the PDF, so a missing Point does not shift
-    every subsequent Point by three pages.
+def extract_pdfs(
+    pdf_paths,
+    output_dir,
+    conditions,
+    pages_per_point=3,
+    progress_callback=None,
+    roi_reference_examples=None,
+    position_substrates=None,
+    record_callback=None,
+    collect_records=True,
+    point_error_callback=None,
+    structure_callback=None,
+    cancel_callback=None,
+):
+    """Analyze every usable Point and isolate per-Point failures.
+
+    One bad Point must not terminate the remaining PDF analysis. Worker/save failures
+    are reported through ``point_error_callback`` and the loop continues. A caller can
+    still stop the whole job explicitly through ``cancel_callback`` (used when a
+    project is deleted while analysis is running).
+
+    ``structure_callback`` is called once, before Point analysis starts, with the
+    detected/expected Point counts and any configured Points that could not be aligned.
     """
     if pages_per_point < 1:
         raise ValueError("pages_per_point must be at least 1")
@@ -183,16 +200,14 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
         observed = group.get("point_number")
         if observed is None:
             # Image-only PDF fallback: preserve the original sequential mapping.
-            # The fallback is safe for normal exports and avoids the old fatal
-            # "No analyzable Point groups" error. Missing/duplicate whole Points
-            # cannot be identified reliably without a readable Point label.
+            # Missing/duplicate whole Points cannot be identified reliably without
+            # searchable Point labels, but normal 3-page exports remain analyzable.
             if expected_idx >= len(sequence):
                 break
             match = expected_idx
         else:
             observed = int(observed)
             if previous_observed == observed:
-                # Consecutive same-label group = duplicated whole Point. Skip it.
                 continue
             match = None
             for j in range(expected_idx, len(sequence)):
@@ -200,7 +215,6 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
                     match = j
                     break
             if match is None:
-                # Unknown/out-of-sequence Point: do not guess a condition/wafer.
                 continue
         meta = sequence[match]
         aligned.append((match, meta, group["pages"]))
@@ -209,6 +223,29 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
 
     if not aligned:
         raise ValueError("No PDF Points matched the configured Point sequence.")
+
+    aligned_indexes = {item[0] for item in aligned}
+    missing_points = []
+    for idx, meta in enumerate(sequence):
+        if idx not in aligned_indexes:
+            missing_points.append({
+                "power": f"{meta['power']}W",
+                "time": f"{meta['time']}s",
+                "wafer": meta["wafer"],
+                "point": meta["point"],
+                "id": f"{meta['power']}W_{meta['time']}s_W{meta['wafer']}_P{meta['point']}",
+            })
+    recognition_mode = "point_label" if any(g.get("point_number") is not None for g in groups) else "page_order"
+    structure = {
+        "expected_points": len(sequence),
+        "detected_points": len(aligned),
+        "missing_count": len(missing_points),
+        "missing_points": missing_points,
+        "recognition_mode": recognition_mode,
+        "source_group_count": len(groups),
+    }
+    if structure_callback:
+        structure_callback(structure)
 
     worker = Path(__file__).with_name("point_worker.py")
     records = []
@@ -221,38 +258,128 @@ def extract_pdfs(pdf_paths, output_dir, conditions, pages_per_point=3, progress_
     }
 
     for done_index, (sequence_index, meta, group) in enumerate(aligned, 1):
+        if cancel_callback and cancel_callback():
+            raise RuntimeError("분석 중 프로젝트가 삭제되어 작업을 취소했습니다.")
+
         power=f"{meta['power']}W"; time=f"{meta['time']}s"
         point_id=f"{power}_{time}_W{meta['wafer']}_P{meta['point']}"
         pdir=output_dir/point_id; pdir.mkdir(parents=True,exist_ok=True)
         result_path=pdir/'_point_result.json'
-        payload={"id":point_id,"power":power,"time":time,"wafer":meta['wafer'],"point":meta['point'],"zone":meta['zone'],"substrate_type":meta.get('substrate_type','SiCN'),"condition":meta['condition'],"page":{"start":group[0][1]+1,"end":group[-1][1]+1},"pages_per_point":pages_per_point,"source_pages":[{"file":Path(src).name,"page":page_index+1} for src,page_index in group],"output_dir":str(pdir),"result_path":str(result_path),"pages":[{"path":src,"index":page_index} for src,page_index in group],"roi_reference_examples":roi_reference_examples or []}
-        payload_path=pdir/'_point_input.json'; payload_path.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
+        payload={
+            "id":point_id,"power":power,"time":time,"wafer":meta['wafer'],
+            "point":meta['point'],"zone":meta['zone'],
+            "substrate_type":meta.get('substrate_type','SiCN'),
+            "condition":meta['condition'],
+            "page":{"start":group[0][1]+1,"end":group[-1][1]+1},
+            "pages_per_point":pages_per_point,
+            "source_pages":[{"file":Path(src).name,"page":page_index+1} for src,page_index in group],
+            "output_dir":str(pdir),"result_path":str(result_path),
+            "pages":[{"path":src,"index":page_index} for src,page_index in group],
+            "roi_reference_examples":roi_reference_examples or [],
+        }
+        payload_path=pdir/'_point_input.json'
+        payload_path.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
+        stage = "worker"
         try:
-            proc=subprocess.run([sys.executable,str(worker),str(payload_path)],env=child_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=240,check=False)
+            proc=subprocess.run(
+                [sys.executable,str(worker),str(payload_path)],
+                env=child_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                text=True,timeout=240,check=False
+            )
             if proc.returncode!=0:
-                detail=(proc.stderr or proc.stdout or 'point worker failed').strip(); raise RuntimeError(f"Point {meta['point']} failed: {detail[-4000:]}")
-            if not result_path.exists(): raise RuntimeError(f"Point {meta['point']} worker finished without a result file.")
+                detail=(proc.stderr or proc.stdout or 'point worker failed').strip()
+                raise RuntimeError(f"Point worker failed: {detail[-4000:]}")
+            if not result_path.exists():
+                raise RuntimeError("Point worker finished without a result file.")
+
+            stage = "result"
             record=json.loads(result_path.read_text(encoding='utf-8'))
+
+            # AI ROI refinement is optional. AI failure is recorded in the Point
+            # features and must not turn a valid CV result into a failed Point.
             try:
                 from .ai import ai_available, analyze_roi_boxes_with_openai
-                ai_mode=__import__('os').getenv('OPENAI_ROI_MODE','all').lower(); f=record.get('features') or {}
-                uncertain=(f.get('result')=='Review' or f.get('confidence')=='Low' or f.get('selected_candidate_count',0)==0 or f.get('candidate_coverage',100)<18 or (f.get('morphology_score',1)<0.46 and f.get('result')!='Non-residue'))
+                ai_mode=__import__('os').getenv('OPENAI_ROI_MODE','all').lower()
+                f=record.get('features') or {}
+                uncertain=(
+                    f.get('result')=='Review' or f.get('confidence')=='Low' or
+                    f.get('selected_candidate_count',0)==0 or
+                    f.get('candidate_coverage',100)<18 or
+                    (f.get('morphology_score',1)<0.46 and f.get('result')!='Non-residue')
+                )
                 use_ai=ai_available() and ai_mode in {'assist','all'} and (ai_mode=='all' or uncertain)
                 if use_ai and record.get('assets',{}).get('sem'):
-                    ai_hint=analyze_roi_boxes_with_openai(record['assets']['sem'],f,payload.get('roi_reference_examples') or []); boxes=ai_hint.get('boxes') or []
+                    ai_hint=analyze_roi_boxes_with_openai(
+                        record['assets']['sem'],f,payload.get('roi_reference_examples') or []
+                    )
+                    boxes=ai_hint.get('boxes') or []
                     if boxes:
-                        payload['ai_roi_boxes']=boxes; payload_path.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
-                        ai_proc=subprocess.run([sys.executable,str(worker),str(payload_path)],env=child_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=240,check=False)
+                        payload['ai_roi_boxes']=boxes
+                        payload_path.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
+                        ai_proc=subprocess.run(
+                            [sys.executable,str(worker),str(payload_path)],
+                            env=child_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                            text=True,timeout=240,check=False
+                        )
                         if ai_proc.returncode==0 and result_path.exists():
-                            refined=json.loads(result_path.read_text(encoding='utf-8')); refined.setdefault('features',{})['ai_roi_used']=True; refined['features']['ai_roi_box_count']=len(boxes); refined['features']['ai_roi_model']=ai_hint.get('model') or __import__('os').getenv('OPENAI_ROI_MODEL',__import__('os').getenv('OPENAI_MODEL','gpt-5.6-luna')); refined['features']['ai_roi_notes']=ai_hint.get('notes',''); refined['features']['ground_truth_reference_count']=len(payload.get('roi_reference_examples') or []); refined['features']['ground_truth_roi_learning']=bool(payload.get('roi_reference_examples')); refined['features']['ai_roi_boxes']=boxes; record=refined
-                        else: record.setdefault('features',{})['ai_roi_used']=False
-                    else: record.setdefault('features',{})['ai_roi_used']=False
+                            refined=json.loads(result_path.read_text(encoding='utf-8'))
+                            refined.setdefault('features',{})['ai_roi_used']=True
+                            refined['features']['ai_roi_box_count']=len(boxes)
+                            refined['features']['ai_roi_model']=ai_hint.get('model') or __import__('os').getenv(
+                                'OPENAI_ROI_MODEL',__import__('os').getenv('OPENAI_MODEL','gpt-5.6-luna')
+                            )
+                            refined['features']['ai_roi_notes']=ai_hint.get('notes','')
+                            refined['features']['ground_truth_reference_count']=len(payload.get('roi_reference_examples') or [])
+                            refined['features']['ground_truth_roi_learning']=bool(payload.get('roi_reference_examples'))
+                            refined['features']['ai_roi_boxes']=boxes
+                            record=refined
+                        else:
+                            record.setdefault('features',{})['ai_roi_used']=False
+                    else:
+                        record.setdefault('features',{})['ai_roi_used']=False
             except Exception as ai_exc:
-                record.setdefault('features',{})['ai_roi_used']=False; record['features']['ai_roi_error']=f'{type(ai_exc).__name__}: {ai_exc}'
+                record.setdefault('features',{})['ai_roi_used']=False
+                record['features']['ai_roi_error']=f'{type(ai_exc).__name__}: {ai_exc}'
             payload.pop('ai_roi_boxes',None)
-            if record_callback: record_callback(record)
-            if collect_records: records.append(record)
-            if progress_callback: progress_callback(done_index,len(aligned),'point_analysis')
+
+            stage = "save"
+            if record_callback:
+                record_callback(record)
+            if collect_records:
+                records.append(record)
+            if progress_callback:
+                progress_callback(done_index,len(aligned),'point_analysis')
+
+        except Exception as point_exc:
+            # Project deletion is an explicit whole-job cancellation and must not be
+            # swallowed as an ordinary Point failure.
+            if cancel_callback and cancel_callback():
+                raise
+            if isinstance(point_exc, subprocess.TimeoutExpired):
+                detail = f"Worker timeout after {int(point_exc.timeout or 240)} seconds"
+                stage = "worker_timeout"
+            else:
+                detail = f"{type(point_exc).__name__}: {point_exc}"
+            failure = {
+                "id": point_id,
+                "power": power,
+                "time": time,
+                "wafer": meta["wafer"],
+                "point": meta["point"],
+                "condition": meta["condition"],
+                "sequence_index": sequence_index + 1,
+                "detected_index": done_index,
+                "stage": stage,
+                "error": detail[-4000:],
+                "source_pages": payload.get("source_pages") or [],
+            }
+            print(f"[point-failed] {point_id} stage={stage}: {detail}")
+            if point_error_callback:
+                point_error_callback(failure)
+            if progress_callback:
+                progress_callback(done_index,len(aligned),'point_failed')
+            # Continue with the next Point instead of aborting the entire PDF.
+            continue
         finally:
             try: payload_path.unlink(missing_ok=True)
             except Exception: pass

@@ -38,12 +38,21 @@ class SingleUploadTests(unittest.TestCase):
         for p in reversed(self.patches):p.stop()
         self.tmp.cleanup()
     def run_job(self,n=2,fail_second=False):
-        def extract(*a,record_callback=None,collect_records=True,**kw):
+        def extract(*a,record_callback=None,collect_records=True,point_error_callback=None,structure_callback=None,**kw):
             self.assertFalse(collect_records)
+            if structure_callback:
+                missing=[{"id":"150W_30s_W1_P2","wafer":1,"point":2}] if n<2 else []
+                structure_callback({"expected_points":2,"detected_points":n,"missing_count":len(missing),"missing_points":missing,"recognition_mode":"point_label"})
+            saved_before=0
             for i in range(n):
-                self.assertEqual(len(self.db.points),i) # saved before next point analysis
-                if i==1 and fail_second:raise RuntimeError("worker interrupted")
-                record_callback({"id":f"p{i}","features":{},"assets":{"sem":self.path/"sem.jpg"}})
+                if i==1 and fail_second:
+                    point_error_callback({"id":"150W_30s_W1_P2","wafer":1,"point":2,"stage":"worker","error":"worker interrupted"})
+                    continue
+                try:
+                    record_callback({"id":f"p{i}","features":{},"assets":{"sem":self.path/"sem.jpg"}})
+                    saved_before+=1
+                except Exception as exc:
+                    point_error_callback({"id":f"150W_30s_W1_P{i+1}","wafer":1,"point":i+1,"stage":"save","error":str(exc)})
             return []
         with patch.object(main,"extract_pdfs",extract):
             main.process_upload_job("job","project",self.path,[],["source.pdf"],{},{},
@@ -57,10 +66,13 @@ class SingleUploadTests(unittest.TestCase):
         self.run_job(n=1)
         self.assertEqual(main.get_job("job")["status"],"partial")
         self.assertEqual(main.get_job("job")["total"],2)
-    def test_worker_failure_keeps_saved_point(self):
+    def test_worker_failure_keeps_saved_point_and_finishes_partial(self):
         self.run_job(fail_second=True)
-        self.assertEqual(main.get_job("job")["status"],"failed")
-        self.assertEqual(main.get_job("job")["completed"],1)
+        job=main.get_job("job")
+        self.assertEqual(job["status"],"partial")
+        self.assertEqual(job["completed"],1)
+        self.assertEqual(job["failed_count"],1)
+        self.assertEqual(job["failed_points"][0]["point"],2)
         self.assertEqual(len(self.db.assets),1)
     def test_asset_failure_cannot_count_point_as_saved(self):
         self.r2.upload_file=lambda *a:(_ for _ in ()).throw(RuntimeError("R2 unavailable"))

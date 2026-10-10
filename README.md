@@ -1,6 +1,6 @@
-# Current release: v23.7.44
+# Current release: v23.7.45
 
-**먼저 [START_HERE_V23.7.44.md](START_HERE_V23.7.44.md)를 읽으세요.** 아래 내용은 과거 버전 기록입니다.
+**먼저 [START_HERE_V23.7.45.md](START_HERE_V23.7.45.md)를 읽으세요.** 아래 내용은 과거 버전 기록입니다.
 
 # UV Tape Residue EDS Analysis System — v8
 

@@ -1,0 +1,9 @@
+V23.7.45
+Base: v23.7.44.
+Point-level fault isolation for New Analysis and Re-analyze.
+A failed worker/save Point is recorded and skipped; later Points continue.
+PDF structure status is shown before analysis (detected / expected Points).
+Recent analysis status shows failed Point IDs, failure stage, and error details.
+Partial completion distinguishes saved Points, failed Points, and PDF-missing Points.
+No Supabase schema migration is required; diagnostics reuse projects.description upload_job metadata.
+Existing scoring, ROI, Dashboard, Verification, Gallery, Compare, and Reports behavior is preserved.

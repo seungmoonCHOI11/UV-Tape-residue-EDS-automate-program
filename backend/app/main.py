@@ -194,8 +194,13 @@ def health():
         "supabase_configured":db.configured(),
     }
 
+
 def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes, source_reuse, conditions, pages_per_point, substrate_type, position_substrates, sample_category, treatment, repeat_no):
-    """Background processor so the browser is not held open for the full PDF analysis."""
+    """Background processor so the browser is not held open for the full PDF analysis.
+
+    v23.7.45: Point failures are isolated. A worker/save failure is recorded and the
+    remaining Points continue. PDF structure detection is persisted before analysis.
+    """
     try:
         normalized = normalize_conditions(conditions)
         expected_points = len(condition_point_sequence(normalized))
@@ -217,9 +222,6 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                     r2.upload_file(path, key, content_type)
                     source_keys[path.name] = key
                 except Exception as e:
-                    # R2 is used for durable source reuse, but a transient storage
-                    # failure must not discard an otherwise valid analysis job.
-                    # Keep the local PDF for this run and continue to validation/analysis.
                     storage_warnings.append(f"{path.name}: {e}")
                     print(f"[r2] source upload failed; continuing analysis: {path.name}: {e}")
         else:
@@ -227,31 +229,77 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
         if db.configured():
             try:
                 meta=json.loads((db.get_project(project_id) or {}).get("description") or "{}")
-                meta["source_keys"]=source_keys; meta["queue_status"]="processing"
+                meta["source_keys"]=source_keys
+                meta["queue_status"]="processing"
                 db.update_project(project_id, description=json.dumps(meta,ensure_ascii=False), status="Processing")
-            except Exception as e: print(f"[project] queue metadata update failed: {e}")
+            except Exception as e:
+                print(f"[project] queue metadata update failed: {e}")
 
-        # Do not reject PDFs based on total page count. Whole Points may be missing
-        # or duplicated; extract_pdfs() identifies Point labels and continues with
-        # every usable Point instead of shifting the remaining 3-page groups.
-        set_job(job_id, phase="validation", progress=9, message="PDF Point 구조를 확인하고 있습니다.", total=expected_points, completed=0)
-
-        set_job(job_id, status="processing", phase="analysis", progress=10, message=("PDF 분석을 시작했습니다. R2 원본 저장 일부 실패 · 분석은 계속합니다." if storage_warnings else "PDF 분석을 시작했습니다."), total=expected_points, completed=0)
+        set_job(
+            job_id, phase="validation", progress=9,
+            message="PDF Point 구조를 확인하고 있습니다.",
+            total=expected_points, completed=0, failed_count=0, failed_points=[]
+        )
 
         gt_examples=[]
         if db.configured():
             try:
-                # Existing verified points from this project are the project-specific
-                # Ground Truth reference set. On a first upload this is empty; later
-                # re-analyses automatically reuse the accumulated examples.
                 gt_examples=db.get_ground_truth_examples(project_id, limit=8)
             except Exception as e:
                 print(f"[ground_truth] upload context lookup failed: {e}")
+
         saved_ids=[]
+        failures=[]
+        structure_info={
+            "expected_points": expected_points,
+            "detected_points": None,
+            "missing_count": None,
+            "missing_points": [],
+            "recognition_mode": None,
+        }
+
+        def report_structure(info):
+            structure_info.update(info or {})
+            detected=int(structure_info.get("detected_points") or 0)
+            missing=int(structure_info.get("missing_count") or 0)
+            mode=structure_info.get("recognition_mode")
+            mode_text="Point label" if mode=="point_label" else "page order"
+            if detected == expected_points:
+                message=f"PDF Point 구성 확인 · {detected}/{expected_points} Points 인식됨 · 분석을 시작합니다."
+            else:
+                message=f"PDF Point 구성 확인 · {detected}/{expected_points} Points 인식됨 · 누락 {missing} · 인식된 Point만 계속 분석합니다."
+            set_job(
+                job_id, status="processing", phase="analysis", progress=10,
+                message=message, total=expected_points, completed=0,
+                detected_points=detected, missing_count=missing,
+                missing_points=structure_info.get("missing_points") or [],
+                recognition_mode=mode, recognition_mode_text=mode_text,
+                failed_count=0, failed_points=[],
+            )
+
+        def report_point_failure(failure):
+            failures.append(failure)
+            processed=len(saved_ids)+len(failures)
+            detected=int(structure_info.get("detected_points") or expected_points or 1)
+            set_job(
+                job_id, phase="analysis",
+                completed=len(saved_ids), total=expected_points,
+                failed_count=len(failures), failed_points=list(failures),
+                processed=processed,
+                progress=min(99,10+int(processed/max(detected,1)*89)),
+                message=(
+                    f"{failure.get('id')} 실패 · 다음 Point 계속 분석 중 · "
+                    f"저장 {len(saved_ids)}/{expected_points} · 실패 {len(failures)}"
+                ),
+            )
+
         def save_point(r):
             if project_id in CANCELLED_PROJECTS:
                 raise RuntimeError("분석 중 프로젝트가 삭제되어 작업을 취소했습니다.")
             source_point_id=r["id"]
+
+            # Treat persistence as part of this Point. If an asset/database write fails,
+            # extract_pdfs() records this Point as failed and moves to the next Point.
             for asset_type, local_path in r.get("assets",{}).items():
                 if r2.configured:
                     lp=Path(local_path)
@@ -260,29 +308,83 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                     r.setdefault("r2_assets",{})[asset_type]=key
             if db.configured():
                 row=db.upsert_point(project_id,r)
-                r["db_id"]=str(row["id"]); r["id"]=str(row["id"])
+                r["db_id"]=str(row["id"])
+                r["id"]=str(row["id"])
                 db.upsert_analysis(r["id"],r.get("features",{}))
                 for asset_type,key in r.get("r2_assets",{}).items():
                     db.upsert_asset(r["id"],asset_type,key)
+
             RECORDS[r["id"]]=r
             saved_ids.append(r["id"])
             PROJECTS[project_id]["records"]=list(saved_ids)
-            done=len(saved_ids)
-            set_job(job_id,phase="analysis",completed=done,total=expected_points,
-                    progress=min(99,10+int(done/max(expected_points,1)*89)),
-                    message=f"Point 분석 및 이미지·결과 저장 완료 · {done}/{expected_points}")
+            processed=len(saved_ids)+len(failures)
+            detected=int(structure_info.get("detected_points") or expected_points or 1)
+            set_job(
+                job_id, phase="analysis", completed=len(saved_ids), total=expected_points,
+                failed_count=len(failures), failed_points=list(failures),
+                processed=processed,
+                progress=min(99,10+int(processed/max(detected,1)*89)),
+                message=(
+                    f"Point 분석 및 저장 완료 · 저장 {len(saved_ids)}/{expected_points}"
+                    + (f" · 실패 {len(failures)}" if failures else "")
+                ),
+            )
 
         PROJECTS[project_id]={"id":project_id,"records":[],"files":saved,"conditions":conditions}
+
         extract_pdfs(
             pdf_paths,pdir/"assets",conditions,pages_per_point,
-            roi_reference_examples=gt_examples,position_substrates=position_substrates,
-            record_callback=save_point,collect_records=False,
+            roi_reference_examples=gt_examples,
+            position_substrates=position_substrates,
+            record_callback=save_point,
+            collect_records=False,
+            point_error_callback=report_point_failure,
+            structure_callback=report_structure,
+            cancel_callback=lambda: project_id in CANCELLED_PROJECTS,
         )
+
+        detected=int(structure_info.get("detected_points") or 0)
+        missing=int(structure_info.get("missing_count") or max(0,expected_points-detected))
+        complete=(
+            len(saved_ids)==expected_points and
+            detected==expected_points and
+            not failures and
+            missing==0
+        )
+
         if not saved_ids:
-            raise ValueError("No analyzable PDF points were found.")
-        complete=len(saved_ids)==expected_points
+            final_status="failed"
+            project_status="Failed"
+            if failures:
+                final_message=(
+                    f"분석 실패 · 저장 0/{expected_points} · 실패 {len(failures)} · "
+                    f"PDF 인식 {detected}/{expected_points}. 실패 Point 원인을 확인하세요."
+                )
+            else:
+                final_message=(
+                    f"분석 가능한 Point가 저장되지 않았습니다. "
+                    f"PDF 인식 {detected}/{expected_points} · 누락 {missing}."
+                )
+        elif complete:
+            final_status="completed"
+            project_status="Ready"
+            final_message=f"모든 Point와 이미지 저장이 완료되었습니다. · PDF 인식 {detected}/{expected_points}"
+        else:
+            final_status="partial"
+            project_status="Partial"
+            parts=[f"부분 완료 · 저장 {len(saved_ids)}/{expected_points}"]
+            if failures:
+                parts.append(f"실패 {len(failures)}")
+            if missing:
+                parts.append(f"PDF 미인식/누락 {missing}")
+            parts.append(f"PDF 인식 {detected}/{expected_points}")
+            if failures:
+                parts.append("실패 Point는 건너뛰고 나머지 분석을 완료했습니다.")
+            final_message=" · ".join(parts)
+
         if db.configured():
-            db.update_project(project_id,status="Ready" if complete else "Partial")
+            db.update_project(project_id,status=project_status)
+
         PROJECTS[project_id] = {
             "id": project_id,
             "condition_count": len(conditions),
@@ -293,18 +395,40 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             "position_substrates": position_substrates,
             "substrate_type": substrate_type,
             "repeat_no": repeat_no,
+            "analysis_failures": list(failures),
+            "point_structure": dict(structure_info),
         }
-        set_job(job_id,status="completed" if complete else "partial",phase="complete" if complete else "partial",
-                progress=100 if complete else min(99,int(len(saved_ids)/max(expected_points,1)*100)),
-                completed=len(saved_ids),total=expected_points,project_id=project_id,count=len(saved_ids),
-                message="모든 Point와 이미지 저장이 완료되었습니다." if complete else f"일부 저장: {len(saved_ids)}/{expected_points} Points. PDF 구성과 조건을 확인하세요. 누락 Point를 완료로 처리하지 않았습니다.",
-                storage_warning="원본 PDF의 R2 저장에 실패했습니다. 원본 재분석은 사용할 수 없을 수 있습니다." if storage_warnings else "")
+
+        set_job(
+            job_id,
+            status=final_status,
+            phase="complete" if final_status=="completed" else ("partial" if final_status=="partial" else "error"),
+            progress=100 if final_status=="completed" else min(99,max(1,int((len(saved_ids)+len(failures))/max(expected_points,1)*100))),
+            completed=len(saved_ids), total=expected_points,
+            project_id=project_id, count=len(saved_ids),
+            detected_points=detected, missing_count=missing,
+            missing_points=structure_info.get("missing_points") or [],
+            recognition_mode=structure_info.get("recognition_mode"),
+            failed_count=len(failures), failed_points=list(failures),
+            message=final_message,
+            error=(failures[-1]["error"] if final_status=="failed" and failures else None),
+            storage_warning="원본 PDF의 R2 저장에 실패했습니다. 원본 재분석은 사용할 수 없을 수 있습니다." if storage_warnings else "",
+        )
     except Exception as e:
         traceback.print_exc()
         if db.configured():
             try: db.update_project(project_id,status="Failed")
             except Exception: pass
-        set_job(job_id,status="failed",phase="error",error=str(e),message=f"분석/저장 중단: {e}. 이미 저장된 Point는 유지됩니다.")
+        current=get_job(job_id)
+        set_job(
+            job_id,status="failed",phase="error",
+            error=str(e),
+            completed=current.get("completed",0),
+            total=current.get("total",0) or 0,
+            failed_count=current.get("failed_count",0),
+            failed_points=current.get("failed_points",[]),
+            message=f"분석/저장 중단: {e}. 이미 저장된 Point는 유지됩니다."
+        )
 
 def upload_queue_worker():
     while True:
@@ -500,46 +624,97 @@ def _r2_client():
 def _download_r2_source(key: str, destination: Path):
     client,bucket=_r2_client(); destination.parent.mkdir(parents=True,exist_ok=True); client.download_file(bucket,key,str(destination))
 
+
 def process_reanalysis_job(job_id,project_id,meta):
     try:
-        conditions=meta.get("conditions") or []; pages_per_point=int(meta.get("pages_per_point",3) or 3); files=meta.get("files") or []; keys=meta.get("source_keys") or {}; position_substrates=normalize_position_substrates(meta.get("position_substrates") or {})
-        if not files: raise ValueError("Stored source PDF metadata was not found.")
+        conditions=meta.get("conditions") or []
+        pages_per_point=int(meta.get("pages_per_point",3) or 3)
+        files=meta.get("files") or []
+        keys=meta.get("source_keys") or {}
+        position_substrates=normalize_position_substrates(meta.get("position_substrates") or {})
+        if not files:
+            raise ValueError("Stored source PDF metadata was not found.")
+
         temp=UPLOAD/"_reanalyze"/project_id
-        if temp.exists(): shutil.rmtree(temp)
+        if temp.exists():
+            shutil.rmtree(temp)
         temp.mkdir(parents=True,exist_ok=True)
         pdf_paths=[]
         for name in files:
-            key=keys.get(name) or f"projects/{project_id}/source/{name}"; local=temp/Path(name).name; _download_r2_source(key,local); pdf_paths.append(local)
+            key=keys.get(name) or f"projects/{project_id}/source/{name}"
+            local=temp/Path(name).name
+            _download_r2_source(key,local)
+            pdf_paths.append(local)
+
         expected=len(condition_point_sequence(normalize_conditions(conditions)))
-        set_job(job_id,status="processing",phase="analysis",progress=10,completed=0,total=expected,message="R2 원본 PDF로 재분석 중입니다.")
-        def point_progress(done,total,phase): set_job(job_id,phase="analysis",progress=min(75,10+int(done/max(total,1)*65)),completed=done,total=total,message=f"재분석 중 · {done}/{total}")
+        failures=[]
+        structure_info={"detected_points":None,"missing_count":None,"missing_points":[],"recognition_mode":None}
+
+        def structure_cb(info):
+            structure_info.update(info or {})
+            detected=int(structure_info.get("detected_points") or 0)
+            set_job(
+                job_id,status="processing",phase="analysis",progress=10,
+                completed=0,total=expected,detected_points=detected,
+                missing_count=int(structure_info.get("missing_count") or 0),
+                missing_points=structure_info.get("missing_points") or [],
+                recognition_mode=structure_info.get("recognition_mode"),
+                failed_count=0,failed_points=[],
+                message=f"PDF Point 구성 확인 · {detected}/{expected} Points 인식됨 · 재분석을 시작합니다."
+            )
+
+        def failure_cb(failure):
+            failures.append(failure)
+            set_job(
+                job_id,phase="analysis",failed_count=len(failures),
+                failed_points=list(failures),
+                message=f"{failure.get('id')} 실패 · 다음 Point 재분석 계속 · 실패 {len(failures)}"
+            )
+
+        def point_progress(done,total,phase):
+            set_job(
+                job_id,phase="analysis",
+                progress=min(75,10+int(done/max(total,1)*65)),
+                processed=done,total=expected,
+                failed_count=len(failures),failed_points=list(failures),
+                message=f"재분석 중 · 처리 {done}/{total} · 실패 {len(failures)}"
+            )
+
+        set_job(job_id,status="processing",phase="analysis",progress=9,completed=0,total=expected,message="PDF Point 구조를 확인하고 있습니다.")
+
         gt_examples=[]
         if db.configured():
             try:
                 gt_examples=db.get_ground_truth_examples(project_id, limit=8)
             except Exception as e:
                 print(f"[ground_truth] reanalysis context lookup failed: {e}")
-        records=extract_pdfs(pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,roi_reference_examples=gt_examples,position_substrates=position_substrates)
-        set_job(job_id,phase="database",progress=76,completed=0,total=len(records),message="재분석 결과를 기존 Point에 반영하고 있습니다.")
+
+        records=extract_pdfs(
+            pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,
+            roi_reference_examples=gt_examples,
+            position_substrates=position_substrates,
+            point_error_callback=failure_cb,
+            structure_callback=structure_cb,
+        )
+
+        set_job(job_id,phase="database",progress=76,completed=0,total=expected,message="재분석 결과를 기존 Point에 반영하고 있습니다.")
+        saved_count=0
         for i,r in enumerate(records,1):
             source_point_id=r["id"]
             if r2.configured:
                 for asset_type,local_path in list(r.get("assets",{}).items()):
-                    lp=Path(local_path); key=f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"; r2.upload_file(lp,key,"image/jpeg"); r.setdefault("r2_assets",{})[asset_type]=key
+                    lp=Path(local_path)
+                    key=f"projects/{project_id}/points/{source_point_id}/{asset_type}{lp.suffix.lower() or '.jpg'}"
+                    r2.upload_file(lp,key,"image/jpeg")
+                    r.setdefault("r2_assets",{})[asset_type]=key
             if db.configured():
-                pm=re.search(r"\d+",r["power"]); tm=re.search(r"\d+",r["time"])
+                pm=re.search(r"\d+",r["power"])
+                tm=re.search(r"\d+",r["time"])
                 row=db.get_point_by_key(project_id,int(pm.group()),int(tm.group()),int(r["wafer"]),int(r["point"])) if pm and tm else None
                 if not row:
-                    # Only a genuinely missing point is inserted. Existing points are
-                    # never upserted here, so Human verification/AI metadata cannot be
-                    # accidentally reset by a re-analysis.
                     row=db.upsert_point(project_id,r)
                     old_analysis=None
                 else:
-                    # Re-analysis may regenerate the automatic CV features, but a
-                    # previously human-verified ROI is Ground Truth and must survive
-                    # unchanged. Keep both the human label and the exact normalized
-                    # ROI/features from the prior analysis record.
                     old_analysis=db.get_analysis(str(row["id"])) if db.configured() else None
                     r["human_result"]=row.get("human_result")
                     r["human_confidence"]=row.get("human_confidence")
@@ -552,26 +727,55 @@ def process_reanalysis_job(job_id,project_id,meta):
                     old_polys=oldf.get("human_roi_polygons") or oldf.get("human_roi_polygon")
                     if old_polys:
                         newf=r.setdefault("features",{})
-                        # Preserve every Human ROI-derived field so the exact manual
-                        # annotation and its C/O Ground Truth do not move after re-analysis.
                         for k,v in oldf.items():
                             if k.startswith("human_"):
                                 newf[k]=v
                         newf["human_roi_polygons"]=oldf.get("human_roi_polygons") or ([oldf.get("human_roi_polygon")] if oldf.get("human_roi_polygon") else [])
                         newf["human_roi_polygon"]=(oldf.get("human_roi_polygon") or newf["human_roi_polygons"][0])
                         newf["human_reanalysis_preserved"]=True
-                        # Human ROI remains the displayed/authoritative result for this point.
                         if oldf.get("human_roi_rule_result"):
                             newf["result"]=oldf.get("human_roi_rule_result")
                             newf["confidence"]="Human ROI"
                             newf["residue_score"]=oldf.get("human_residue_score",newf.get("residue_score"))
-                r["db_id"]=str(row["id"]); r["id"]=str(row["id"])
+                r["db_id"]=str(row["id"])
+                r["id"]=str(row["id"])
                 db.upsert_analysis(r["db_id"],r.get("features",{}))
-                for asset_type,key in r.get("r2_assets",{}).items(): db.upsert_asset(r["db_id"],asset_type,key)
-            RECORDS[r["id"]]=r; set_job(job_id,phase="database",progress=min(99,76+int(i/max(len(records),1)*23)),completed=i,total=len(records),message=f"재분석 결과 저장 중 · {i}/{len(records)}")
-        shutil.rmtree(temp,ignore_errors=True); set_job(job_id,status="completed",phase="complete",progress=100,completed=len(records),total=len(records),project_id=project_id,count=len(records),message="기존 데이터 재분석이 완료되었습니다.")
+                for asset_type,key in r.get("r2_assets",{}).items():
+                    db.upsert_asset(r["db_id"],asset_type,key)
+
+            RECORDS[r["id"]]=r
+            saved_count+=1
+            set_job(
+                job_id,phase="database",
+                progress=min(99,76+int(i/max(len(records),1)*23)),
+                completed=saved_count,total=expected,
+                failed_count=len(failures),failed_points=list(failures),
+                message=f"재분석 결과 저장 중 · {saved_count}/{expected}"
+            )
+
+        detected=int(structure_info.get("detected_points") or 0)
+        missing=int(structure_info.get("missing_count") or max(0,expected-detected))
+        partial=bool(failures or missing or saved_count<expected)
+        final_status="partial" if partial else "completed"
+        if partial:
+            message=f"재분석 부분 완료 · 저장 {saved_count}/{expected} · 실패 {len(failures)} · PDF 인식 {detected}/{expected}"
+        else:
+            message="기존 데이터 재분석이 완료되었습니다."
+
+        shutil.rmtree(temp,ignore_errors=True)
+        set_job(
+            job_id,status=final_status,phase="partial" if partial else "complete",
+            progress=99 if partial else 100,completed=saved_count,total=expected,
+            project_id=project_id,count=saved_count,
+            detected_points=detected,missing_count=missing,
+            missing_points=structure_info.get("missing_points") or [],
+            recognition_mode=structure_info.get("recognition_mode"),
+            failed_count=len(failures),failed_points=list(failures),
+            message=message
+        )
     except Exception as e:
-        traceback.print_exc(); set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"재분석 실패: {e}")
+        traceback.print_exc()
+        set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"재분석 실패: {e}")
 
 @app.post("/api/projects/{project_id}/reanalyze")
 def reanalyze_project(project_id: str):
