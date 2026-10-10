@@ -70,7 +70,12 @@ def get_job(job_id):
 
 
 def normalize_position_substrates(value):
-    """Normalize per-position substrate settings. Unknown/missing positions default to SiCN."""
+    """Normalize explicit per-WAFER substrate overrides (W1..W9).
+
+    Missing wafers are intentionally omitted so analysis can fall back to the
+    upload's Default Substrate.  v23.7.52 treats this mapping as wafer metadata,
+    not measurement-point (P1..P9) metadata.
+    """
     allowed={"SiCN","Si","SiN","SiO2"}
     try:
         raw=json.loads(value) if isinstance(value,str) else (value or {})
@@ -78,14 +83,14 @@ def normalize_position_substrates(value):
         raise ValueError(f"position_substrates_json must be valid JSON: {e}")
     if not isinstance(raw,dict):
         raise ValueError("position_substrates_json must be an object")
-    out={str(i):"SiCN" for i in range(1,10)}
+    out={}
     for k,v in raw.items():
         try: pos=int(k)
         except Exception: continue
         if pos<1 or pos>9: continue
         vv=str(v or "SiCN")
         if vv not in allowed:
-            raise ValueError(f"Unsupported substrate for P{pos}: {vv}")
+            raise ValueError(f"Unsupported substrate for W{pos}: {vv}")
         out[str(pos)]=vv
     return out
 
@@ -208,7 +213,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
     """
     try:
         normalized = normalize_conditions(conditions)
-        sequence = condition_point_sequence(normalized, position_substrates)
+        sequence = condition_point_sequence(normalized, position_substrates, substrate_type)
         manifest = build_manifest(sequence)
         expected_points = len(manifest)
         manifest_by_id = {m["id"]: m for m in manifest}
@@ -370,6 +375,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
             pdf_paths,pdir/"assets",conditions,pages_per_point,
             roi_reference_examples=gt_examples,
             position_substrates=position_substrates,
+            default_substrate=substrate_type,
             record_callback=save_point,
             collect_records=False,
             point_error_callback=report_point_failure,
@@ -444,6 +450,7 @@ def process_upload_job(job_id, project_id, pdir, pdf_paths, saved, source_hashes
                     pdf_paths,pdir/"assets",conditions,pages_per_point,
                     roi_reference_examples=gt_examples,
                     position_substrates=position_substrates,
+                    default_substrate=substrate_type,
                     record_callback=save_point,collect_records=False,
                     point_error_callback=report_point_failure,
                     cancel_callback=lambda: project_id in CANCELLED_PROJECTS,
@@ -765,6 +772,7 @@ def process_reanalysis_job(job_id,project_id,meta):
         files=meta.get("files") or []
         keys=meta.get("source_keys") or {}
         position_substrates=normalize_position_substrates(meta.get("position_substrates") or {})
+        substrate_type=meta.get("substrate_type") or "SiCN"
         if not files:
             raise ValueError("Stored source PDF metadata was not found.")
 
@@ -826,6 +834,7 @@ def process_reanalysis_job(job_id,project_id,meta):
             pdf_paths,temp/"assets",conditions,pages_per_point,point_progress,
             roi_reference_examples=gt_examples,
             position_substrates=position_substrates,
+            default_substrate=substrate_type,
             point_error_callback=failure_cb,
             structure_callback=structure_cb,
         )

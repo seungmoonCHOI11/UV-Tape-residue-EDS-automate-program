@@ -1,3 +1,17 @@
+# v23.7.52 Verification hardening + engineering scope split
+
+This release hardens Verification against legacy/malformed point payloads and restructures engineering comparison around the actual evaluation scope.
+
+- MAIN engineering comparison = **W1 Corner / W4 Edge / W5 Middle only**.
+- **W9 is Reference / Other** and is excluded from MAIN ranking and 27-point coverage.
+- W9 is grouped by **substrate type**, so future **W9 Si** data is compared only with W9 Si data.
+- New Analysis substrate assignment is now explicitly **wafer-based** (W1..W9), not P1..P9-based.
+- Verification normalizes legacy point/features/assets data and is wrapped in a render error boundary so one malformed old row does not take down the whole app.
+- Engineering Summary PPT/PDF now includes a separate W9 Reference / Other page.
+- Classification remains: **C >= 2.40x AND O >= 3.00x = Residue**; Human Verified has priority.
+
+**Start with [START_HERE_V23.7.52.md](START_HERE_V23.7.52.md).**
+
 # v23.7.51 Verification hotfix
 
 This version fixes a client-side Verification crash caused by legacy/malformed result values while preserving the v23.7.50 engineering comparison/report features.

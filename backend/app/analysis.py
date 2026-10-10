@@ -45,12 +45,13 @@ def normalize_conditions(conditions):
     return normalized
 
 
-def condition_point_sequence(conditions, position_substrates=None):
+def condition_point_sequence(conditions, position_substrates=None, default_substrate="SiCN"):
     """Create the exact Point sequence implied by the user-entered conditions.
 
-    position_substrates maps point/position number to the physical substrate used at
-    that location. It is metadata only; the existing CV/EDS ratio calculation remains
-    unchanged. Missing positions default to SiCN for backward compatibility.
+    position_substrates maps WAFER position number (W1..W9) to the physical substrate.
+    W1/W4/W5 are the primary Corner/Edge/Middle engineering locations; W9 can be
+    used as a separate reference substrate (for example Si). Missing wafer mappings
+    fall back to default_substrate. This metadata does not change CV/EDS calculations.
     """
     position_substrates = {str(k): str(v) for k, v in (position_substrates or {}).items()}
     seq = []
@@ -64,7 +65,7 @@ def condition_point_sequence(conditions, position_substrates=None):
                     "wafer": wafer,
                     "point": point,
                     "zone": ZONE_MAP.get(point, "Unknown"),
-                    "substrate_type": position_substrates.get(str(point), "SiCN"),
+                    "substrate_type": position_substrates.get(str(wafer), str(default_substrate or "SiCN")),
                 })
     return seq
 
@@ -165,6 +166,7 @@ def extract_pdfs(
     progress_callback=None,
     roi_reference_examples=None,
     position_substrates=None,
+    default_substrate="SiCN",
     record_callback=None,
     collect_records=True,
     point_error_callback=None,
@@ -185,7 +187,7 @@ def extract_pdfs(
     if pages_per_point < 1:
         raise ValueError("pages_per_point must be at least 1")
     conditions = normalize_conditions(conditions)
-    sequence = condition_point_sequence(conditions, position_substrates)
+    sequence = condition_point_sequence(conditions, position_substrates, default_substrate)
     pdf_paths = [Path(p) for p in pdf_paths]
     groups = _build_point_groups(pdf_paths, pages_per_point)
     if not groups:

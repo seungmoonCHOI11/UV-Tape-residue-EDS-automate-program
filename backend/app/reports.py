@@ -1,6 +1,7 @@
 from collections import defaultdict
 from pathlib import Path
 import re
+import textwrap
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -96,6 +97,29 @@ def engineering_summary(records):
     return rows
 
 
+
+
+def _substrate(p):
+    f=p.get("features") or {}
+    value=p.get("substrate_type") or (f.get("substrate_type") if isinstance(f,dict) else None) or "SiCN"
+    return str(value)
+
+
+def reference_summary(records, wafer=9):
+    """Keep W9/reference substrates separate from the W1/W4/W5 MAIN ranking."""
+    groups=defaultdict(list)
+    for p in records:
+        if int(p.get("wafer") or 0)!=int(wafer):
+            continue
+        groups[(_condition_key(p),_substrate(p))].append(p)
+    rows=[]
+    for (condition,substrate),pts in groups.items():
+        r=sum(_result(p)=="Residue" for p in pts)
+        n=sum(_result(p)=="Non-residue" for p in pts)
+        a=len(pts)-r-n
+        rows.append({"condition":condition,"substrate":substrate,"points":len(pts),"residue":r,"non":n,"ambiguous":a,"residue_rate":_rate(r,len(pts)) if pts else 0.0,"ambiguous_rate":_rate(a,len(pts)) if pts else 0.0,"verified":sum(bool(p.get("human_result")) for p in pts)})
+    return sorted(rows,key=lambda x:(x["substrate"],_num(x["condition"].split("/")[0]),_num(x["condition"].split("/")[1])))
+
 def _ppt_title(slide,title,subtitle=None):
     tb=slide.shapes.add_textbox(Inches(.42),Inches(.25),Inches(12.45),Inches(.45))
     p=tb.text_frame.paragraphs[0];p.text=title;p.font.size=Pt(23);p.font.bold=True;p.font.color.rgb=NAVY
@@ -127,6 +151,7 @@ def _location_text(loc):
 
 def export_engineering_ppt(records,out):
     rows=engineering_summary(records)
+    refs=reference_summary(records,9)
     prs=Presentation();prs.slide_width=Inches(13.333);prs.slide_height=Inches(7.5);blank=prs.slide_layouts[6]
 
     # Slide 1: executive condition comparison
@@ -179,18 +204,30 @@ def export_engineering_ppt(records,out):
         "Primary comparison: Residue incidence = Residue points / measured points.",
         "Spatial robustness: compare W1 Corner, W4 Edge, W5 Middle and report max-min residue-rate spread.",
         "Ambiguous points are reported separately and are not silently counted as Non-residue.",
-        "Coverage assumes the planned engineering set is W1/W4/W5 x P1-P9 = 27 points per condition.",
+        "Coverage assumes the MAIN engineering set is W1/W4/W5 x P1-P9 = 27 points per condition; W9 is excluded.",
+        "W9/reference substrates (for example Si) are compared only against the same W9 substrate group and never mixed into MAIN ranking.",
     ]
     y=1.5
     for b in bullets:
         box=s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,Inches(.7),Inches(y),Inches(11.95),Inches(.62));box.fill.solid();box.fill.fore_color.rgb=RGBColor(249,251,253);box.line.color.rgb=MID
         tx=s.shapes.add_textbox(Inches(.9),Inches(y+.13),Inches(11.55),Inches(.35));p=tx.text_frame.paragraphs[0];p.text=b;p.font.size=Pt(10);p.font.color.rgb=NAVY
         y+=.82
+    # Slide 5: W9 reference datasets, separated by substrate
+    s=prs.slides.add_slide(blank);_ppt_title(s,"W9 Reference / Other","Excluded from MAIN ranking; compare W9 datasets by substrate type (e.g., Si vs Si only)")
+    if refs:
+        data=[["Condition","W9 substrate","N","Residue n (%)","Non n (%)","Ambiguous n (%)","Human verified"]]
+        for x in refs:
+            data.append([x["condition"],x["substrate"],x["points"],f"{x['residue']} ({x['residue_rate']:.1f}%)",f"{x['non']} ({_rate(x['non'],x['points']):.1f}%)",f"{x['ambiguous']} ({x['ambiguous_rate']:.1f}%)",f"{x['verified']}/{x['points']}"])
+        _ppt_table(s,data,.5,1.45,12.25,min(5.3,.58*len(data)+.5),font_size=8)
+    else:
+        note=s.shapes.add_textbox(Inches(.7),Inches(1.55),Inches(11.8),Inches(.8));p=note.text_frame.paragraphs[0];p.text="No W9 reference data yet. Future W9 Si uploads will appear here and will be compared only with W9 Si datasets.";p.font.size=Pt(12);p.font.color.rgb=NAVY
+
     prs.save(out);return out
 
 
 def export_engineering_pdf(records,out):
     rows=engineering_summary(records)
+    refs=reference_summary(records,9)
     c=canvas.Canvas(str(out),pagesize=landscape(A4));W,H=landscape(A4)
     def title(t,sub):
         c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica-Bold",18);c.drawString(28,H-32,t)
@@ -239,12 +276,27 @@ def export_engineering_pdf(records,out):
         "Current rule: "+CLASSIFICATION_RULE_TEXT,
         "Residue incidence is the primary condition KPI. Ambiguous points are reported separately.",
         "Spatial robustness is evaluated using W1 Corner, W4 Edge, W5 Middle and the max-min spread.",
-        "Planned complete set: 27 points per condition (3 wafer locations x 9 measurement points).",
+        "Planned MAIN complete set: 27 points per condition (W1/W4/W5 x P1-P9). W9 is excluded from MAIN coverage.",
+        "W9/reference substrates are reported separately by substrate type and are never mixed into the MAIN condition rate.",
     ]
     y=H-92
     for b in bullets:
-        c.setFillColorRGB(.97,.98,.99);c.roundRect(42,y-36,W-84,32,5,fill=1,stroke=0)
-        c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica",9);c.drawString(55,y-24,"- "+b[:135]);y-=48
+        lines=textwrap.wrap("- "+b,width=122)[:2]
+        box_h=42 if len(lines)>1 else 32
+        c.setFillColorRGB(.97,.98,.99);c.roundRect(42,y-box_h,W-84,box_h,5,fill=1,stroke=0)
+        c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica",8.5)
+        for li,line in enumerate(lines):
+            c.drawString(55,y-21-li*11,line)
+        y-=box_h+14
+    c.showPage()
+    title("W9 Reference / Other","Excluded from MAIN ranking; W9 datasets are separated by substrate type")
+    data=[["Condition","W9 substrate","N","Residue","Non","Ambiguous","Verified"]]
+    for x in refs:
+        data.append([x["condition"],x["substrate"],x["points"],f"{x['residue']} ({x['residue_rate']:.1f}%)",f"{x['non']} ({_rate(x['non'],x['points']):.1f}%)",f"{x['ambiguous']} ({x['ambiguous_rate']:.1f}%)",f"{x['verified']}/{x['points']}"])
+    if len(data)>1:
+        table(data,28,H-82,[130,90,45,95,95,95,70],row_h=28,fs=6.7)
+    else:
+        c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica",10);c.drawString(42,H-98,"No W9 reference data yet. Future W9 Si data will be grouped here separately.")
     c.save();return out
 
 
