@@ -9,26 +9,24 @@ from fastapi.testclient import TestClient
 from app import main
 
 
-class FakeDB:
+from test_v23747_persistence import FakeDB as PersistenceFakeDB, FakeR2
+
+class FakeDB(PersistenceFakeDB):
+    """Updated fixture for the manifest/read-after-write contract in v23.7.47+."""
     def __init__(self):
+        super().__init__()
         self.project={"id":"project","description":"{}","status":"Processing"}
-        self.points=[]; self.assets=[]
     def configured(self): return True
     def get_project(self,pid): return dict(self.project)
     def get_latest_project(self): return self.get_project("project")
     def update_project(self,pid,**values): self.project.update(values)
     def get_ground_truth_examples(self,*a,**kw): return []
-    def upsert_point(self,pid,r):
-        self.points.append(r["id"])
-        return {"id":"db-"+r["id"]}
-    def upsert_analysis(self,*a): pass
-    def upsert_asset(self,*a): self.assets.append(a)
 
 
 class SingleUploadTests(unittest.TestCase):
     def setUp(self):
         self.db=FakeDB();self.uploads=[]
-        self.r2=SimpleNamespace(configured=True,upload_file=lambda *a:self.uploads.append(a))
+        self.r2=FakeR2()
         self.patches=[patch.object(main,"db",self.db),patch.object(main,"r2",self.r2)]
         for p in self.patches:p.start()
         main.JOBS.clear();main.PROJECTS.clear();main.RECORDS.clear();main.CANCELLED_PROJECTS.clear()
@@ -49,7 +47,8 @@ class SingleUploadTests(unittest.TestCase):
                     point_error_callback({"id":"150W_30s_W1_P2","wafer":1,"point":2,"stage":"worker","error":"worker interrupted"})
                     continue
                 try:
-                    record_callback({"id":f"p{i}","features":{},"assets":{"sem":self.path/"sem.jpg"}})
+                    asset=self.path/"sem.jpg";asset.write_bytes(b"fixture")
+                    record_callback({"id":f"150W_30s_W1_P{i+1}","power":"150W","time":"30s","wafer":1,"point":i+1,"features":{},"assets":{k:str(asset) for k in ("sem","eds_map","c_map","o_map")}})
                     saved_before+=1
                 except Exception as exc:
                     point_error_callback({"id":f"150W_30s_W1_P{i+1}","wafer":1,"point":i+1,"stage":"save","error":str(exc)})

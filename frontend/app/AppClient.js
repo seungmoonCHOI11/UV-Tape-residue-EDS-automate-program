@@ -1,5 +1,7 @@
 "use client";
 import {Component,useEffect,useRef,useState} from "react";
+import ResearchTools from "./ResearchTools";
+import {DEFAULT_FILTERS} from "./researchModel.mjs";
 import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2,MousePointer2,RotateCcw} from "lucide-react";
 
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
@@ -66,6 +68,7 @@ function parseSelection(value){
 export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),conditionInputs=useRef({});
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>({"1":"SiCN","4":"SiCN","5":"SiCN","9":"Si"})),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]),[analysisModalOpen,setAnalysisModalOpen]=useState(false);
+ const [researchFilters,setResearchFilters]=useState(DEFAULT_FILTERS);
  const [queueLoaded,setQueueLoaded]=useState(false);
  const uploadingRef=useRef(false);
  const activeAnalysis=analysisQueue.some(isActiveJob);
@@ -256,8 +259,8 @@ async function reanalyzeProject(){if(!project)return notify("현재 프로젝트
 function goNav(n){if(n==="Verification"){openVerification();return}setVerificationOpen(false);setPage(n)}
  async function exportFile(kind){if(!project)return notify("먼저 실제 PDF를 업로드해 project를 생성하세요.");const r=await fetch(`${API}/api/projects/${project}/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=`point_report.${kind==="ppt"?"pptx":kind}`;a.click();URL.revokeObjectURL(u);notify(`${kind.toUpperCase()} export 완료`)}
  async function exportWorkspaceFile(kind){if(!points.length)return notify("먼저 분석 데이터를 추가하세요.");const r=await fetch(`${API}/api/workspace/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Engineering Summary export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=kind==="summary-ppt"?"UV_Tape_Engineering_Summary.pptx":"UV_Tape_Engineering_Summary.pdf";a.click();URL.revokeObjectURL(u);notify("Engineering Summary export 완료")}
- if(!mounted)return <InitialLoading/>;
- if(initialLoading)return <InitialLoading/>;
+ if(!mounted)return <div className="app"><main><InitialLoading/></main></div>;
+ if(initialLoading)return <div className="app"><main><InitialLoading/></main></div>;
  const p=points[idx],filtered=points.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
  return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition View",Activity],["Condition Compare",GitCompare],["Reports",FileText],["Delete Data",Trash2]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={13}/>{activeAnalysis?`분석 진행 ${analysisQueue[0]?.progress||0}%`:"최근 분석 상태"}</button>}{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy||activeAnalysis}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={goNav}/>}
@@ -266,7 +269,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  {page==="AI Analysis"&&<AIAnalysis points={points} analysis={aiAnalysis} busy={aiBusy} run={runProjectAI}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
  {page==="Condition View"&&<ConditionView points={points} selected={conditionView} setSelected={setConditionView} go={goNav}/>}
- {page==="Condition Compare"&&<Compare points={points} selected={compareConditions} setSelected={setCompareConditions}/>} {page==="Reports"&&<Reports exportFile={exportFile} exportWorkspaceFile={exportWorkspaceFile} project={project} points={points}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/></VerificationErrorBoundary>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
+ {page==="Condition Compare"&&<ResearchTools mode="compare" points={points} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Reports"&&<ResearchTools mode="reports" points={points} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={points} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi}/></VerificationErrorBoundary>} {msg&&<div className="toast"><Check size={14}/>{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">Project data loading</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>Loading project data</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -336,8 +339,8 @@ function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCo
  const addFiles=fs=>{if(fs?.length===1)setConditionFile(0,fs[0]);else if(fs?.length>1)window.alert("PDF는 한 번에 하나만 선택하세요.")};
  return <div className="content"><div className="intro"><div><h2>New Analysis</h2><p>PDF 하나를 업로드하고 백그라운드로 분석합니다. 다음 PDF는 현재 작업이 끝난 뒤 등록하세요.</p></div></div><section className="panel"><div className="panelHead"><b>1. EDS source upload</b><small>PDF · drag & drop supported</small></div><div className={`drop ${dragging?"dragging":""}`} onClick={()=>conditionInputs.current[0]?.click()} onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);addFiles(e.dataTransfer.files)}}><FileUp size={30}/><b>{dragging?"여기에 PDF를 놓으세요":"EDS PDF를 끌어다 놓거나 클릭해서 선택하세요"}</b><small>PDF 1개 · 업로드 완료 후 다른 메뉴로 이동할 수 있습니다.</small><input ref={el=>{conditionInputs.current[0]=el}} hidden type="file" accept=".pdf,application/pdf" onChange={e=>addFiles(e.target.files)}/></div>{files.map((f,i)=><div className="file" key={`${f.name}-${i}`}><FileText size={14}/><span>{f.name}</span><small>{(f.size/1024/1024).toFixed(1)} MB</small><button className="iconBtn" onClick={()=>updateCondition(0,"file",null)}><Trash2 size={13}/></button></div>)}</section><section className="panel samplePanel"><div className="panelHead"><div><b>2. Sample / Substrate</b><small>선택한 PDF에 적용됩니다. Wafer별 기판을 지정합니다. W1/W4/W5는 main 위치, W9는 reference/other로 분리 집계합니다.</small></div></div><div className="sampleControls"><label>Category<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>Default Substrate<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">Wafer / Substrate</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>W{pos}<select value={positionSubstrates[String(pos)]||substrateType||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section><section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>3. Analysis conditions</b><small>한 PDF에 여러 조건이 있으면 PDF에 나오는 순서대로 추가하세요.</small></div><button className="secondary" onClick={addCondition}><Plus size={13}/> Add condition</button></div></div>{conditions.map((c,i)=><div className="conditionRow" key={i}><div className="conditionTitle">Condition {i+1}</div><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label><div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div><div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>{conditions.length>1&&<button className="iconBtn" onClick={()=>{if(i===0&&conditions[0].file)updateCondition(1,"file",conditions[0].file);removeCondition(i)}}><Trash2 size={14}/></button>}</div>)}<div className="mappingSummary"><span>Pages / Point <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>Total Points: {expectedPoints()}</b><span>Total Pages: {expectedPoints()*pagesPerPoint}</span></div></section><div className="actions"><button className="primary" disabled={busy} onClick={upload}><Play size={14}/>{busy?"현재 작업 처리 중...":"Upload + Analyze (PDF 1개)"}</button></div></div>}
 function elementRatioDisplayScore(ratio,strong){
- const x=Number(ratio);
- if(!Number.isFinite(x))return null;
+ const x=finiteNumber(ratio);
+ if(x==null)return null;
  if(x<2)return Math.max(0,Math.min(59,(x/2)*59));
  if(x<strong)return 60+((x-2)/(strong-2))*10;
  const equivalent=x*(3/strong);
@@ -348,11 +351,11 @@ function elementRatioDisplayScore(ratio,strong){
 function coRatioDisplayScore(cRatio,oRatio){
  const c=elementRatioDisplayScore(cRatio,2.40), o=elementRatioDisplayScore(oRatio,3.00);
  if(c==null||o==null)return null;
- return Math.round(Math.min(c,o));
+ return Math.round(Math.min(c,o)*10)/10;
 }
 function coRatioRuleResult(cRatio,oRatio){
- const c=Number(cRatio), o=Number(oRatio);
- if(!Number.isFinite(c)||!Number.isFinite(o))return null;
+ const c=finiteNumber(cRatio), o=finiteNumber(oRatio);
+ if(c==null||o==null)return null;
  if(c>=2.40 && o>=3.00)return "Residue";
  if(c>=2.00 && o>=2.00)return "Ambiguous";
  return "Non-residue";
@@ -401,13 +404,11 @@ function verificationResult(x){return pointClass(x)}
 function resultCssClass(v){return pointClass({human_result:v,features:{}}).toLowerCase().replace(/[^a-z]+/g,"-")}
 
 function displayScore(p){
- const f=p?.features||{}, ratios=currentRatios(p);
- const live=coRatioDisplayScore(ratios.c,ratios.o);
+ if(Object.prototype.hasOwnProperty.call(p||{},"evaluation_score"))return p.evaluation_score;
+ const ratios=currentRatios(p),live=coRatioDisplayScore(ratios.c,ratios.o);
  if(live!=null)return live;
- const raw=typeof f.residue_score==="number"?f.residue_score:(typeof p?.residue_score==="number"?p.residue_score:null);
- if(raw==null)return null;
- if(f.score_calibrated===true || f.score_calibration_method) return Math.max(0,Math.min(100,Math.round(raw*100)));
- return Math.max(0,Math.min(100,Math.round(raw*100-15)));
+ const f=p?.features||{},raw=typeof f.residue_score==="number"?f.residue_score:p?.residue_score;
+ return typeof raw==="number"&&Number.isFinite(raw)?Math.round((raw<=1.000001?raw*100:raw)*10)/10:null;
 }
 
 function scoreClass(score){return score==null?"unknown":score>=70?"high":score>=60?"review":"low"}
@@ -427,21 +428,22 @@ function dynamicAsset(p,type){
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
- const humanRoiSaved=hasHumanROI(f), liveRatios=currentRatios(p);
+ const hasHumanROIFlag=hasHumanROI(f), liveRatios=currentRatios(p);
+ const humanROIActive=hasHumanROIFlag;
  const cRatio=liveRatios.c, oRatio=liveRatios.o;
- const score=humanRoiSaved&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(humanRoiSaved&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
- const coverage=humanRoiSaved&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
- const maskQuality=humanRoiSaved&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
+ const score=humanROIActive&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(humanROIActive&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
+ const coverage=humanROIActive&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
+ const maskQuality=humanROIActive&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
  const resultLabel=pointClass(p);
- const confidence=humanRoiSaved?"Human ROI":safeText(f.confidence||p?.confidence,"-");
+ const confidence=humanROIActive?"Human ROI":safeText(f.confidence||p?.confidence,"-");
  const maps={
    // If Human ROI is already saved, never fall back to the old AI/CV overlay.
    // While the fresh Human ROI overlay is loading, show the original image/map
    // instead of briefly displaying the stale AI ROI.
-   sem:humanRoiSaved?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
+   sem:humanROIActive?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
    eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
-   c:humanRoiSaved?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
-   o:humanRoiSaved?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
+   c:humanROIActive?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
+   o:humanROIActive?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
  const ratioClass=(x,strong)=>x==null?"neutral":x>=strong?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
@@ -454,10 +456,10 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
-    <div className="verificationImages"><Visual title={humanRoiSaved?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
+    <div className="verificationImages"><Visual title={humanROIActive?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
     <div className="v21ElementStrip">
-      <div className="focusPanel"><b>{humanRoiSaved?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={humanRoiSaved?"C map with Human ROI":"C map with ROI"}/></div>
-      <div className="focusPanel"><b>{humanRoiSaved?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={humanRoiSaved?"O map with Human ROI":"O map with ROI"}/></div>
+      <div className="focusPanel"><b>{humanROIActive?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={humanROIActive?"C map with Human ROI":"C map with ROI"}/></div>
+      <div className="focusPanel"><b>{humanROIActive?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={humanROIActive?"O map with Human ROI":"O map with ROI"}/></div>
     </div>
     <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
    </div>
@@ -472,12 +474,12 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{humanRoiSaved&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio,2.40)}`} style={{color:cRatio==null?'#667386':cRatio>=2.40?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{humanRoiSaved&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio,3.00)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{humanROIActive&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio,2.40)}`} style={{color:cRatio==null?'#667386':cRatio>=2.40?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{humanROIActive&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio,3.00)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
     <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C ≥ 2.40× + O ≥ 3.00×</strong>이면 Residue, 둘 다 2.00× 이상이지만 둘 중 하나라도 Residue 기준에 못 미치면 Ambiguous로 계산합니다.</span></div>
-    <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{humanRoiSaved?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
-    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(humanRoiSaved?f.human_roi_area_px:f.roi_area_px)?`${(humanRoiSaved?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{humanRoiSaved&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{humanRoiSaved&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
+    <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{humanROIActive?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
+    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(humanROIActive?f.human_roi_area_px:f.roi_area_px)?`${(humanROIActive?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{humanROIActive&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{humanROIActive&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
     <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: 둘 중 하나라도 &lt;2.00× = Non-residue, C 2.00–2.39× 또는 O 2.00–2.99× = Ambiguous, C ≥2.40× + O ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
    </section>
   </div>

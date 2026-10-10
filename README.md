@@ -1,7 +1,12 @@
-## v23.7.53 hotfix
-- Fixed Verification `Cannot access before initialization` crash.
-- Centered initial loading screen on full viewport.
-- Retains v23.7.52 W1/W4/W5 MAIN + W9 Reference/Other compare logic.
+# Current release: v23.8.0
+
+**먼저 [START_HERE_V23.8.0.md](START_HERE_V23.8.0.md)를 읽으세요.**
+
+v23.7.52 기반: 조건·위치 비교, 공통 조건 동일 가중 비교, Point별 PPTX/PDF 및 원본 SEM 갤러리. Backend와 frontend 모두 재배포해야 합니다.
+
+아래는 이전 버전 기록입니다.
+
+---
 
 # v23.7.52 Verification hardening + engineering scope split
 

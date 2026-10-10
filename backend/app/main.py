@@ -12,7 +12,7 @@ from .analysis import extract_pdfs, normalize_conditions, condition_point_sequen
 from .ai import ai_available
 from .r2_storage import r2
 from .persistence import persist_point, reconcile_project, build_manifest, PersistenceError
-from .classification import C_RESIDUE_RATIO, O_RESIDUE_RATIO, MODERATE_RATIO, co_ratio_score, co_rule_result, CLASSIFICATION_RULE_TEXT
+from .classification import C_RESIDUE_RATIO, O_RESIDUE_RATIO, MODERATE_RATIO, co_ratio_score, co_rule_result, CLASSIFICATION_RULE_TEXT, record_result, record_score
 from . import db
 
 load_dotenv()
@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.7.50")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.8.0")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -148,6 +148,8 @@ def public_record(r: dict) -> dict:
             out["cv_result"]=features.get("result")
     out["assets"]={k:f"/api/assets/{quote(r['id'],safe='')}/{quote(k,safe='')}" for k in r.get("assets",{})}
     out.pop("r2_assets", None)
+    out["evaluation_result"]=record_result(out)
+    out["evaluation_score"]=record_score(out)
     return out
 
 def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: dict = None) -> dict:
@@ -156,7 +158,7 @@ def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: 
     features = (analysis or {}).get("features") or {}
     if analysis:
         features = {**features,
-            "residue_score": analysis.get("residue_score") if analysis.get("residue_score") is not None else 0,
+            "residue_score": analysis.get("residue_score"),
             "c_enrichment": analysis.get("c_enrichment") if analysis.get("c_enrichment") is not None else 0,
             "o_enrichment": analysis.get("o_enrichment") if analysis.get("o_enrichment") is not None else 0,
             "c_coverage": analysis.get("c_coverage") if analysis.get("c_coverage") is not None else 0,
@@ -170,6 +172,7 @@ def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: 
     rid = str(row["id"])
     return {
         "id": rid,
+        "project_id": project_id,
         "power": f"{row['power']}W",
         "time": f"{row['time_sec']}s",
         "wafer": row["wafer"],
@@ -184,7 +187,7 @@ def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: 
         "ai_confidence": row.get("ai_confidence"),
         "ai_rationale": row.get("ai_rationale"),
         "confidence": features.get("confidence"),
-        "residue_score": features.get("residue_score", 0),
+        "residue_score": features.get("residue_score"),
         "features": features,
         "assets": assets,
         "r2_assets": assets,
@@ -1471,7 +1474,7 @@ def workspace_records_for_export():
         for pid,proj in PROJECTS.items():
             for rid in proj.get("records") or []:
                 if rid in RECORDS:
-                    out.append(RECORDS[rid])
+                    out.append({**RECORDS[rid],"project_id":pid})
         return out
     packed=db.get_all_points_with_data()
     out=[]
@@ -1556,3 +1559,8 @@ def json_export(project_id:str):
     if r2.configured:
         r2.upload_file(out,f"projects/{project_id}/reports/{out.name}","application/json")
     return FileResponse(out,filename=out.name,media_type="application/json")
+
+
+# Research exports use the shared analysis slot and an isolated renderer.
+from .report_api import install_report_routes
+install_report_routes(app, workspace_records_for_export, ANALYSIS_SLOT, OUTPUT)

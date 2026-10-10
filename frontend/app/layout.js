@@ -1,3 +1,5 @@
+import "@fontsource/noto-sans-kr/400.css";
+import "@fontsource/noto-sans-kr/600.css";
 import "./globals.css";
 
 export const metadata = {

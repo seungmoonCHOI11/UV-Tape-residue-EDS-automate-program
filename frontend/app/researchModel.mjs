@@ -1,0 +1,23 @@
+export const LOCATIONS={1:'Corner',4:'Edge',5:'Middle',9:'Reference'};
+export const CLASSES=['Residue','Non-residue','Ambiguous'];
+export const BANDS=['0-60','60-70','70-80','80-90','90-100','missing'];
+export const BAND_LABELS={'0-60':'0–<60','60-70':'60–<70','70-80':'70–<80','80-90':'80–<90','90-100':'90–100',missing:'점수 없음'};
+export const DEFAULT_FILTERS={scope:'main',conditions:null,substrates:null,batches:null,wafers:null,review:'all',basis:'final',results:null,score_bands:null};
+export const natural=(a,b)=>String(a).localeCompare(String(b),'en',{numeric:true});
+export const condition=p=>`${p.power||'-'} / ${p.time||'-'}`;
+export const substrate=p=>p.substrate_type||p.features?.substrate_type||'Unknown';
+export const decision=(p,basis='final')=>basis==='auto'?p._auto:p._final;
+export const band=p=>p._score==null?'missing':p._score<60?'0-60':p._score<70?'60-70':p._score<80?'70-80':p._score<90?'80-90':'90-100';
+export const fmt=v=>v==null?'—':Number(v).toFixed(1);
+export const pct=v=>v==null?'—':`${fmt(v)}%`;
+export function select(points,f){return [...new Map(points.map(p=>[p.id,p])).values()].filter(p=>{const w=Number(p.wafer);return (f.scope!=='main'||[1,4,5].includes(w))&&(f.scope!=='reference'||w===9)&&(f.scope!=='other'||![1,4,5,9].includes(w))&&(f.conditions===null||f.conditions.includes(condition(p)))&&(f.substrates===null||f.substrates.includes(substrate(p)))&&(f.batches===null||f.batches.includes(p.project_id||'unknown'))&&(f.wafers===null||f.wafers.includes(w))&&(f.review!=='verified'||p._human)&&(f.review!=='unverified'||!p._human)&&(f.results===null||f.results.includes(decision(p,f.basis)))&&(f.score_bands===null||f.score_bands.includes(band(p)))}).sort((a,b)=>natural(condition(a),condition(b))||natural(substrate(a),substrate(b))||Number(a.wafer)-Number(b.wafer)||Number(a.point)-Number(b.point)||natural(a.project_id,b.project_id)||natural(a.id,b.id))}
+export function stats(a,basis='final'){const n=a.length,r=a.filter(p=>decision(p,basis)==='Residue').length,amb=a.filter(p=>decision(p,basis)==='Ambiguous').length;return {n,residue:r,non:n-r-amb,ambiguous:amb,rate:n?100*r/n:null,upper:n?100*(r+amb)/n:null,verified:a.filter(p=>p._human).length}}
+export function summarize(points,f){return [...new Set(points.map(substrate))].sort(natural).map(sub=>{
+ const pts=points.filter(p=>substrate(p)===sub);const ws=f.scope==='main'?[1,4,5].filter(w=>f.wafers===null||f.wafers.includes(w)):[...new Set(pts.map(p=>Number(p.wafer)))].sort((a,b)=>a-b);
+ const conditions=[...new Set(pts.map(condition))].sort(natural).map(key=>{const a=pts.filter(p=>condition(p)===key),batches=new Set(a.map(p=>p.project_id||'unknown'));const slots=new Set(a.filter(p=>Number(p.point)>=1&&Number(p.point)<=9).map(p=>`${p.project_id||'unknown'}|${p.wafer}|${p.point}`));const cells=ws.map(w=>({wafer:w,points:a.filter(p=>Number(p.wafer)===w),...stats(a.filter(p=>Number(p.wafer)===w),f.basis)}));const rates=cells.filter(c=>c.n).map(c=>c.rate);return {key,points:a,cells,...stats(a,f.basis),slots:slots.size,expected:9*ws.length*batches.size,duplicates:a.length-new Set(a.map(p=>`${p.project_id||'unknown'}|${p.wafer}|${p.point}`)).size,batches:batches.size,spread:rates.length===ws.length&&rates.length>1?Math.max(...rates)-Math.min(...rates):null}});
+ const common=conditions.filter(c=>c.cells.every(x=>x.n));const positions=ws.map(w=>{const cs=common.map(c=>c.cells.find(x=>x.wafer===w));return {wafer:w,...stats(pts.filter(p=>Number(p.wafer)===w),f.basis),balanced:cs.length?cs.reduce((s,c)=>s+c.rate,0)/cs.length:null,balancedUpper:cs.length?cs.reduce((s,c)=>s+c.upper,0)/cs.length:null,common:cs.length}});
+ return {substrate:sub,points:pts,conditions,positions,common:common.map(c=>c.key)};
+})}
+export function galleryGroups(points,f,opts){const m=new Map();for(const p of points){const key=[substrate(p),decision(p,f.basis),opts.group_conditions?condition(p):'All selected conditions',opts.group_scores?band(p):'All scores'];const s=JSON.stringify(key);if(!m.has(s))m.set(s,{key,points:[]});m.get(s).points.push(p)}return [...m.values()].sort((a,b)=>natural(a.key[0],b.key[0])||natural(a.key[1],b.key[1])||natural(a.key[2],b.key[2])||BANDS.indexOf(a.key[3])-BANDS.indexOf(b.key[3]))}
+export const csvCell=v=>'"'+(/^[=+@\-\t\r]/.test(String(v??''))?"'":'')+String(v??'').replaceAll('"','""')+'"';
+export function csv(points,f){const rows=[['Point ID','Batch','Condition','Wafer','Location','Point','Substrate','Result','Human verified','Score','Score band'],...points.map(p=>[p.id,p.project_id,condition(p),p.wafer,LOCATIONS[p.wafer]||'Other',p.point,substrate(p),decision(p,f.basis),p._human,p._score,band(p)])];return '\uFEFF'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n')}

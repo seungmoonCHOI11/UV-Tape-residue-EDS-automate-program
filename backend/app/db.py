@@ -142,12 +142,21 @@ def get_latest_project():
     return rows[0] if rows else None
 
 
+def _paged(query, page_size=500):
+    """Fetch all rows rather than accepting Supabase's per-response row cap."""
+    out=[]
+    for start in range(0, 1000000, page_size):
+        rows=query.range(start,start+page_size-1).execute().data or []
+        out.extend(rows)
+        if len(rows)<page_size:return out
+    raise RuntimeError("Dataset exceeds the supported pagination bound.")
+
+
 def get_points_with_data(project_id: str):
     """Load points, latest analysis, and assets with bounded DB requests."""
     client = get_client()
-    rows = (client.table("points").select("*").eq("project_id", project_id)
-            .order("power").order("time_sec").order("wafer").order("point")
-            .execute().data or [])
+    rows = _paged(client.table("points").select("*").eq("project_id", project_id)
+            .order("power").order("time_sec").order("wafer").order("point").order("id"))
     if not rows:
         return []
     ids = [str(r["id"]) for r in rows]
@@ -155,15 +164,14 @@ def get_points_with_data(project_id: str):
     asset_map = {}
     for start in range(0, len(ids), 100):
         chunk = ids[start:start+100]
-        analyses = (client.table("analysis_results").select("*")
-                    .in_("point_id", chunk).order("created_at", desc=True)
-                    .execute().data or [])
+        analyses = _paged(client.table("analysis_results").select("*")
+                    .in_("point_id", chunk).order("created_at", desc=True).order("id"))
         for a in analyses:
             pid = str(a["point_id"])
             if pid not in latest_analysis:
                 latest_analysis[pid] = a
-        assets = (client.table("point_assets").select("point_id,asset_type,storage_path")
-                  .in_("point_id", chunk).execute().data or [])
+        assets = _paged(client.table("point_assets").select("point_id,asset_type,storage_path")
+                  .in_("point_id", chunk).order("id"))
         for a in assets:
             asset_map.setdefault(str(a["point_id"]), {})[a["asset_type"]] = a["storage_path"]
     return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
@@ -172,9 +180,8 @@ def get_points_with_data(project_id: str):
 def get_all_points_with_data():
     """Load points across every stored project as one cumulative workspace."""
     client = get_client()
-    rows = (client.table("points").select("*")
-            .order("power").order("time_sec").order("wafer").order("point")
-            .execute().data or [])
+    rows = _paged(client.table("points").select("*")
+            .order("power").order("time_sec").order("wafer").order("point").order("id"))
     if not rows:
         return []
     ids = [str(r["id"]) for r in rows]
@@ -182,15 +189,14 @@ def get_all_points_with_data():
     asset_map = {}
     for start in range(0, len(ids), 100):
         chunk = ids[start:start+100]
-        analyses = (client.table("analysis_results").select("*")
-                    .in_("point_id", chunk).order("created_at", desc=True)
-                    .execute().data or [])
+        analyses = _paged(client.table("analysis_results").select("*")
+                    .in_("point_id", chunk).order("created_at", desc=True).order("id"))
         for a in analyses:
             pid = str(a["point_id"])
             if pid not in latest_analysis:
                 latest_analysis[pid] = a
-        assets = (client.table("point_assets").select("point_id,asset_type,storage_path")
-                  .in_("point_id", chunk).execute().data or [])
+        assets = _paged(client.table("point_assets").select("point_id,asset_type,storage_path")
+                  .in_("point_id", chunk).order("id"))
         for a in assets:
             asset_map.setdefault(str(a["point_id"]), {})[a["asset_type"]] = a["storage_path"]
     return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
