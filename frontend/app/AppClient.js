@@ -256,8 +256,8 @@ async function reanalyzeProject(){if(!project)return notify("현재 프로젝트
 function goNav(n){if(n==="Verification"){openVerification();return}setVerificationOpen(false);setPage(n)}
  async function exportFile(kind){if(!project)return notify("먼저 실제 PDF를 업로드해 project를 생성하세요.");const r=await fetch(`${API}/api/projects/${project}/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=`point_report.${kind==="ppt"?"pptx":kind}`;a.click();URL.revokeObjectURL(u);notify(`${kind.toUpperCase()} export 완료`)}
  async function exportWorkspaceFile(kind){if(!points.length)return notify("먼저 분석 데이터를 추가하세요.");const r=await fetch(`${API}/api/workspace/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Engineering Summary export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=kind==="summary-ppt"?"UV_Tape_Engineering_Summary.pptx":"UV_Tape_Engineering_Summary.pdf";a.click();URL.revokeObjectURL(u);notify("Engineering Summary export 완료")}
- if(!mounted)return <div className="app"><main><InitialLoading/></main></div>;
- if(initialLoading)return <div className="app"><main><InitialLoading/></main></div>;
+ if(!mounted)return <InitialLoading/>;
+ if(initialLoading)return <InitialLoading/>;
  const p=points[idx],filtered=points.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
  return <div className="app"><aside><div className="logo"><b>EDS</b><span>Insight Lab</span></div>{[["Dashboard",LayoutDashboard],["New Analysis",Upload],["Verification",Check],["AI Analysis",BrainCircuit],["Image Gallery",Images],["Condition View",Activity],["Condition Compare",GitCompare],["Reports",FileText],["Delete Data",Trash2]].map(([n,I])=><button className={page===n?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={16}/>{n}</button>)}<div className="sideBottom"><button className="nav"><Settings size={16}/>Settings</button></div></aside><main><header><div><small>Projects / UV Tape Residue / {page}</small><h1>{page}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={13}/>{activeAnalysis?`분석 진행 ${analysisQueue[0]?.progress||0}%`:"최근 분석 상태"}</button>}{project&&<button className="secondary reanalyzeBtn" onClick={reanalyzeProject} disabled={busy||activeAnalysis}><Database size={13}/>{busy?"Working...":"Re-analyze"}</button>}<span className="ready">● {points.length?"Data loaded":"Ready"}</span></div></header>
  {page==="Dashboard"&&<Dashboard points={points} go={goNav}/>}
@@ -427,22 +427,21 @@ function dynamicAsset(p,type){
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  const f=p.features||{};
- const hasHumanROIFlag=hasHumanROI(f), liveRatios=currentRatios(p);
- const hasHumanROI=hasHumanROIFlag;
+ const humanRoiSaved=hasHumanROI(f), liveRatios=currentRatios(p);
  const cRatio=liveRatios.c, oRatio=liveRatios.o;
- const score=hasHumanROI&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(hasHumanROI&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
- const coverage=hasHumanROI&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
- const maskQuality=hasHumanROI&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
+ const score=humanRoiSaved&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(humanRoiSaved&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
+ const coverage=humanRoiSaved&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
+ const maskQuality=humanRoiSaved&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
  const resultLabel=pointClass(p);
- const confidence=hasHumanROI?"Human ROI":safeText(f.confidence||p?.confidence,"-");
+ const confidence=humanRoiSaved?"Human ROI":safeText(f.confidence||p?.confidence,"-");
  const maps={
    // If Human ROI is already saved, never fall back to the old AI/CV overlay.
    // While the fresh Human ROI overlay is loading, show the original image/map
    // instead of briefly displaying the stale AI ROI.
-   sem:hasHumanROI?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
+   sem:humanRoiSaved?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
    eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
-   c:hasHumanROI?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
-   o:hasHumanROI?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
+   c:humanRoiSaved?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
+   o:humanRoiSaved?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
  const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
  const ratioClass=(x,strong)=>x==null?"neutral":x>=strong?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
@@ -455,10 +454,10 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
-    <div className="verificationImages"><Visual title={hasHumanROI?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
+    <div className="verificationImages"><Visual title={humanRoiSaved?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
     <div className="v21ElementStrip">
-      <div className="focusPanel"><b>{hasHumanROI?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={hasHumanROI?"C map with Human ROI":"C map with ROI"}/></div>
-      <div className="focusPanel"><b>{hasHumanROI?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={hasHumanROI?"O map with Human ROI":"O map with ROI"}/></div>
+      <div className="focusPanel"><b>{humanRoiSaved?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={humanRoiSaved?"C map with Human ROI":"C map with ROI"}/></div>
+      <div className="focusPanel"><b>{humanRoiSaved?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={humanRoiSaved?"O map with Human ROI":"O map with ROI"}/></div>
     </div>
     <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
    </div>
@@ -473,12 +472,12 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
       <MetricBar label="Spatial Overlap" value={typeof f.spatial_overlap === "number" ? f.spatial_overlap / 100 : null} color="purple" />
     </div>
     <div className="ratioList">
-      <div><span>C ROI / Global</span><b>{hasHumanROI&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio,2.40)}`} style={{color:cRatio==null?'#667386':cRatio>=2.40?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
-      <div><span>O ROI / Global</span><b>{hasHumanROI&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio,3.00)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
+      <div><span>C ROI / Global</span><b>{humanRoiSaved&&typeof f.human_c_roi_mean==='number'&&typeof f.human_c_global_mean==='number'?`${f.human_c_roi_mean.toFixed(1)} / ${f.human_c_global_mean.toFixed(1)} `:typeof f.c_roi_mean==='number'&&typeof f.c_global_mean==='number'?`${f.c_roi_mean.toFixed(1)} / ${f.c_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(cRatio,2.40)}`} style={{color:cRatio==null?'#667386':cRatio>=2.40?'#159447':cRatio>=2.00?'#b77900':cRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(cRatio)})`}</span></b></div>
+      <div><span>O ROI / Global</span><b>{humanRoiSaved&&typeof f.human_o_roi_mean==='number'&&typeof f.human_o_global_mean==='number'?`${f.human_o_roi_mean.toFixed(1)} / ${f.human_o_global_mean.toFixed(1)} `:typeof f.o_roi_mean==='number'&&typeof f.o_global_mean==='number'?`${f.o_roi_mean.toFixed(1)} / ${f.o_global_mean.toFixed(1)} `:''}<span className={`ratioMultiplier ${ratioClass(oRatio,3.00)}`} style={{color:oRatio==null?'#667386':oRatio>=3.00?'#159447':oRatio>=2.00?'#b77900':oRatio<=0.90?'#d12f3d':'#667386'}}>{`(${ratioText(oRatio)})`}</span></b></div>
     </div>
     <div className="ratioRuleNote"><b>C + O 동시 증가 기준</b><span>Human ROI는 <strong>C ≥ 2.40× + O ≥ 3.00×</strong>이면 Residue, 둘 다 2.00× 이상이지만 둘 중 하나라도 Residue 기준에 못 미치면 Ambiguous로 계산합니다.</span></div>
-    <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{hasHumanROI?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
-    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(hasHumanROI?f.human_roi_area_px:f.roi_area_px)?`${(hasHumanROI?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{hasHumanROI&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{hasHumanROI&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
+    <div className="humanRoiStatus"><MousePointer2 size={14}/><span>{humanRoiSaved?"Human ROI가 저장되어 현재 C/O 계산에 적용되었습니다.":"AI/CV ROI가 표시됩니다. 잘못 잡혔으면 아래에서 직접 Human ROI를 지정하세요."}</span></div>
+    <div className="roiInfo"><b>ROI Information</b><div><span>ROI Area</span><strong>{(humanRoiSaved?f.human_roi_area_px:f.roi_area_px)?`${(humanRoiSaved?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'-'}</strong></div><div><span>ROI Coverage</span><strong>{humanRoiSaved&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'-':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'-':maskQuality.toFixed(2)}</strong></div><div><span>Detected as</span><strong>{humanRoiSaved&&f.human_roi_component_count!=null?`${f.human_roi_component_count} connected region${f.human_roi_component_count===1?'':'s'}`:f.roi_component_count!=null?`${f.roi_component_count} connected region${f.roi_component_count===1?'':'s'}`:'-'}</strong></div></div>
     <div className="scoreRule v21Rule"><b>RESIDUE ≥ 70</b><span>AMBIGUOUS 60–69 · NON-RESIDUE &lt; 60</span><small>C/O 기준 점수: 둘 중 하나라도 &lt;2.00× = Non-residue, C 2.00–2.39× 또는 O 2.00–2.99× = Ambiguous, C ≥2.40× + O ≥3.00× = Residue. SEM Morphology/Spatial Overlap은 보조 지표입니다.</small></div>
    </section>
   </div>

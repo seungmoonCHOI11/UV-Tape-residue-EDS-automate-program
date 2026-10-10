@@ -1,0 +1,13 @@
+UV Tape Residue EDS v23.7.53
+
+Fixes:
+- Verification crash: ReferenceError "Cannot access 'A' before initialization".
+  Root cause was a local const named hasHumanROI shadowing the hasHumanROI() helper inside Review,
+  causing a temporal-dead-zone access during Verification render.
+- Initial Project data loading card now centers against the full viewport instead of the main-content area.
+
+Keeps all v23.7.52 logic:
+- MAIN comparison: W1 Corner / W4 Edge / W5 Middle only
+- W9 separated as Reference / Other and grouped by substrate
+- C >= 2.40x and O >= 3.00x residue rule
+- Human verified result has priority

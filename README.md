@@ -1,3 +1,8 @@
+## v23.7.53 hotfix
+- Fixed Verification `Cannot access before initialization` crash.
+- Centered initial loading screen on full viewport.
+- Retains v23.7.52 W1/W4/W5 MAIN + W9 Reference/Other compare logic.
+
 # v23.7.52 Verification hardening + engineering scope split
 
 This release hardens Verification against legacy/malformed point payloads and restructures engineering comparison around the actual evaluation scope.
