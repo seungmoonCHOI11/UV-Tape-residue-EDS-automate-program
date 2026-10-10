@@ -1,3 +1,11 @@
+# Current release: v23.8.1
+
+**[START_HERE_V23.8.1.md](START_HERE_V23.8.1.md)부터 읽으세요.**
+
+v23.8.0 기반 UI 개선: 대시보드 단순화, 전체 화면 가독성·문구·배치 통일, 검증 근거 우선 표시, 이미지 페이지 탐색, 연결 실패 상태 구분.
+
+---
+
 # Current release: v23.8.0
 
 **먼저 [START_HERE_V23.8.0.md](START_HERE_V23.8.0.md)를 읽으세요.**
