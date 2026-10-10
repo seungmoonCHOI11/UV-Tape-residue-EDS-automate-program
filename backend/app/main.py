@@ -12,6 +12,7 @@ from .analysis import extract_pdfs, normalize_conditions, condition_point_sequen
 from .ai import ai_available
 from .r2_storage import r2
 from .persistence import persist_point, reconcile_project, build_manifest, PersistenceError
+from .classification import C_RESIDUE_RATIO, O_RESIDUE_RATIO, MODERATE_RATIO, co_ratio_score, co_rule_result, CLASSIFICATION_RULE_TEXT
 from . import db
 
 load_dotenv()
@@ -20,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.7.48")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.7.50")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -89,47 +90,6 @@ def normalize_position_substrates(value):
     return out
 
 
-C_RESIDUE_RATIO = 2.40
-O_RESIDUE_RATIO = 3.00
-MODERATE_RATIO = 2.00
-
-def _element_ratio_score(ratio: float, strong_ratio: float) -> float:
-    """Convert one element ROI/Global ratio to the common 0-100 residue scale.
-
-    Below 2x is Non-residue (<60), 2x to the element-specific residue
-    threshold is Ambiguous (60-69), and the threshold itself is 70.
-    Above the threshold, enrichment rises gradually toward 100.
-    """
-    import math
-    x=max(0.0, float(ratio))
-    strong=float(strong_ratio)
-    if x < MODERATE_RATIO:
-        return max(0.0, min(59.0, (x/MODERATE_RATIO)*59.0))
-    if x < strong:
-        return 60.0 + ((x-MODERATE_RATIO)/(strong-MODERATE_RATIO))*10.0
-    # Normalize each element's residue threshold to the old 3x score anchor.
-    # C: 2.4x -> 70, O: 3.0x -> 70.
-    equivalent=x*(3.0/strong)
-    k=0.23
-    denom=1.0-math.exp(-k*(20.0-3.0))
-    normalized=(1.0-math.exp(-k*(equivalent-3.0)))/denom if denom else 0.0
-    return min(100.0, 70.0 + 30.0*max(0.0, normalized))
-
-def co_ratio_score(c_ratio: float, o_ratio: float) -> float:
-    """Score using the weaker element after element-specific threshold scaling."""
-    return min(
-        _element_ratio_score(c_ratio, C_RESIDUE_RATIO),
-        _element_ratio_score(o_ratio, O_RESIDUE_RATIO),
-    )
-
-def co_rule_result(c_ratio: float, o_ratio: float) -> str:
-    c=float(c_ratio); o=float(o_ratio)
-    if c >= C_RESIDUE_RATIO and o >= O_RESIDUE_RATIO:
-        return "Residue"
-    if c >= MODERATE_RATIO and o >= MODERATE_RATIO:
-        return "Ambiguous"
-    return "Non-residue"
-
 def public_record(r: dict) -> dict:
     out=dict(r)
     features=dict(out.get("features") or {})
@@ -144,7 +104,7 @@ def public_record(r: dict) -> dict:
         hresult=co_rule_result(float(hcr),float(hor))
         features["human_residue_score"]=hscore
         features["human_roi_rule_result"]=hresult
-        features["human_score_rule"]="C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue"
+        features["human_score_rule"]=CLASSIFICATION_RULE_TEXT
         features["residue_score"]=hscore/100.0
         features["result"]=hresult
         features["confidence"]="Human ROI"
@@ -164,7 +124,7 @@ def public_record(r: dict) -> dict:
             aresult=co_rule_result(float(acr),float(aor))
             features["residue_score"]=ascore/100.0
             features["result"]=aresult
-            features["classification_note"]="v23.7.48 rule: C ROI/Global >=2.40x AND O ROI/Global >=3.00x -> Residue; both >=2.00x with either residue gate unmet -> Ambiguous; otherwise Non-residue."
+            features["classification_note"]="v23.7.50 current rule: "+CLASSIFICATION_RULE_TEXT
             features["c_residue_ratio_threshold"]=C_RESIDUE_RATIO
             features["o_residue_ratio_threshold"]=O_RESIDUE_RATIO
     # Keep score/result/confidence both at the top level and inside features so
@@ -1489,9 +1449,51 @@ def ai(point_id:str):
 def project_ai_analysis(project_id: str):
     if project_id not in PROJECTS:
         project(project_id)
-    rec=[RECORDS[x] for x in PROJECTS[project_id]["records"]]
+    rec=[public_record(RECORDS[x]) for x in PROJECTS[project_id]["records"]]
     from .ai import analyze_project_with_openai
     return analyze_project_with_openai(rec)
+
+
+
+def workspace_records_for_export():
+    """Return cumulative raw records for engineering summary exports."""
+    if not db.configured():
+        out=[]
+        for pid,proj in PROJECTS.items():
+            for rid in proj.get("records") or []:
+                if rid in RECORDS:
+                    out.append(RECORDS[rid])
+        return out
+    packed=db.get_all_points_with_data()
+    out=[]
+    for row,analysis,assets in packed:
+        pid=str(row.get("project_id"))
+        rec=db_record(pid,row,analysis,assets)
+        rec["project_id"]=pid
+        out.append(rec)
+    return out
+
+@app.post("/api/workspace/export/summary-ppt")
+def workspace_summary_ppt():
+    from .reports import export_engineering_ppt
+    rec=workspace_records_for_export()
+    out=OUTPUT/"workspace_engineering_summary.pptx"
+    export_engineering_ppt(rec,out)
+    if r2.configured:
+        try: r2.upload_file(out,"workspace/reports/workspace_engineering_summary.pptx","application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        except Exception as e: print(f"[summary-export] R2 PPT upload failed: {e}")
+    return FileResponse(out,filename=out.name,media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+@app.post("/api/workspace/export/summary-pdf")
+def workspace_summary_pdf():
+    from .reports import export_engineering_pdf
+    rec=workspace_records_for_export()
+    out=OUTPUT/"workspace_engineering_summary.pdf"
+    export_engineering_pdf(rec,out)
+    if r2.configured:
+        try: r2.upload_file(out,"workspace/reports/workspace_engineering_summary.pdf","application/pdf")
+        except Exception as e: print(f"[summary-export] R2 PDF upload failed: {e}")
+    return FileResponse(out,filename=out.name,media_type="application/pdf")
 
 def hydrate_records_for_export(project_id:str):
     p=PROJECTS[project_id]

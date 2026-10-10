@@ -12,6 +12,11 @@ import gc, json, os, sys
 from pathlib import Path
 os.environ.setdefault("OMP_NUM_THREADS","1"); os.environ.setdefault("OPENBLAS_NUM_THREADS","1"); os.environ.setdefault("MKL_NUM_THREADS","1"); os.environ.setdefault("NUMEXPR_NUM_THREADS","1"); os.environ.setdefault("OPENCV_OPENCL_RUNTIME","disabled")
 import cv2, numpy as np, pymupdf as fitz
+try:
+    from .classification import C_RESIDUE_RATIO, O_RESIDUE_RATIO, MODERATE_RATIO, co_rule_result
+except ImportError:  # point_worker.py is launched as a standalone subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app.classification import C_RESIDUE_RATIO, O_RESIDUE_RATIO, MODERATE_RATIO, co_rule_result
 cv2.setNumThreads(1)
 try: cv2.ocl.setUseOpenCL(False)
 except Exception: pass
@@ -260,9 +265,6 @@ def global_roi_metrics(element_img,roi,element,footer_fraction=.84):
     return {"contrast_pct":round(float(np.clip(contrast,-100,500)),2),"log2_ratio":round(log2,4),"zscore":round(float(np.clip(z,-20,20)),3),"coverage":round(coverage,2),"overlap":round(coverage,2),"roi_mean":round(rmed,3),"global_mean":round(gmed,3),"global_std":round(gstd,3),"score":round(score,4)}
 
 
-C_RESIDUE_RATIO=2.40
-O_RESIDUE_RATIO=3.00
-MODERATE_RATIO=2.00
 
 def element_ratio_score(ratio, strong_ratio):
     """0-1 score with 2x=0.60 and the element-specific residue gate=0.70."""
@@ -276,13 +278,6 @@ def element_ratio_score(ratio, strong_ratio):
     denom=1.0-np.exp(-k*(20.0-3.0))
     normalized=(1.0-np.exp(-k*(equivalent-3.0)))/denom if denom else 0.0
     return float(min(1.0,0.70+0.30*max(0.0,normalized)))
-
-def co_rule_result(c_ratio,o_ratio):
-    if c_ratio>=C_RESIDUE_RATIO and o_ratio>=O_RESIDUE_RATIO:
-        return "Residue"
-    if c_ratio>=MODERATE_RATIO and o_ratio>=MODERATE_RATIO:
-        return "Ambiguous"
-    return "Non-residue"
 
 def sigmoid(x): return 1/(1+np.exp(-np.clip(x,-20,20)))
 

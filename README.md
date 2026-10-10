@@ -1,6 +1,6 @@
-# Current release: v23.7.48
+# Current release: v23.7.50
 
-**먼저 [START_HERE_V23.7.48.md](START_HERE_V23.7.48.md)를 읽으세요.** 아래 내용은 과거 버전 기록입니다.
+**먼저 [START_HERE_V23.7.50.md](START_HERE_V23.7.50.md)를 읽으세요.** 아래 내용은 과거 버전 기록입니다.
 
 # UV Tape Residue EDS Analysis System — v8
 
@@ -81,3 +81,12 @@ See `V21.6_RELEASE.md`. v21.6 strengthens visual-first ROI/score behavior, suppr
 
 ## V23.7.27
 Batch Analysis Queue and Project Delete were added.
+
+## v23.7.49
+- Human ROI result/score consistency fix: Verification derives the Human ROI label live from current C/O ratios (C >=2.40x, O >=3.00x), preventing stale older labels from disagreeing with the displayed score.
+
+
+## v23.7.50
+- Unified live C/O classification across all UI summaries and reports.
+- Engineering Compare focuses on condition residue incidence and W1 Corner / W4 Edge / W5 Middle position dependence.
+- Added cumulative Engineering Summary PPT/PDF export.

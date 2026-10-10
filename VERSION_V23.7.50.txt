@@ -1,0 +1,7 @@
+v23.7.50
+- Current C/O classification rule unified across frontend, workspace summaries and exports.
+- Human Verified result remains final ground truth.
+- Engineering Compare redesigned around plasma condition residue incidence and W1/W4/W5 spatial comparison.
+- Removed average score from condition ranking/evaluation.
+- Added Power x Time residue matrix, location spread, worst location, completeness and verification coverage.
+- Added cumulative-workspace Engineering Summary PPT/PDF exports.

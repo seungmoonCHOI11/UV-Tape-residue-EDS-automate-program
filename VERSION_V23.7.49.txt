@@ -1,0 +1,6 @@
+v23.7.49
+- Fixes Human ROI score/result mismatch after threshold changes.
+- Human ROI displayed classification is now derived live from stored Human ROI C/O ratios.
+- Current rule: Residue when C >= 2.40x AND O >= 3.00x; Ambiguous when both >= 2.00x but either residue gate is unmet; otherwise Non-residue.
+- Prevents stale human_roi_rule_result values created by older backend versions from showing Ambiguous while the current score is >=70.
+- Keeps v23.7.48 storage retry/reconciliation and C 2.40x / O 3.00x thresholds unchanged.
