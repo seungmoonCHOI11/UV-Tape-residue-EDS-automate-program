@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.4")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.5")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -872,16 +872,52 @@ def process_reanalysis_job(job_id,project_id,meta):
                     old_polys=oldf.get("human_roi_polygons") or oldf.get("human_roi_polygon")
                     if old_polys:
                         newf=r.setdefault("features",{})
+                        # Preserve Human-ROI provenance/history, but recalculate all
+                        # geometry-dependent C/O values against the freshly cropped assets.
                         for k,v in oldf.items():
                             if k.startswith("human_"):
                                 newf[k]=v
-                        newf["human_roi_polygons"]=oldf.get("human_roi_polygons") or ([oldf.get("human_roi_polygon")] if oldf.get("human_roi_polygon") else [])
-                        newf["human_roi_polygon"]=(oldf.get("human_roi_polygon") or newf["human_roi_polygons"][0])
-                        newf["human_reanalysis_preserved"]=True
-                        if oldf.get("human_roi_rule_result"):
-                            newf["result"]=oldf.get("human_roi_rule_result")
+                        from .point_worker import (
+                            LEGACY_PAGE1_SEM_BOX, remap_normalized_polygons_between_crops,
+                            polygon_to_mask, human_roi_features,
+                        )
+                        source_polys=oldf.get("human_roi_polygons") or ([oldf.get("human_roi_polygon")] if oldf.get("human_roi_polygon") else [])
+                        old_box=oldf.get("page1_sem_crop_box") or LEGACY_PAGE1_SEM_BOX
+                        new_box=newf.get("page1_sem_crop_box") or LEGACY_PAGE1_SEM_BOX
+                        mapped_polys=remap_normalized_polygons_between_crops(source_polys,old_box,new_box) or source_polys
+                        try:
+                            def _local_image(label):
+                                fp=(r.get("assets") or {}).get(label)
+                                return cv2.imread(str(fp),cv2.IMREAD_COLOR) if fp and Path(fp).exists() else None
+                            sem=_local_image("sem"); c=_local_image("c_map"); o=_local_image("o_map")
+                            n=_local_image("n_map"); si=_local_image("si_map"); se=_local_image("se_map")
+                            if any(im is None for im in (sem,c,o,n,si)):
+                                raise RuntimeError("fresh reanalysis assets unavailable for Human ROI recalculation")
+                            mask=polygon_to_mask(sem.shape,mapped_polys)
+                            if cv2.countNonZero(mask)<20:
+                                raise RuntimeError("remapped Human ROI is too small")
+                            hf=human_roi_features(sem,c,o,n,si,mask,se_map=se)
+                            newf.update(hf)
+                            newf["human_roi_polygons"]=mapped_polys
+                            newf["human_roi_polygon"]=mapped_polys[0] if mapped_polys else []
+                            newf["human_roi_reanalysis_geometry"]={"old_sem_box":old_box,"new_sem_box":new_box,"version":"v23.9.5"}
+                            newf["human_reanalysis_preserved"]=True
+                            newf["human_reanalysis_recalculated"]=True
+                            newf["result"]=hf.get("human_roi_rule_result",newf.get("result"))
                             newf["confidence"]="Human ROI"
-                            newf["residue_score"]=oldf.get("human_residue_score",newf.get("residue_score"))
+                            newf["residue_score"]=hf.get("human_residue_score",newf.get("residue_score"))
+                        except Exception as e:
+                            print(f"[human_roi_reanalysis] geometry recalculation failed for {source_point_id}: {e}")
+                            # Safe fallback: preserve the original Human ROI/values instead
+                            # of dropping manual work when one Point cannot be recalculated.
+                            newf["human_roi_polygons"]=source_polys
+                            newf["human_roi_polygon"]=(oldf.get("human_roi_polygon") or (source_polys[0] if source_polys else []))
+                            newf["human_reanalysis_preserved"]=True
+                            newf["human_reanalysis_recalculated"]=False
+                            if oldf.get("human_roi_rule_result"):
+                                newf["result"]=oldf.get("human_roi_rule_result")
+                                newf["confidence"]="Human ROI"
+                                newf["residue_score"]=oldf.get("human_residue_score",newf.get("residue_score"))
                 r["db_id"]=str(row["id"])
                 r["id"]=str(row["id"])
                 db.upsert_analysis(r["db_id"],r.get("features",{}))
@@ -889,6 +925,7 @@ def process_reanalysis_job(job_id,project_id,meta):
                     db.upsert_asset(r["db_id"],asset_type,key)
 
             RECORDS[r["id"]]=r
+            _invalidate_dynamic_assets(r["id"])
             saved_count+=1
             set_job(
                 job_id,phase="database",
@@ -1139,10 +1176,10 @@ def _dynamic_asset(point_id: str, asset_type: str):
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
     name_map = {
-        "sem_residue_overlay": "sem_dynamic_overlay_v2394.jpg",
-        "eds_co_overlay": "eds_dynamic_overlay_v2394.jpg",
-        "c_map_enhanced_overlay": "c_dynamic_overlay_v2394.jpg",
-        "o_map_enhanced_overlay": "o_dynamic_overlay_v2394.jpg",
+        "sem_residue_overlay": "sem_dynamic_overlay_v2395.jpg",
+        "eds_co_overlay": "eds_dynamic_overlay_v2395.jpg",
+        "c_map_enhanced_overlay": "c_dynamic_overlay_v2395.jpg",
+        "o_map_enhanced_overlay": "o_dynamic_overlay_v2395.jpg",
     }
     filename = name_map.get(asset_type)
     if not filename:
@@ -1302,13 +1339,19 @@ def _human_roi_mask_for_point(point_id: str, shape):
 
 
 def _invalidate_dynamic_assets(point_id: str):
+    """Drop every cached derivative/raw copy for one Point.
+
+    Re-analysis can replace the underlying R2 crops (not just the overlay). Keeping
+    raw_c_map.jpg/manual_raw_o_map.jpg from the previous crop would make a freshly
+    deployed layout fix appear unchanged, so invalidate the whole Point cache.
+    """
     safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id
-    for name in [
-        "sem_dynamic_overlay.jpg","c_dynamic_overlay.jpg","o_dynamic_overlay.jpg","eds_dynamic_overlay.jpg",
-        "sem_dynamic_overlay_v2394.jpg","c_dynamic_overlay_v2394.jpg","o_dynamic_overlay_v2394.jpg","eds_dynamic_overlay_v2394.jpg",
-    ]:
-        try: (outdir/name).unlink(missing_ok=True)
-        except Exception: pass
+    if not outdir.exists(): return
+    try:
+        for fp in outdir.iterdir():
+            if fp.is_file(): fp.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _recalculate_human_roi_point(point_id: str):

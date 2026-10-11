@@ -29,25 +29,184 @@ def render_page_to_jpeg(page, quality=92):
     return data
 
 
+LEGACY_PAGE1_SEM_BOX={"x0":98,"y0":207,"x1":726,"y1":625}
+LEGACY_PAGE1_EDS_BOX={"x0":101,"y0":818,"x1":1203,"y1":1552}
+LEGACY_PAGE2_BOXES={
+    "se_map":{"x0":101,"y0":190,"x1":643,"y1":552},
+    "c_map":{"x0":658,"y0":190,"x1":1200,"y1":552},
+    "n_map":{"x0":101,"y0":566,"x1":643,"y1":928},
+    "o_map":{"x0":658,"y0":566,"x1":1200,"y1":928},
+    "si_map":{"x0":101,"y0":943,"x1":643,"y1":1305},
+}
+
+
+def _rect_dict(x,y,w,h):
+    return {"x0":int(x),"y0":int(y),"x1":int(x+w),"y1":int(y+h),"width":int(w),"height":int(h)}
+
+
+def _crop_rect(img,rect):
+    h,w=img.shape[:2]
+    x0=max(0,min(int(rect["x0"]),w-1)); x1=max(x0+1,min(int(rect["x1"]),w))
+    y0=max(0,min(int(rect["y0"]),h-1)); y1=max(y0+1,min(int(rect["y1"]),h))
+    return img[y0:y1,x0:x1]
+
+
+def _scaled_rect(rect,shape):
+    h,w=shape[:2]; sx=w/1240.0; sy=h/1754.0
+    x0=round(rect["x0"]*sx); x1=round(rect["x1"]*sx)
+    y0=round(rect["y0"]*sy); y1=round(rect["y1"]*sy)
+    return _rect_dict(x0,y0,x1-x0,y1-y0)
+
+
+def _large_nonwhite_components(img):
+    """Return large continuous Bruker image panels on the white PDF page.
+
+    The old and newer Bruker exports use the same page canvas but different
+    panel heights.  Their image panels are continuous non-white rectangles, so
+    detecting those rectangles is considerably more reliable than hard-coding
+    one set of y coordinates.
+    """
+    gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY) if img.ndim==3 else img
+    mask=(gray<250).astype(np.uint8)*255
+    n,_,stats,_=cv2.connectedComponentsWithStats(mask,8)
+    out=[]
+    for i in range(1,n):
+        x,y,ww,hh,area=[int(v) for v in stats[i]]
+        if ww<80 or hh<60: continue
+        out.append({"x":x,"y":y,"w":ww,"h":hh,"area":area})
+    return out
+
+
+def _detect_page1_boxes(img):
+    h,w=img.shape[:2]
+    comps=_large_nonwhite_components(img)
+    candidates=[c for c in comps if c["w"]>=w*0.40 and c["h"]>=h*0.17 and c["area"]>=w*h*0.08]
+    if len(candidates)<2: return None
+    candidates=sorted(candidates,key=lambda c:c["y"])
+    sem_candidates=[c for c in candidates if c["y"]<h*0.48 and c["w"]<w*0.72]
+    eds_candidates=[c for c in candidates if c["y"]>h*0.40 and c["w"]>w*0.72]
+    if not sem_candidates or not eds_candidates: return None
+    sem=max(sem_candidates,key=lambda c:c["area"]); eds=max(eds_candidates,key=lambda c:c["area"] )
+    return _rect_dict(sem["x"],sem["y"],sem["w"],sem["h"]),_rect_dict(eds["x"],eds["y"],eds["w"],eds["h"])
+
+
+def _detect_page2_boxes(img):
+    h,w=img.shape[:2]
+    comps=_large_nonwhite_components(img)
+    panels=[c for c in comps if w*0.35<=c["w"]<=w*0.56 and h*0.16<=c["h"]<=h*0.29 and c["area"]>=w*h*0.075]
+    if len(panels)<5: return None
+    # There should be exactly five large map panels. If text/logo components
+    # happen to pass the coarse filter, keep the five largest image rectangles.
+    panels=sorted(panels,key=lambda c:c["area"],reverse=True)[:5]
+    panels=sorted(panels,key=lambda c:(c["y"],c["x"]))
+    # Cluster the five panels into 2 / 2 / 1 rows by y position.
+    rows=[]
+    for c in panels:
+        placed=False
+        for row in rows:
+            if abs(c["y"]-np.median([r["y"] for r in row]))<=max(12,int(h*0.012)):
+                row.append(c); placed=True; break
+        if not placed: rows.append([c])
+    rows=sorted(rows,key=lambda row:min(c["y"] for c in row))
+    if len(rows)!=3 or sorted(len(r) for r in rows)!=[1,2,2]: return None
+    if len(rows[0])!=2 or len(rows[1])!=2 or len(rows[2])!=1: return None
+    r1=sorted(rows[0],key=lambda c:c["x"]); r2=sorted(rows[1],key=lambda c:c["x"]); r3=sorted(rows[2],key=lambda c:c["x"])
+    boxes={
+        "se_map":_rect_dict(r1[0]["x"],r1[0]["y"],r1[0]["w"],r1[0]["h"]),
+        "c_map":_rect_dict(r1[1]["x"],r1[1]["y"],r1[1]["w"],r1[1]["h"]),
+        "n_map":_rect_dict(r2[0]["x"],r2[0]["y"],r2[0]["w"],r2[0]["h"]),
+        "o_map":_rect_dict(r2[1]["x"],r2[1]["y"],r2[1]["w"],r2[1]["h"]),
+        "si_map":_rect_dict(r3[0]["x"],r3[0]["y"],r3[0]["w"],r3[0]["h"]),
+    }
+    return boxes
+
+
+def _layout_profile(page2_boxes):
+    heights=[int(v["y1"]-v["y0"]) for v in page2_boxes.values()]
+    med=int(round(float(np.median(heights)))) if heights else 0
+    if 350<=med<=375: return "bruker_standard_362"
+    if 395<=med<=420: return "bruker_tall_407"
+    return f"bruker_auto_{med}"
+
+
 def crop_page1_layout(img):
-    """Verified v13 Point-1 crop boundaries, fixed to the source page template."""
-    h,w=img.shape[:2]; sx,sy=w/1240.0,h/1754.0
-    def box(x0,y0,x1,y1):
-        return img[round(y0*sy):round(y1*sy),round(x0*sx):round(x1*sx)]
-    return {"sem":box(98,207,98+628,207+418), "eds_map":box(101,818,101+1102,818+734)}
+    """Auto-detect Page-1 SEM and Full EDS panels across Bruker export layouts.
+
+    When the classic 734-pixel Full-EDS panel is detected, keep the historically
+    verified v13 SEM crop *exactly* unchanged so already-correct 1st-layout data
+    does not move by even one border pixel.  Taller exports use their detected
+    rectangles.
+    """
+    detected=_detect_page1_boxes(img)
+    if detected:
+        detected_sem,detected_eds=detected
+        if abs(int(detected_eds["height"])-round(734*img.shape[0]/1754.0))<=3:
+            sem_box=_scaled_rect(LEGACY_PAGE1_SEM_BOX,img.shape); eds_box=_scaled_rect(LEGACY_PAGE1_EDS_BOX,img.shape); method="legacy_standard_profile"
+        else:
+            sem_box,eds_box=detected_sem,detected_eds; method="auto_nonwhite_components"
+    else:
+        sem_box=_scaled_rect(LEGACY_PAGE1_SEM_BOX,img.shape); eds_box=_scaled_rect(LEGACY_PAGE1_EDS_BOX,img.shape); method="legacy_fixed_fallback"
+    return {
+        "sem":_crop_rect(img,sem_box),"eds_map":_crop_rect(img,eds_box),
+        "_layout":{"method":method,"sem_box":sem_box,"eds_box":eds_box,"page_width":int(img.shape[1]),"page_height":int(img.shape[0])}
+    }
 
 
 def crop_page2_element_maps(img):
-    """Verified v13 Point-1 element-panel boundaries."""
-    h,w=img.shape[:2]; sx,sy=w/1240.0,h/1754.0
-    def box(x0,y0,x1,y1):
-        return img[round(y0*sy):round(y1*sy),round(x0*sx):round(x1*sx)]
+    """Auto-detect the five Bruker Page-2 element panels.
+
+    Supports both the original 542x362 panels and the later ~542x407 panels
+    without condition-specific rules.
+    """
+    boxes=_detect_page2_boxes(img)
+    method="auto_nonwhite_components"
+    if not boxes:
+        boxes={k:_scaled_rect(v,img.shape) for k,v in LEGACY_PAGE2_BOXES.items()}
+        method="legacy_fixed_fallback"
+    x0=min(v["x0"] for v in boxes.values()); y0=min(v["y0"] for v in boxes.values())
+    x1=max(v["x1"] for v in boxes.values()); y1=max(v["y1"] for v in boxes.values())
+    full={"x0":x0,"y0":y0,"x1":x1,"y1":y1,"width":x1-x0,"height":y1-y0}
     return {
-        "full_element_maps_original":box(101,190,1200,1305),
-        "se_map":box(101,190,643,552), "c_map":box(658,190,1200,552),
-        "n_map":box(101,566,643,928), "o_map":box(658,566,1200,928),
-        "si_map":box(101,943,643,1305),
+        "full_element_maps_original":_crop_rect(img,full),
+        "se_map":_crop_rect(img,boxes["se_map"]),"c_map":_crop_rect(img,boxes["c_map"]),
+        "n_map":_crop_rect(img,boxes["n_map"]),"o_map":_crop_rect(img,boxes["o_map"]),
+        "si_map":_crop_rect(img,boxes["si_map"]),
+        "_layout":{"method":method,"profile":_layout_profile(boxes),"boxes":boxes,"full_box":full,"page_width":int(img.shape[1]),"page_height":int(img.shape[0])}
     }
+
+
+def remap_normalized_polygons_between_crops(polygons,old_box,new_box):
+    """Move normalized Human-ROI polygons from an old SEM crop into a new crop.
+
+    Coordinates are converted through the common rendered PDF page coordinate
+    system, so a Human ROI drawn against the legacy fixed crop survives a
+    re-analysis that switches to the auto-detected SEM panel.
+    """
+    if not polygons: return []
+    # Normalize one polygon vs list-of-polygons.
+    if isinstance(polygons,list) and polygons and isinstance(polygons[0],dict):
+        polygons=[polygons]
+    try:
+        ox0,oy0,ox1,oy1=[float(old_box[k]) for k in ("x0","y0","x1","y1")]
+        nx0,ny0,nx1,ny1=[float(new_box[k]) for k in ("x0","y0","x1","y1")]
+    except Exception:
+        return polygons
+    ow=max(ox1-ox0,1.0); oh=max(oy1-oy0,1.0); nw=max(nx1-nx0,1.0); nh=max(ny1-ny0,1.0)
+    out=[]
+    for poly in polygons:
+        if not isinstance(poly,list): continue
+        pts=[]
+        for q in poly:
+            if not isinstance(q,dict): continue
+            try:
+                x=float(q.get("x",0)); y=float(q.get("y",0))
+            except Exception:
+                continue
+            page_x=ox0+np.clip(x,0,1)*ow; page_y=oy0+np.clip(y,0,1)*oh
+            rx=float(np.clip((page_x-nx0)/nw,0,1)); ry=float(np.clip((page_y-ny0)/nh,0,1))
+            pts.append({"x":round(rx,6),"y":round(ry,6)})
+        if len(pts)>=3: out.append(pts)
+    return out
 
 
 def save_crop(img,path,quality=90):
@@ -307,7 +466,7 @@ def _similarity_from_sift(sem_ref, se_map):
 def estimate_sem_to_eds_registration(sem_ref,se_map):
     """Estimate SEM -> Page-2 SE transform.
 
-    v23.9.4 first estimates a true similarity transform (scale + small rotation +
+    v23.9.5 retains the v23.9.4 similarity transform (scale + small rotation +
     translation).  This is required because Page-1 SEM and Page-2 EDS/SE can use
     different magnifications/FOVs.  If feature registration is not reliable, the
     older conservative resize + translation fallback is retained.
@@ -1033,7 +1192,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None)
         "classification_note":"v23.7.48 rule: Residue requires C ROI/Global >=2.40x AND O ROI/Global >=3.00x. If both are >=2.00x but either residue gate is unmet, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used.","c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
         "sem_to_eds_registration":registration,
         "element_panel_registration":{"C":c_panel_info,"O":o_panel_info,"N":n_panel_info,"Si":si_panel_info},
-        "roi_registration_version":"v23.9.4-shared-page2-similarity"
+        "roi_registration_version":"v23.9.5-auto-layout-shared-page2"
     },roi
 
 
@@ -1119,7 +1278,7 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
         "human_score_rule":"C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue",
         "human_sem_to_eds_registration":registration,
         "human_element_panel_registration":{"C":c_map_info,"O":o_map_info,"N":n_map_info,"Si":si_map_info},
-        "human_roi_registration_version":"v23.9.4-shared-page2-similarity",
+        "human_roi_registration_version":"v23.9.5-auto-layout-shared-page2",
         "c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
     }
 
@@ -1150,7 +1309,18 @@ def run(payload):
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_box_overlay(p2[key],rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":
             enh=enhance_element_map(p2[key],label); fp=outdir/f"{key}_enhanced_overlay.jpg"; save_crop(make_box_overlay(enh,rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_enhanced_overlay"]=str(fp)
-    features.update({"substrate_type":payload.get("substrate_type","SiCN"),"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),"map_parser":"Bruker page-2 SE/C/N/O/Si individual panels; ROI detected from Page-1 SEM","page":payload["page"],"cv_version":"v21.6-visual-first-shadow-suppression-interior-aware-score","viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask. v21.6 uses stronger local-background thresholds, tighter expansion, and an interior-signal check to suppress broad shadow and edge-only substrate features. Red/white contours show the actual ROI. No Local Ring is displayed or used for new analysis. Score remains 0-100 with the existing piecewise calibration."})
+    p1_layout=p1.get("_layout") or {}; p2_layout=p2.get("_layout") or {}
+    features.update({
+        "substrate_type":payload.get("substrate_type","SiCN"),"ai_roi_guided": bool(payload.get("ai_roi_boxes")), "ai_roi_box_count": len(payload.get("ai_roi_boxes") or []),
+        "map_parser":"Bruker auto-layout Page-1 SEM/EDS + Page-2 SE/C/N/O/Si panels; ROI detected from Page-1 SEM",
+        "pdf_layout_version":"v23.9.5-auto-panel-detection",
+        "pdf_layout_profile":p2_layout.get("profile") or "legacy_fallback",
+        "pdf_layout_detection":{"page1":p1_layout.get("method"),"page2":p2_layout.get("method")},
+        "page1_sem_crop_box":p1_layout.get("sem_box"),"page1_eds_crop_box":p1_layout.get("eds_box"),
+        "page2_panel_boxes":p2_layout.get("boxes"),"page2_full_box":p2_layout.get("full_box"),
+        "page":payload["page"],"cv_version":"v21.6-visual-first-shadow-suppression-interior-aware-score",
+        "viewer_note":"ROI is detected from the Page-1 SEM as an irregular residue mask. v23.9.5 auto-detects the actual Bruker image-panel geometry before ROI/EDS mapping, supporting both standard and tall export layouts without condition-specific crop offsets. Red/white contours show the actual ROI. No Local Ring is displayed or used for new analysis. Score remains 0-100 with the existing piecewise calibration."
+    })
     del roi,p1,p2,raw; gc.collect()
     rec={"id":payload["id"],"power":payload["power"],"time":payload["time"],"wafer":payload["wafer"],"point":payload["point"],"zone":payload["zone"],"substrate_type":payload.get("substrate_type","SiCN"),"condition":payload["condition"],"page":payload["page"],"pages_per_point":payload["pages_per_point"],"source_pages":payload["source_pages"],"assets":paths,"features":features}
     Path(payload["result_path"]).write_text(json.dumps(rec,ensure_ascii=False),encoding="utf-8")
