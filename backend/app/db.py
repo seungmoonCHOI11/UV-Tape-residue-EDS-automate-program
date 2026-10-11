@@ -184,11 +184,12 @@ def get_points_with_data(project_id: str):
     return [(r, latest_analysis.get(str(r["id"])), asset_map.get(str(r["id"]), {})) for r in rows]
 
 
-def get_all_points_with_data():
+def get_all_points_with_data(offset=0, limit=None):
     """Load points across every stored project as one cumulative workspace."""
     client = get_client()
-    rows = _paged(client.table("points").select("*")
-            .order("power").order("time_sec").order("wafer").order("point").order("id"))
+    query = (client.table("points").select("*")
+             .order("power").order("time_sec").order("wafer").order("point").order("id"))
+    rows = (query.range(offset,offset+limit-1).execute().data or []) if limit else _paged(query)
     if not rows:
         return []
     ids = [str(r["id"]) for r in rows]

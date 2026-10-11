@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.5")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.9")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -153,7 +153,7 @@ def public_record(r: dict) -> dict:
     return out
 
 def db_record(project_id: str, row: dict, analysis_row: dict = None, asset_map: dict = None) -> dict:
-    analysis = analysis_row if analysis_row is not None else (db.get_analysis(row["id"]) if db.configured() else None)
+    analysis = analysis_row if analysis_row is not None or asset_map is not None else (db.get_analysis(row["id"]) if db.configured() else None)
     assets = asset_map if asset_map is not None else ({a["asset_type"]: a["storage_path"] for a in db.get_assets(row["id"])} if db.configured() else {})
     features = (analysis or {}).get("features") or {}
     if analysis:
@@ -1040,7 +1040,7 @@ def delete_project(project_id: str):
     return {"ok":True,"project_id":project_id,"cancelled_jobs":job_ids}
 
 @app.get("/api/workspace")
-def workspace():
+def workspace(offset:int=0, limit:int|None=None):
     """Return all stored points as one cumulative analysis workspace.
 
     Projects remain internal batches for queueing, source-file ownership,
@@ -1048,6 +1048,7 @@ def workspace():
     intentionally cumulative. This also makes older uploads reappear without
     requiring the PDF to be uploaded again.
     """
+    if offset<0 or (limit is not None and not 1<=limit<=120):raise HTTPException(422,"Invalid workspace page")
     if not db.configured():
         all_recs=[]
         for pid,p in PROJECTS.items():
@@ -1055,9 +1056,9 @@ def workspace():
                 if rid in RECORDS: all_recs.append(RECORDS[rid])
         all_recs.sort(key=lambda r:(str(r.get("power","")),str(r.get("time","")),int(r.get("wafer",0) or 0),int(r.get("point",0) or 0)))
         latest=next(reversed(list(PROJECTS.keys())),None) if PROJECTS else None
-        return {"project_id":latest,"latest_project_id":latest,"points":[public_record(r) for r in all_recs]}
+        return {"project_id":latest,"latest_project_id":latest,"points":[public_record(r) for r in (all_recs[offset:offset+limit] if limit else all_recs)],"has_more":bool(limit and offset+limit<len(all_recs)),"next_offset":offset+min(limit or len(all_recs),len(all_recs[offset:]))}
     try:
-        packed=db.get_all_points_with_data()
+        packed=db.get_all_points_with_data(offset=offset,limit=limit)
         projects=db.get_projects(limit=1000)
         latest=projects[0] if projects else None
     except Exception as e:
@@ -1080,6 +1081,8 @@ def workspace():
         "project_id":latest_id,
         "latest_project_id":latest_id,
         "points":[public_record(r) for r in all_recs],
+        "has_more": bool(limit and len(packed)==limit),
+        "next_offset": offset+len(packed),
         "position_substrates":normalize_position_substrates(latest_meta.get("position_substrates") or {}),
         "substrate_type":latest_meta.get("substrate_type") or "SiCN",
         "project_count":len(projects),
@@ -1161,7 +1164,7 @@ def _collect_asset_keys(point_id: str) -> dict:
         for k, v in (r.get("assets") or {}).items():
             if isinstance(v, str) and not v.startswith("/") and not v.startswith("http"):
                 keys.setdefault(k, v)
-    if db.configured():
+    if db.configured() and not keys:
         try:
             for a in db.get_assets(point_id):
                 keys.setdefault(a["asset_type"], a["storage_path"])
@@ -1170,7 +1173,22 @@ def _collect_asset_keys(point_id: str) -> dict:
     return keys
 
 
+DYNAMIC_IMAGE_LOCK = threading.RLock()
+
 def _dynamic_asset(point_id: str, asset_type: str):
+    # Serialize derivatives: three browser image requests otherwise write/read the
+    # same raw cache concurrently and multiply peak image-processing memory.
+    if not DYNAMIC_IMAGE_LOCK.acquire(timeout=15):
+        raise HTTPException(503,"ROI image is busy; retry shortly.",headers={"Retry-After":"2"})
+    try:
+        return _dynamic_asset_unlocked(point_id,asset_type)
+    except HTTPException: raise
+    except Exception as exc:
+        print(f"[dynamic-image] {point_id}/{asset_type}: {type(exc).__name__}: {exc}")
+        raise HTTPException(503,"ROI image generation failed; retry or inspect source assets.") from exc
+    finally: DYNAMIC_IMAGE_LOCK.release()
+
+def _dynamic_asset_unlocked(point_id: str, asset_type: str):
     """Generate and cache Verification overlays.
 
     Human-ROI path is intentionally lightweight: after a manual ROI is saved,
@@ -1183,10 +1201,10 @@ def _dynamic_asset(point_id: str, asset_type: str):
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
     name_map = {
-        "sem_residue_overlay": "sem_dynamic_overlay_v2395.jpg",
-        "eds_co_overlay": "eds_dynamic_overlay_v2395.jpg",
-        "c_map_enhanced_overlay": "c_dynamic_overlay_v2395.jpg",
-        "o_map_enhanced_overlay": "o_dynamic_overlay_v2395.jpg",
+        "sem_residue_overlay": "sem_dynamic_overlay_v2399.jpg",
+        "eds_co_overlay": "eds_dynamic_overlay_v2399.jpg",
+        "c_map_enhanced_overlay": "c_dynamic_overlay_v2399.jpg",
+        "o_map_enhanced_overlay": "o_dynamic_overlay_v2399.jpg",
     }
     filename = name_map.get(asset_type)
     if not filename:
@@ -1346,6 +1364,10 @@ def _human_roi_mask_for_point(point_id: str, shape):
 
 
 def _invalidate_dynamic_assets(point_id: str):
+    with DYNAMIC_IMAGE_LOCK:
+        _invalidate_dynamic_assets_unlocked(point_id)
+
+def _invalidate_dynamic_assets_unlocked(point_id: str):
     """Drop every cached derivative/raw copy for one Point.
 
     Re-analysis can replace the underlying R2 crops (not just the overlay). Keeping
@@ -1509,6 +1531,14 @@ def human_roi(point_id: str, payload: dict = Body(...)):
 @app.get("/api/assets/{point_id}/{asset_type}")
 def asset(point_id:str,asset_type:str):
     r=RECORDS.get(point_id)
+    if not r and db.configured():
+        try:
+            row=db.get_client().table("points").select("*").eq("id",point_id).single().execute().data
+            if row:
+                r=db_record(row["project_id"],row);RECORDS[point_id]=r
+        except Exception as exc:
+            print(f"[asset-point] {point_id}: {type(exc).__name__}")
+            raise HTTPException(503,"Point metadata temporarily unavailable; retry.") from exc
     key=None
     db_assets=[]
     if r:
@@ -1522,9 +1552,10 @@ def asset(point_id:str,asset_type:str):
                 local_dynamic=_dynamic_asset(point_id, asset_type)
                 if local_dynamic:
                     return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
+                raise HTTPException(503,"Human ROI overlay unavailable; inspect raw images before retrying.")
         if local and Path(local).exists():
             return FileResponse(local,media_type="image/jpeg")
-    if db.configured():
+    if db.configured() and not key:
         db_assets=db.get_assets(point_id)
         if not key:
             for a in db_assets:

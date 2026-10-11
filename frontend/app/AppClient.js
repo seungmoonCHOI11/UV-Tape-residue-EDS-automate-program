@@ -1,5 +1,6 @@
 "use client";
 import {Component,useEffect,useRef,useState,useMemo} from "react";
+import {fetchWorkspacePages} from "./workspaceLoader.mjs";
 import BatchIdentity from "./BatchIdentity";
 import AIInterpretation from "./AIInterpretation";
 import {identityText,assignSets} from "./experimentModel.mjs";
@@ -86,7 +87,7 @@ export default function App(){
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
-     const r=await fetch(`${API}/api/projects`,{cache:"no-store"});
+     const r=await fetch(`${API}/api/projects`,{cache:"no-store",signal:AbortSignal.timeout(45000)});
      if(!r.ok)throw new Error(`HTTP ${r.status}`);
      const j=await r.json();
      const list=Array.isArray(j.projects)?j.projects:[];
@@ -94,7 +95,13 @@ export default function App(){
      return list;
    }catch(e){return []}
  }
- async function loadData(preferredId=null, opts={}){
+ const workspaceFlight=useRef(null);
+ function loadData(preferredId=null,opts={}){
+   if(workspaceFlight.current)return opts.silent?workspaceFlight.current:workspaceFlight.current.finally(()=>setInitialLoading(false));
+   const pending=loadDataImpl(preferredId,opts).finally(()=>{if(workspaceFlight.current===pending)workspaceFlight.current=null});
+   workspaceFlight.current=pending;return pending;
+ }
+ async function loadDataImpl(preferredId=null, opts={}){
    const silent=!!opts.silent;
    setDataState("loading");
    // Full-screen loading is reserved for the initial mount only.
@@ -106,12 +113,9 @@ export default function App(){
      // During an active analysis queue, refresh data silently. Never replace a
      // working dashboard with the full-screen initial loader just because the
      // backend is waking up or a background job has just completed.
-     for(let attempt=0;attempt<4;attempt++){
+     for(let attempt=0;attempt<2;attempt++){
        try{
-         const target=`${API}/api/workspace`;
-         let r=await fetch(target,{cache:"no-store",signal:AbortSignal.timeout(20000)});
-         if(!r.ok) throw new Error(`HTTP ${r.status}`);
-         const j=await r.json();
+         const j=await fetchWorkspacePages(API);
          setDataState("ready");
          if(j?.project_id || j?.id){
            const pid=j.latest_project_id||j.project_id||j.id;
@@ -128,7 +132,7 @@ export default function App(){
          return [];
        }catch(e){
          lastError=e;
-         if(attempt<3) await new Promise(r=>setTimeout(r,[1200,2500,4500][attempt]));
+         if(attempt<1) await new Promise(r=>setTimeout(r,[1200,2500,4500][attempt]));
        }
      }
      // Background refresh failures must not look like data loss. Keep the
@@ -138,7 +142,7 @@ export default function App(){
      return points;
    }finally{if(!silent)setInitialLoading(false);}
  }
- useEffect(()=>{setMounted(true);(async()=>{const list=await loadProjectList();await loadData(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);if(!list.length)await loadProjectList()})()},[]);
+ useEffect(()=>{setMounted(true);(async()=>{const projects=loadProjectList();await loadData(typeof window!=="undefined"?localStorage.getItem("uvtape:selectedProject"):null);const list=await projects;if(!list.length)await loadProjectList()})()},[]);
  useEffect(()=>{
    try{const raw=JSON.parse(localStorage.getItem("uvtape:singleAnalysis")||localStorage.getItem("uvtape:analysisQueue")||"[]");if(Array.isArray(raw))setAnalysisQueue(raw.filter(x=>x?.job_id).slice(-1))}catch{}
    let cancelled=false;
@@ -320,7 +324,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  if(!mounted)return <div className="startupShell"><InitialLoading/></div>;
  if(initialLoading)return <div className="startupShell"><InitialLoading/></div>;
  const p=identifiedPoints[idx],filtered=identifiedPoints.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.7</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
+ return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.9</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
  {dataState==="error"&&<div className="workspaceAlert" role="alert"><div><b>데이터를 불러오지 못했습니다.</b><span>{points.length?"마지막으로 불러온 데이터를 표시하고 있습니다.":"저장된 Point 수를 확인할 수 없습니다. 다시 불러와 주세요."}</span></div><button className="secondary" onClick={()=>loadData(null,{silent:true})}>다시 불러오기</button></div>}
  {page==="Dashboard"&&<WorkspaceDashboard points={identifiedPoints} classify={pointClass} go={goNav} dataState={dataState} jobs={analysisQueue} openJob={()=>setAnalysisModalOpen(true)} onCondition={key=>{setConditionView(key);goNav("Condition View")}} onPoint={point=>{setIdx(points.findIndex(x=>x.id===point.id));setVerificationOpen(true)}}/>}
  {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy||activeAnalysis||!queueLoaded} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
@@ -462,7 +466,7 @@ function dynamicAsset(p,type){
  const humanSaved=(f.human_roi_saved_at||f.human_roi_polygons||f.human_roi_polygon);
  const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
  const v=needsHumanRefresh?encodeURIComponent(String(f.human_roi_saved_at||"human")):"";
- const rv="2395";
+ const rv="2399";
  return `/api/assets/${encodeURIComponent(p.id)}/${type}?rv=${rv}${v?`&v=${v}`:""}`;
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
@@ -574,13 +578,15 @@ function VerificationModal({p,idx,total,points,close,setIdx,condition,setConditi
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).map(normalizeAssetValue).filter(Boolean))];
- const signature=list.join("|");
- const [index,setIndex]=useState(0);
- useEffect(()=>{setIndex(0)},[signature]);
- const src=index<list.length?imageUrl(list[index]):null;
- if(!src)return <div className="imageError">이미지 없음</div>;
- return <img {...props} className={className} src={src} alt={safeText(alt,"analysis image")} onError={()=>setIndex(i=>Math.min(i+1,list.length))}/>;
+ const signature=list.join("|");const [index,setIndex]=useState(0),[attempt,setAttempt]=useState(0),[waiting,setWaiting]=useState(false);const retryTimer=useRef(null);
+ useEffect(()=>{clearTimeout(retryTimer.current);setIndex(0);setAttempt(0);setWaiting(false);return()=>clearTimeout(retryTimer.current)},[signature]);
+ const original=index<list.length?imageUrl(list[index]):null;
+ const src=original&&attempt&&original.startsWith(API+"/api/")?original+(original.includes('?')?'&':'?')+'retry='+attempt:original;
+ const failed=()=>{if(attempt<2){setWaiting(true);retryTimer.current=setTimeout(()=>{setAttempt(a=>a+1);setWaiting(false)},(attempt+1)*1500)}else{setIndex(i=>i+1);setAttempt(0)}};
+ if(!src)return <div className="imageError"><span>{list.length?'이미지를 불러오지 못했습니다':'저장된 이미지 경로가 없습니다'}</span>{list.length>0&&<button className="secondary" onClick={()=>{setIndex(0);setAttempt(0)}}>이미지 다시 불러오기</button>}</div>;
+ return <div className="retryImage"><img key={`${signature}-${index}-${attempt}`} {...props} className={className} src={src} alt={safeText(alt,"analysis image")} onError={failed}/>{waiting&&<small className="imageRetryNote">연결 재시도 중…</small>}{index>0&&!waiting&&<small className="imageRetryNote">대체 이미지 · ROI 표시 여부 확인</small>}</div>;
 }
+
 function Visual({title,sources}){
  const list=Array.isArray(sources)?sources:[sources];
  return <div className="visual panel"><div className="panelHead"><b>{title}</b><small>분석 근거 이미지</small></div><ImageWithFallback sources={list} alt={title}/></div>;
