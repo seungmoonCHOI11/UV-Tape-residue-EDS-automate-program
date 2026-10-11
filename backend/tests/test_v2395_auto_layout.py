@@ -71,3 +71,29 @@ def test_human_roi_is_remapped_from_legacy_crop_into_tall_crop():
     new_px=(new['x0']+r['x']*(new['x1']-new['x0']), new['y0']+r['y']*(new['y1']-new['y0']))
     assert abs(old_px[0]-new_px[0])<1e-3
     assert abs(old_px[1]-new_px[1])<1e-3
+
+
+def test_tall_layout_normalizes_one_pixel_component_jitter_before_co_overlay():
+    # Real Bruker exports can make connected-component rectangles differ by 1-2 px
+    # even though C/O/N/Si share one analytical coordinate system.
+    p2=_page()
+    for x,y,w,h in [
+        (101,190,543,408), (658,190,544,409),
+        (101,612,542,410), (658,612,543,409),
+        (101,1034,542,407),
+    ]:
+        _panel(p2,x,y,w,h)
+    maps=crop_page2_element_maps(p2)
+    shapes=[maps[k].shape[:2] for k in ('se_map','c_map','n_map','o_map','si_map')]
+    assert len(set(shapes))==1
+    from app.point_worker import make_co_overlay
+    out=make_co_overlay(maps['c_map'],maps['o_map'])
+    assert out.shape[:2]==maps['c_map'].shape[:2]
+
+
+def test_co_overlay_defensively_accepts_legacy_one_pixel_shape_mismatch():
+    from app.point_worker import make_co_overlay
+    c=np.zeros((408,543,3),np.uint8)
+    o=np.zeros((409,544,3),np.uint8)
+    out=make_co_overlay(c,o)
+    assert out.shape[:2]==(408,543)

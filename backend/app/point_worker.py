@@ -111,12 +111,36 @@ def _detect_page2_boxes(img):
     if len(rows)!=3 or sorted(len(r) for r in rows)!=[1,2,2]: return None
     if len(rows[0])!=2 or len(rows[1])!=2 or len(rows[2])!=1: return None
     r1=sorted(rows[0],key=lambda c:c["x"]); r2=sorted(rows[1],key=lambda c:c["x"]); r3=sorted(rows[2],key=lambda c:c["x"])
+
+    # v23.9.8: Bruker panels in one Page-2 export share the same analytical
+    # coordinate system.  Connected-component detection can differ by 1-2 px
+    # between C/O/N/Si because a dark border or footer pixel is sometimes merged
+    # into one panel but not another.  Using each raw component size separately
+    # therefore produced e.g. C=(408,543), O=(409,544), which later crashed the
+    # C+O overlay and also made ROI coordinates subtly inconsistent.
+    #
+    # Canonicalize the five detected panels onto one common width/height while
+    # preserving the detected row/column anchors.  The median is robust to those
+    # tiny border differences and reflects the true Bruker panel geometry.
+    allp=r1+r2+r3
+    panel_w=int(round(float(np.median([c["w"] for c in allp]))))
+    panel_h=int(round(float(np.median([c["h"] for c in allp]))))
+    left_x=int(round(float(np.median([r1[0]["x"],r2[0]["x"],r3[0]["x"]]))))
+    right_x=int(round(float(np.median([r1[1]["x"],r2[1]["x"]]))))
+    row1_y=int(round(float(np.median([c["y"] for c in r1]))))
+    row2_y=int(round(float(np.median([c["y"] for c in r2]))))
+    row3_y=int(round(float(r3[0]["y"])))
+
+    # Clamp only if the page edge would be exceeded; normally all panels remain
+    # exactly panel_w x panel_h.
+    panel_w=max(1,min(panel_w,w-max(left_x,right_x)))
+    panel_h=max(1,min(panel_h,h-max(row1_y,row2_y,row3_y)))
     boxes={
-        "se_map":_rect_dict(r1[0]["x"],r1[0]["y"],r1[0]["w"],r1[0]["h"]),
-        "c_map":_rect_dict(r1[1]["x"],r1[1]["y"],r1[1]["w"],r1[1]["h"]),
-        "n_map":_rect_dict(r2[0]["x"],r2[0]["y"],r2[0]["w"],r2[0]["h"]),
-        "o_map":_rect_dict(r2[1]["x"],r2[1]["y"],r2[1]["w"],r2[1]["h"]),
-        "si_map":_rect_dict(r3[0]["x"],r3[0]["y"],r3[0]["w"],r3[0]["h"]),
+        "se_map":_rect_dict(left_x,row1_y,panel_w,panel_h),
+        "c_map":_rect_dict(right_x,row1_y,panel_w,panel_h),
+        "n_map":_rect_dict(left_x,row2_y,panel_w,panel_h),
+        "o_map":_rect_dict(right_x,row2_y,panel_w,panel_h),
+        "si_map":_rect_dict(left_x,row3_y,panel_w,panel_h),
     }
     return boxes
 
@@ -753,6 +777,12 @@ def make_co_overlay(c_map,o_map,roi=None):
         p2,p98=np.percentile(a,[2,98])
         return np.clip((a-p2)*255/max(p98-p2,1),0,255)
     cn=norm(c); on=norm(o)
+    # Defensive guard for legacy/cached crops created before v23.9.8. New Page-2
+    # crops are canonicalized to identical dimensions, but an old asset can still
+    # be a pixel wider/taller.  Normalize O to C before channel composition instead
+    # of allowing NumPy broadcasting to abort the entire Point worker.
+    if on.shape != cn.shape:
+        on=cv2.resize(on,(cn.shape[1],cn.shape[0]),interpolation=cv2.INTER_LINEAR)
     out=np.zeros((cn.shape[0],cn.shape[1],3),np.uint8)
     # BGR: C=red, O=green, with a small blue component for readable overlap.
     out[:,:,2]=cn.astype(np.uint8)
