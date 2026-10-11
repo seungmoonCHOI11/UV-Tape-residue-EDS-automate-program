@@ -45,7 +45,7 @@ def test_comparison_single_page_raw_maps_and_order(tmp_path,fmt,n):
     assert [p['column'] for p in m['page_index']]==list(range(1,n+1))
     assert len(m['missing_assets'])==n
     assert all(p['asset']=='n_map' for p in m['missing_assets'])
-    file=folder/f'comparison_001.{fmt}'
+    file=folder/f'comparison.{fmt}'
     if fmt=='pdf': assert len(fitz.open(file))==1
     else:
         prs=Presentation(file); assert len(prs.slides)==1

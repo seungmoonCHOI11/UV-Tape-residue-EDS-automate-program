@@ -58,7 +58,7 @@ def test_gallery_pages_raw_bytes_and_aspect(tmp_path,fmt,per_page):
     assert result['pages']==2
     manifest=json.loads((folder/'manifest.json').read_text());assert len(manifest['page_index'])==len(a);assert set(manifest['sem_sha256'].values())=={digest}
     assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
-    file=next(folder.glob(f'gallery_*.{fmt}'))
+    file=folder/f'gallery.{fmt}'
     if fmt=='pptx':
         prs=Presentation(file);assert len(prs.slides)==2
         pics=[sh for sl in prs.slides for sh in sl.shapes if sh.shape_type==13];assert len(pics)==len(a)
@@ -72,18 +72,18 @@ def test_missing_raw_sem_never_uses_overlay(tmp_path):
     render_export([p],ExportOptions(kind='gallery',format='pdf'),tmp_path/'out')
     m=json.loads((tmp_path/'out/manifest.json').read_text());assert m['missing_assets']==[{'point_id':'p1','asset':'sem'}];assert m['sem_sha256']=={}
 
-def test_points_verification_and_split(tmp_path):
+def test_points_verification_and_merge(tmp_path):
     raw=images(tmp_path);a=[point(i,score_value=75) for i in range(26)]
     for p in a:p['assets']={k:str(raw) for k in ['sem','eds_map','full_element_maps_original','c_map','o_map']};p['human_result']='Residue';p['features']['human_roi_polygon']=[{'x':.2,'y':.2},{'x':.4,'y':.2},{'x':.3,'y':.4}]
-    r=render_export(a,ExportOptions(kind='points',include_verification=True),tmp_path/'out');assert r['parts']==2;assert r['pages']==26
-    prs=Presentation(tmp_path/'out/points_001.pptx');text=' '.join(sh.text for sh in prs.slides[0].shapes if sh.has_text_frame);assert 'Human: Residue' in text;assert 'saved Human ROI' in text
+    r=render_export(a,ExportOptions(kind='points',include_verification=True),tmp_path/'out');assert r['parts']==1;assert r['pages']==26
+    prs=Presentation(tmp_path/'out/points.pptx');text=' '.join(sh.text for sh in prs.slides[0].shapes if sh.has_text_frame);assert 'Human: Residue' in text;assert 'saved Human ROI' in text
     m=json.loads((tmp_path/'out/manifest.json').read_text());assert len(m['page_index'])==26
 
 def test_summary_pagination(tmp_path):
     a=[point(i,w,power=f'{150+20*i}W') for i in range(12) for w in [1,4,5]]
     # Unique IDs matter; give each sample its own ID.
     for i,p in enumerate(a):p['id']=str(i)
-    opts=ExportOptions(kind='summary',format='pdf');r=render_export(a,opts,tmp_path/'out');doc=fitz.open(tmp_path/'out/summary_001.pdf');assert len(doc)==5;assert r['pages']==5
+    opts=ExportOptions(kind='summary',format='pdf');r=render_export(a,opts,tmp_path/'out');doc=fitz.open(tmp_path/'out/summary.pdf');assert len(doc)==5;assert r['pages']==5
 
 def test_paged_database_keeps_more_than_response_cap():
     from app.db import _paged

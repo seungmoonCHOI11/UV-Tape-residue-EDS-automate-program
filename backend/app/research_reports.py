@@ -20,7 +20,7 @@ def fit(iw,ih,x,y,w,h):
 class Document:
     W,H=13.333,7.5
     def __init__(self,fmt,out):
-        self.fmt,self.out=fmt,Path(out);self.number=0
+        self.fmt,self.out=fmt,Path(out);self.number=0;self.page_offset=0
         if fmt=='pptx':
             from pptx import Presentation
             from pptx.util import Inches
@@ -40,7 +40,7 @@ class Document:
         self.text(.35,.72,12.5,.35,subtitle,9,color=MUTED)
         self.rect(.35,1.1,12.6,.015,BLUE)
         self.text(.35,7.15,11.9,.16,'SEM / EDS screening | C >= 2.40x and O >= 3.00x | Source origin not chemically confirmed by C/O alone',7,color=MUTED)
-        self.text(12.35,7.13,.6,.18,str(self.number),8,color=MUTED)
+        self.text(12.35,7.13,.6,.18,str(self.number+self.page_offset),8,color=MUTED)
     def rect(self,x,y,w,h,color=LIGHT):
         if self.fmt=='pptx':
             from pptx.util import Inches
@@ -202,14 +202,14 @@ def comparison_page(doc,records,opts,assets):
         doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis)} | Score {textnum(score(p))}",9,bold=True)
         doc.text(x+.06,6.75,width-.12,.2,f"{substrate(p)} | C {textnum(c)}x | O {textnum(o)}x",9,color=MUTED)
 
-def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
+def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);assets=Assets(folder/'assets',storage)
     total=page_count(records,opts);outputs=[];manifest=[];done=0;max_pages=25 if opts.kind=='points' else 10
     doc=None;part=0
     def page_ready():
         nonlocal doc,part
         if doc is None:
-            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}')
+            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}');doc.page_offset=done
     def flush():
         nonlocal doc
         if doc is not None:outputs.append(doc.save());doc=None;assets.clear_downloads()
@@ -232,6 +232,19 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
                 progress(progress=round(done/total*95),message=f'SEM gallery {done}/{total}')
                 if doc.number>=max_pages:flush()
         flush()
+    # Parts are temporary working files; the delivered document is always merged.
+    from .report_merge import merge_documents
+    final=folder/f'{opts.kind}.{opts.format}'
+    progress(progress=96,message='최종 파일 통합 중')
+    merge_documents(outputs,final,opts.format)
+    offsets={};offset=0
+    for part_file in outputs:
+        offsets[part_file.name]=offset
+        offset+=document_pages(part_file,opts.format)
+    for entry in manifest:
+        entry['page']+=offsets[entry['file']];entry['file']=final.name
+    for part_file in outputs:part_file.unlink()
+    outputs=[final]
     # Always deliver an audit manifest and original-SEM hashes alongside the outputs.
     audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':CLASSIFICATION_RULE_TEXT,'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
     (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8')
@@ -244,4 +257,44 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
         for p in outputs+[folder/'manifest.json',folder/'points.csv']:z.write(p,p.name)
-    return {'file':archive.name,'n':len(records),'pages':total,'parts':len(outputs),'missing_assets':len(assets.missing)}
+    return {'file':archive.name,'n':len(records),'pages':total,'parts':len(outputs),'documents':[p.name for p in outputs],'missing_assets':len(assets.missing)}
+
+
+def document_pages(path,fmt):
+    if fmt=='pdf':
+        import fitz
+        with fitz.open(path) as d:return len(d)
+    from lxml import etree
+    with zipfile.ZipFile(path) as z:
+        root=etree.fromstring(z.read('ppt/presentation.xml'))
+        return len(root.findall('{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst/*'))
+
+def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
+    if not opts.split_by_result or opts.kind in ('summary','comparison'):
+        return _render_parts(records,opts,folder,storage,progress)
+    import shutil
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    groups=[(label,[p for p in records if decision(p,opts.cohort.basis)==label]) for label in RESULTS]
+    groups=[(label,pts) for label,pts in groups if pts]
+    results=[];audits=[];outputs=[]
+    for index,(label,pts) in enumerate(groups):
+        sub=folder/label
+        result=_render_parts(pts,opts.model_copy(update={'split_by_result':False}),sub,storage,
+            lambda **v:progress(progress=round((index+v.get('progress',0)/100)/len(groups)*99),message=f"{label} · {v.get('message','')}"))
+        name=f'{opts.kind}_{label}.{opts.format}'
+        shutil.move(str(sub/f'{opts.kind}.{opts.format}'),str(folder/name));outputs.append(folder/name)
+        audit=json.loads((sub/'manifest.json').read_text(encoding='utf8'))
+        for entry in audit['page_index']:entry['file']=name
+        audits.append(audit);results.append(result)
+        shutil.copyfile(sub/'points.csv',folder/f'points_{label}.csv');outputs.append(folder/f'points_{label}.csv')
+        shutil.rmtree(sub)
+    audit={**audits[0],'options':opts.model_dump(),'n':len(records),'pages':sum(x['pages'] for x in results),
+        'point_ids':[p['id'] for p in records],
+        'identities':{k:v for a in audits for k,v in a['identities'].items()},
+        'sem_sha256':{k:v for a in audits for k,v in a['sem_sha256'].items()},
+        'missing_assets':[e for a in audits for e in a['missing_assets']],
+        'page_index':[e for a in audits for e in a['page_index']]}
+    (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8');outputs.append(folder/'manifest.json')
+    with zipfile.ZipFile(folder/'report_bundle.zip','w',zipfile.ZIP_DEFLATED) as z:
+        for p in outputs:z.write(p,p.name)
+    return {'file':'report_bundle.zip','n':len(records),'pages':audit['pages'],'parts':len(groups),'documents':[p.name for p in outputs if p.suffix=='.'+opts.format],'missing_assets':len(audit['missing_assets'])}

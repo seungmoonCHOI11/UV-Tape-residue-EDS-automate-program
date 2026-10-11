@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.12")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.14")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -1642,6 +1642,35 @@ def human_roi(point_id: str, payload: dict = Body(...)):
         except Exception as e: print(f"[human_roi_history] {e}")
     return public_record(r)
 
+def _display_element_asset(point_id,asset_type,local=None,key=None):
+    """Read-only presentation derivative. Never invokes analysis or writes the DB."""
+    import hashlib
+    from .point_worker import exclude_element_annotations
+    safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id))
+    folder=OUTPUT/"_dynamic_assets"/safe_id;folder.mkdir(parents=True,exist_ok=True)
+    stamp=f"{local}:{Path(local).stat().st_mtime_ns}" if local and Path(local).exists() else str(key)
+    digest=hashlib.sha256(stamp.encode()).hexdigest()[:16]
+    target=folder/f"display23914_{asset_type}_{digest}.png"
+    if not DYNAMIC_IMAGE_LOCK.acquire(timeout=15):raise HTTPException(503,"Image busy; retry shortly.")
+    try:
+        if not target.exists():
+            source=Path(local) if local and Path(local).exists() else folder/f"display_source_{asset_type}.jpg"
+            temporary=not (local and Path(local).exists())
+            try:
+                if temporary:
+                    if not key or not r2.configured:raise RuntimeError("Map source missing")
+                    r2.download_file(key,source)
+                im=cv2.imread(str(source),cv2.IMREAD_COLOR)
+                if im is None:raise RuntimeError("Map source unreadable")
+                if not cv2.imwrite(str(target),exclude_element_annotations(im)):raise RuntimeError("Map write failed")
+            finally:
+                if temporary:source.unlink(missing_ok=True)
+        return FileResponse(target,media_type="image/png",headers={"Cache-Control":"private, max-age=300"})
+    except HTTPException:raise
+    except Exception as exc:raise HTTPException(503,"Map display temporarily unavailable; retry.") from exc
+    finally:DYNAMIC_IMAGE_LOCK.release()
+
+
 @app.get("/api/assets/{point_id}/{asset_type}")
 def asset(point_id:str,asset_type:str):
     r=RECORDS.get(point_id)
@@ -1668,10 +1697,10 @@ def asset(point_id:str,asset_type:str):
                 if hf.get("human_overlay_version") != HUMAN_OVERLAY_VERSION or not key:
                     local_dynamic=_dynamic_asset(point_id, asset_type)
                     if local_dynamic:
-                        return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"private, max-age=300"})
+                        return _display_element_asset(point_id,asset_type,local=local_dynamic) if asset_type in {"c_map_enhanced_overlay","o_map_enhanced_overlay"} else FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"private, max-age=300"})
                     raise HTTPException(503,"Human ROI overlay unavailable; inspect raw images before retrying.")
         if local and Path(local).exists():
-            return FileResponse(local,media_type="image/jpeg")
+            return _display_element_asset(point_id,asset_type,local=local) if asset_type in {"c_map_enhanced_overlay","o_map_enhanced_overlay"} else FileResponse(local,media_type="image/jpeg")
     if db.configured() and not key:
         db_assets=db.get_assets(point_id)
         if not key:
@@ -1685,7 +1714,7 @@ def asset(point_id:str,asset_type:str):
         if not key and asset_type in {"sem_residue_overlay","eds_co_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay"}:
             local_dynamic=_dynamic_asset(point_id, asset_type)
             if local_dynamic:
-                return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
+                return _display_element_asset(point_id,asset_type,local=local_dynamic) if asset_type in {"c_map_enhanced_overlay","o_map_enhanced_overlay"} else FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
         if not key:
             aliases = {
                 "sem_residue_overlay": ["sem"],
@@ -1702,6 +1731,7 @@ def asset(point_id:str,asset_type:str):
                     key=match["storage_path"]
                     break
     if key and r2.configured:
+        if asset_type in {"c_map_enhanced_overlay","o_map_enhanced_overlay"}:return _display_element_asset(point_id,asset_type,key=key)
         return RedirectResponse(
             r2.presigned_url(key,expires=900),
             headers={"Cache-Control":"private, max-age=900"},
@@ -1712,7 +1742,7 @@ def asset(point_id:str,asset_type:str):
     dynamic_type = asset_type
     local = _dynamic_asset(point_id, dynamic_type)
     if local:
-        return FileResponse(local, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
+        return _display_element_asset(point_id,asset_type,local=local) if asset_type in {"c_map_enhanced_overlay","o_map_enhanced_overlay"} else FileResponse(local, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
     raise HTTPException(404,"asset not found")
 
 @app.post("/api/points/{point_id}/human")

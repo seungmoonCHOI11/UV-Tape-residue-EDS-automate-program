@@ -76,9 +76,15 @@ def install_report_routes(app,loader,analysis_slot,root):
             except (OSError,ValueError):pass
         return state
     @app.get('/api/research/reports/{jid}/download')
-    def download(jid:str):
+    def download(jid:str,document:str|None=None):
         state=report_status(jid)
         if state['status']!='completed':raise HTTPException(409,'Report is not complete.')
+        if document is not None:
+            if document not in state.get('documents',[]) or Path(document).name!=document:raise HTTPException(404,'Unknown document')
+            file=root/jid/document
+            if not file.is_file():raise HTTPException(410,'Report expired. Create it again.')
+            mime='application/pdf' if file.suffix=='.pdf' else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            return FileResponse(file,filename=document,media_type=mime)
         file=root/jid/'report_bundle.zip'
         if not file.exists():raise HTTPException(410,'Report expired. Create it again.')
         return FileResponse(file,filename=f'EDS_{jid[:8]}_report.zip',media_type='application/zip')

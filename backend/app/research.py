@@ -23,6 +23,7 @@ class ExportOptions(BaseModel):
     cohort:Cohort=Field(default_factory=Cohort)
     kind:Literal['summary','points','gallery','comparison']='summary'
     format:Literal['pptx','pdf']='pptx'
+    split_by_result:bool=False
     include_verification:bool=False
     per_page:Literal[10,12,16,20]=12
     group_scores:bool=True

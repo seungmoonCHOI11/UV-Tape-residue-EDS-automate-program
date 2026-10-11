@@ -760,6 +760,19 @@ def make_box_overlay(base,roi,roi_color=(0,0,255),ring_color=None):
 def make_overlay(base,mask,title=None): return make_box_overlay(base,mask)
 def make_roi_ring_overlay(base,roi,roi_color=(0,0,255),ring_color=None): return make_box_overlay(base,roi,roi_color,None)
 
+def exclude_element_annotations(im):
+    """Display-only: neutralize exactly the area excluded by global_roi_metrics.
+
+    Coordinates and analytical pixels are unchanged. No ROI, ratios or decisions
+    are recomputed. Keep labels/scale readable in monochrome for traceability.
+    """
+    out=im.copy()
+    valid=analytical_mask(out.shape)>0
+    mono=np.max(out,axis=2)
+    out[~valid]=np.repeat(mono[~valid,None],3,axis=1)
+    return out
+
+
 def enhance_element_map(im,element):
     ch=signal_channel(im,element); p2,p98=np.percentile(ch,[2,98]); norm=np.clip((ch.astype(np.float32)-p2)*255/max(p98-p2,1),0,255).astype(np.uint8); norm=cv2.createCLAHE(clipLimit=2.2,tileGridSize=(8,8)).apply(norm)
     if element=="C": return cv2.merge([np.zeros_like(norm),np.zeros_like(norm),norm])

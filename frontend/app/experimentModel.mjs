@@ -11,7 +11,7 @@ export function cleanPreset(raw){
  if(['final','auto'].includes(f.basis))filters.basis=f.basis;
  if(Array.isArray(f.wafers)&&f.wafers.every(x=>Number.isInteger(x)&&x>=1&&x<=9))filters.wafers=f.wafers;
  for(const [key,allowed] of [['results',['Residue','Non-residue','Ambiguous']],['score_bands',['0-60','60-70','70-80','80-90','90-100','missing']]])if(Array.isArray(f[key])&&f[key].every(x=>allowed.includes(x)))filters[key]=f[key];
- return {version:1,name:String(raw.name||'보고서 설정').trim().slice(0,80),kind:raw.kind,filters,includeVerification:raw.includeVerification===true,perPage:[10,12,16,20].includes(raw.perPage)?raw.perPage:12,groupScores:raw.groupScores!==false,groupConditions:raw.groupConditions!==false};
+ return {version:1,name:String(raw.name||'보고서 설정').trim().slice(0,80),kind:raw.kind,filters,splitByResult:raw.splitByResult===true,includeVerification:raw.includeVerification===true,perPage:[10,12,16,20].includes(raw.perPage)?raw.perPage:12,groupScores:raw.groupScores!==false,groupConditions:raw.groupConditions!==false};
 }
 
 export function assignSets(points,projects){
