@@ -130,8 +130,15 @@ def get_project(project_id: str):
 
 
 def get_projects(limit=100):
-    return (get_client().table("projects").select("id,name,description,created_at,updated_at,status")
-            .order("created_at", desc=True).limit(limit).execute().data or [])
+    query = (get_client().table("projects").select("id,name,description,created_at,updated_at,status")
+             .order("created_at", desc=True).order("id"))
+    out = []
+    for start in range(0, max(0, limit), 500):
+        size = min(500, limit-start)
+        rows = query.range(start, start+size-1).execute().data or []
+        out.extend(rows)
+        if len(rows) < size: break
+    return out
 
 def get_project_point_count(project_id: str):
     res = get_client().table("points").select("id", count="exact").eq("project_id", project_id).execute()

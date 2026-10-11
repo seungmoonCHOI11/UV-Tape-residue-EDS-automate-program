@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.8.1")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.0")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -950,17 +950,17 @@ def list_projects():
     if not db.configured():
         rows=[]
         for pid,p in PROJECTS.items():
-            rows.append({"id":pid,"name":p.get("name") or "UV Tape Residue","created_at":None,"point_count":len(p.get("records") or [])})
+            rows.append({"id":pid,"name":p.get("name") or "UV Tape Residue","created_at":p.get("created_at"),"research_identity":p.get("research_identity") or {},"point_count":len(p.get("records") or [])})
         return {"projects":rows}
     try:
-        rows=db.get_projects(limit=100)
+        rows=db.get_projects(limit=10000)
         out=[]
         for row in rows:
             try: meta=json.loads(row.get("description") or "{}")
             except Exception: meta={}
             try: count=db.get_project_point_count(row["id"])
             except Exception: count=0
-            out.append({"id":row["id"],"name":row.get("name") or "UV Tape Residue","created_at":row.get("created_at"),"updated_at":row.get("updated_at"),"status":row.get("status"),"point_count":count,"repeat_no":meta.get("repeat_no"),"files":meta.get("files") or [],"conditions":meta.get("conditions") or [],"substrate_type":meta.get("substrate_type") or "SiCN","position_substrates":normalize_position_substrates(meta.get("position_substrates") or {})})
+            out.append({"id":row["id"],"name":row.get("name") or "UV Tape Residue","created_at":row.get("created_at"),"updated_at":row.get("updated_at"),"status":row.get("status"),"point_count":count,"source_hashes":meta.get("source_hashes") or {},"research_identity":meta.get("research_identity") or {},"repeat_no":meta.get("repeat_no"),"files":meta.get("files") or [],"conditions":meta.get("conditions") or [],"substrate_type":meta.get("substrate_type") or "SiCN","position_substrates":normalize_position_substrates(meta.get("position_substrates") or {})})
         return {"projects":out}
     except Exception as e:
         print(f"[projects] Supabase lookup failed: {type(e).__name__}: {e}")
@@ -1462,8 +1462,11 @@ def project_ai_analysis(project_id: str):
     if project_id not in PROJECTS:
         project(project_id)
     rec=[public_record(RECORDS[x]) for x in PROJECTS[project_id]["records"]]
-    from .ai import analyze_project_with_openai
-    return analyze_project_with_openai(rec)
+    from .research_ai import interpret,InterpretationError
+    from .research import Cohort,select
+    cohort=Cohort()
+    try:return interpret(select(rec,cohort),cohort)
+    except InterpretationError as e:raise HTTPException(502,{'code':e.code,'message':e.message}) from e
 
 
 
@@ -1563,4 +1566,10 @@ def json_export(project_id:str):
 
 # Research exports use the shared analysis slot and an isolated renderer.
 from .report_api import install_report_routes
-install_report_routes(app, workspace_records_for_export, ANALYSIS_SLOT, OUTPUT)
+from .research_identity import attach_identities,install_identity_routes
+from .research_ai import install_ai_routes
+
+def research_records():return attach_identities(workspace_records_for_export(),db,PROJECTS)
+install_report_routes(app, research_records, ANALYSIS_SLOT, OUTPUT)
+install_identity_routes(app,db,PROJECTS,ANALYSIS_SLOT,JOB_PERSIST_LOCK)
+install_ai_routes(app,research_records)

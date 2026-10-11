@@ -9,7 +9,7 @@ POSITIONS={1:'Corner',4:'Edge',5:'Middle',9:'Reference'}
 RESULTS=('Residue','Non-residue','Ambiguous')
 BANDS=('0-60','60-70','70-80','80-90','90-100','missing')
 class Cohort(BaseModel):
-    scope: Literal['main','reference','other']='main'
+    scope: Literal['main','reference','other','all']='main'
     conditions: list[str]|None=None
     substrates: list[str]|None=None
     batches: list[str]|None=None
@@ -21,12 +21,14 @@ class Cohort(BaseModel):
     point_ids: list[str]|None=Field(default=None,max_length=10000)
 class ExportOptions(BaseModel):
     cohort:Cohort=Field(default_factory=Cohort)
-    kind:Literal['summary','points','gallery']='summary'
+    kind:Literal['summary','points','gallery','comparison']='summary'
     format:Literal['pptx','pdf']='pptx'
     include_verification:bool=False
     per_page:Literal[10,12,16,20]=12
     group_scores:bool=True
     group_conditions:bool=True
+    comparison_ids:list[str]=Field(default_factory=list,max_length=4)
+    comparison_maps:list[Literal['sem','c_map','o_map','n_map']]=Field(default_factory=lambda:['sem','c_map','o_map'],min_length=1,max_length=4)
     title:str=Field(default='UV Tape Residue Research',max_length=100)
 
 
@@ -107,6 +109,7 @@ def gallery_groups(records,opts:ExportOptions):
         groups[k].append(p)
     return sorted(groups.items(),key=lambda kv:(kv[0][0],kv[0][1],natural(kv[0][2]),BANDS.index(kv[0][3]) if kv[0][3] in BANDS else 0))
 def page_count(records,opts):
+    if opts.kind=='comparison':return 1
     if opts.kind=='points':return len(records)
     if opts.kind=='gallery':return sum(math.ceil(len(a)/opts.per_page) for _,a in gallery_groups(records,opts))
     s=summary(records,opts.cohort)

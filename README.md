@@ -1,3 +1,15 @@
+# Current release: v23.9.0
+
+**[START_HERE_V23.9.0.md](START_HERE_V23.9.0.md)** — 실험 비교, 시료·반복 정보, Point 비교 출력, 보고서 설정 저장, AI 해석 연결 개선. 프론트와 백엔드를 함께 재배포하세요.
+
+---
+
+# Current release: v23.8.2
+
+**[START_HERE_V23.8.2.md](START_HERE_V23.8.2.md)** — 검증 점수를 위쪽에 크게 표시하고 판정별 색상을 적용했습니다.
+
+---
+
 # Current release: v23.8.1
 
 **[START_HERE_V23.8.1.md](START_HERE_V23.8.1.md)부터 읽으세요.**

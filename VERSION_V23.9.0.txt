@@ -1,0 +1,2 @@
+v23.9.0
+Research comparison, report presets, viewport-centered startup, asynchronous AI interpretation.

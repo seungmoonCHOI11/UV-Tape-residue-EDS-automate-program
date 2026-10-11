@@ -1,0 +1,2 @@
+23.8.2
+Verification score placement and decision colors.

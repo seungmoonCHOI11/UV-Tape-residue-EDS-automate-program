@@ -189,6 +189,19 @@ def summary_pages(doc,records,opts):
                 doc.text(10.05,yy,2,.2,percent(p['balanced']),11)
         doc.text(.4,6.45,12.3,.4,'Balanced = mean of each common condition rate at this position. This is descriptive standardization, not a causal effect.',10,color=MUTED)
 
+def comparison_page(doc,records,opts,assets):
+    doc.page('Selected Point comparison','Original stored images | Columns are independent observations; scale bars retain original units')
+    width=12.6/len(records);maps=list(dict.fromkeys(opts.comparison_maps));height=4.4/len(maps)
+    for i,p in enumerate(records):
+        x=.35+i*width;ident=p.get('research_identity') or {};_,c,o,_=metadata(p,opts.cohort.basis)
+        doc.text(x+.06,1.22,width-.12,.22,f"{p.get('power')} {p.get('time')} | W{p.get('wafer')} P{p.get('point')}",11,bold=True)
+        doc.text(x+.06,1.52,width-.12,.28,f"{ident.get('sample_id') or '-'} | Repeat {ident.get('repeat_index') or '-'} | {str(p.get('project_id',''))[:12]}",8,color=MUTED)
+        for j,key in enumerate(maps):
+            y=1.95+j*height;doc.text(x+.06,y-.15,width-.12,.15,key.replace('_map','').upper(),8,bold=True)
+            doc.image(assets.get(p,key),x+.06,y,width-.12,height-.25)
+        doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis)} | Score {textnum(score(p))}",9,bold=True)
+        doc.text(x+.06,6.75,width-.12,.2,f"{substrate(p)} | C {textnum(c)}x | O {textnum(o)}x",9,color=MUTED)
+
 def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);assets=Assets(folder/'assets',storage)
     total=page_count(records,opts);outputs=[];manifest=[];done=0;max_pages=25 if opts.kind=='points' else 10
@@ -202,6 +215,9 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
         if doc is not None:outputs.append(doc.save());doc=None;assets.clear_downloads()
     if opts.kind=='summary':
         page_ready();summary_pages(doc,records,opts);done=total;flush()
+    elif opts.kind=='comparison':
+        page_ready();comparison_page(doc,records,opts,assets);done=1
+        manifest.extend({'point_id':p['id'],'file':doc.out.name,'page':1,'column':i+1} for i,p in enumerate(records));flush()
     elif opts.kind=='points':
         for p in records:
             page_ready();point_page(doc,p,opts,assets);done+=1;progress(progress=round(done/total*95),message=f'Point {done}/{total}')
@@ -217,13 +233,13 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
                 if doc.number>=max_pages:flush()
         flush()
     # Always deliver an audit manifest and original-SEM hashes alongside the outputs.
-    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'n':len(records),'pages':total,'rule':CLASSIFICATION_RULE_TEXT,'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
+    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':CLASSIFICATION_RULE_TEXT,'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
     (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8')
     with (folder/'points.csv').open('w',encoding='utf-8-sig',newline='') as f:
-        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Result','Human','C ratio','O ratio','Score','Score band'])
+        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Result','Human','C ratio','O ratio','Score','Score band','Sample ID','Repeat','Measured on','Batch label'])
         for p in records:
             _,c,o,_=metadata(p,opts.cohort.basis)
-            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis),label(p.get('human_result')) or '',c,o,score(p),band(p)]
+            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis),label(p.get('human_result')) or '',c,o,score(p),band(p),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
             writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in row])
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:

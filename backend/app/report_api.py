@@ -44,7 +44,14 @@ def install_report_routes(app,loader,analysis_slot,root):
             jid=uuid.uuid4().hex;jobs[jid]={'id':jid,'status':'preparing','progress':0,'message':'Selecting snapshot','created_at':time.time()}
         folder=root/jid;folder.mkdir()
         try:
+            if opts.kind=='comparison':
+                if len(opts.comparison_ids)<2 or len(set(opts.comparison_ids))!=len(opts.comparison_ids):raise HTTPException(422,'비교할 서로 다른 Point 2–4개를 선택하세요.')
+                opts.cohort.point_ids=opts.comparison_ids
             records=select(loader(),opts.cohort)
+            if opts.kind=='comparison':
+                by_id={str(p['id']):p for p in records}
+                if any(i not in by_id for i in opts.comparison_ids):raise HTTPException(422,'선택한 Point 일부가 현재 범위에 없습니다. 다시 선택하세요.')
+                records=[by_id[i] for i in opts.comparison_ids]
             if not records:raise HTTPException(422,'No points match the selected filters.')
             # Includes only selected persisted IDs. Snapshot locks labels and scores for this output.
             opts.cohort.point_ids=[str(p['id']) for p in records]
