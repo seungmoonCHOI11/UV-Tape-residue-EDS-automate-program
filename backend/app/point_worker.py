@@ -78,6 +78,70 @@ def analytical_mask(shape, footer_fraction=0.84):
     return m
 
 
+def _registration_signal(im, shape):
+    """High-pass grayscale image used to register Page-1 SEM to Page-2 SE.
+
+    The SEM and EDS element panels are separate captures and can be translated by a
+    few pixels.  Resizing an SEM ROI directly onto C/O therefore causes the white
+    contour to drift.  Registration uses the Page-2 SE panel as the geometry bridge;
+    C/N/O/Si panels share that Page-2 coordinate system.
+    """
+    h,w=shape[:2]
+    src=im
+    if src.shape[:2]!=(h,w):
+        src=cv2.resize(src,(w,h),interpolation=cv2.INTER_AREA)
+    gray=cv2.cvtColor(src,cv2.COLOR_BGR2GRAY) if src.ndim==3 else src.copy()
+    gray=cv2.createCLAHE(clipLimit=1.6,tileGridSize=(8,8)).apply(gray)
+    g=gray.astype(np.float32)
+    # High-pass removes different overall brightness/color-map rendering while
+    # retaining particle edges and local morphology shared by SEM and SE.
+    hp=g-cv2.GaussianBlur(g,(0,0),5.0)
+    usable=analytical_mask((h,w),footer_fraction=0.82)>0
+    hp[~usable]=0.0
+    hp-=float(hp[usable].mean()) if np.any(usable) else 0.0
+    return hp
+
+def estimate_sem_to_eds_registration(sem_ref,se_map):
+    """Estimate a conservative SEM->Page-2 translation in Page-2 pixels.
+
+    Only translation is allowed on purpose: the source report template already fixes
+    scale/aspect ratio, so allowing arbitrary affine distortion can move a correct ROI.
+    Low-confidence or implausibly large estimates fall back to zero shift.
+    """
+    if sem_ref is None or se_map is None or getattr(sem_ref,'size',0)==0 or getattr(se_map,'size',0)==0:
+        return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":0.0,"method":"resize_fallback"}
+    h,w=se_map.shape[:2]
+    try:
+        a=_registration_signal(sem_ref,(h,w)); b=_registration_signal(se_map,(h,w))
+        window=cv2.createHanningWindow((w,h),cv2.CV_32F)
+        (dx,dy),response=cv2.phaseCorrelate(a,b,window)
+        dx=float(dx); dy=float(dy); response=float(response)
+        # Normal report-to-report acquisition offsets are small.  Reject a phase
+        # correlation peak that would move the ROI by a physically implausible amount.
+        plausible=(np.isfinite(dx) and np.isfinite(dy) and np.isfinite(response)
+                   and abs(dx)<=w*0.12 and abs(dy)<=h*0.12 and response>=0.015)
+        if not plausible:
+            return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":round(response if np.isfinite(response) else 0.0,4),"method":"resize_fallback","width":w,"height":h}
+        return {"accepted":True,"dx_px":round(dx,3),"dy_px":round(dy,3),"response":round(response,4),"method":"se_phase_translation","width":w,"height":h}
+    except Exception:
+        return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":0.0,"method":"resize_fallback","width":w,"height":h}
+
+def map_sem_roi_to_eds(roi,target_shape,registration=None):
+    """Map an SEM-space ROI into the Page-2 element-map coordinate system."""
+    th,tw=target_shape[:2]
+    if roi is None:
+        return np.zeros((th,tw),np.uint8)
+    reg=registration or {}
+    rw=int(reg.get("width") or tw); rh=int(reg.get("height") or th)
+    base=cv2.resize((roi>0).astype(np.uint8)*255,(rw,rh),interpolation=cv2.INTER_NEAREST)
+    if reg.get("accepted"):
+        M=np.float32([[1,0,float(reg.get("dx_px",0.0))],[0,1,float(reg.get("dy_px",0.0))]])
+        base=cv2.warpAffine(base,M,(rw,rh),flags=cv2.INTER_NEAREST,borderMode=cv2.BORDER_CONSTANT,borderValue=0)
+    if (rh,rw)!=(th,tw):
+        base=cv2.resize(base,(tw,th),interpolation=cv2.INTER_NEAREST)
+    return base
+
+
 def _candidate_score(gray, labels, stats, idx, background, analysis_mask):
     x,y,ww,hh,area=stats[idx]
     total=float(np.count_nonzero(analysis_mask))
@@ -543,7 +607,7 @@ def roi_quality_metrics(sem_ref, roi, selected_count=1):
     q=float(np.clip(0.45*np.clip(fill/0.35,0,1)+0.35*coherence+0.20*edge_term,0,1))
     return {"roi_quality":round(q,4),"roi_fill_ratio":round(fill,4),"roi_component_count":comps,"roi_bbox_area_px":bbox}
 
-def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
+def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None):
     """Detect one or more physical residue regions and compare them with the whole field.
 
     The analysis ROI is an irregular pixel mask for the primary physical residue. Nearby
@@ -581,6 +645,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
             c["bbox"]=(int(xs.min()),int(ys.min()),int(xs.max()-xs.min()+1),int(ys.max()-ys.min()+1))
             c["area"]=int(len(xs)); c["cx"]=float((xs.min()+xs.max())/2); c["cy"]=float((ys.min()+ys.max())/2); c["ww"]=float(c["bbox"][2]); c["hh"]=float(c["bbox"][3])
     candidates=[c for c in candidates if cv2.countNonZero(c["mask"])>=20]
+    registration=estimate_sem_to_eds_registration(sem_ref,se_map)
     h,w=sem_ref.shape[:2]
     gray=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY)
     am=analytical_mask(gray.shape)>0
@@ -589,8 +654,8 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     for c in candidates:
         # Candidate pixels themselves are used for the signal comparison; no local ring.
         cmask=c["mask"]
-        roi_c=cv2.resize(cmask,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-        roi_o=cv2.resize(cmask,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+        roi_c=map_sem_roi_to_eds(cmask,c_map.shape,registration)
+        roi_o=map_sem_roi_to_eds(cmask,o_map.shape,registration)
         cm=global_roi_metrics(c_map,roi_c,"C"); om=global_roi_metrics(o_map,roi_o,"O")
         candidate_area=int(cv2.countNonZero(cmask)); vals=gray[cmask>0].astype(np.float32)
         morph_z=(float(np.median(vals))-gmed)/gstd if vals.size else 0.0
@@ -660,10 +725,10 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
     roi=np.zeros((h,w),np.uint8)
     for d in selected: roi=cv2.bitwise_or(roi,d["c"]["mask"])
     # Recalculate element metrics on the final irregular ROI.
-    rr_c=cv2.resize(roi,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-    rr_o=cv2.resize(roi,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-    rr_n=cv2.resize(roi,(n_map.shape[1],n_map.shape[0]),interpolation=cv2.INTER_NEAREST)
-    rr_si=cv2.resize(roi,(si_map.shape[1],si_map.shape[0]),interpolation=cv2.INTER_NEAREST)
+    rr_c=map_sem_roi_to_eds(roi,c_map.shape,registration)
+    rr_o=map_sem_roi_to_eds(roi,o_map.shape,registration)
+    rr_n=map_sem_roi_to_eds(roi,n_map.shape,registration)
+    rr_si=map_sem_roi_to_eds(roi,si_map.shape,registration)
     cm=global_roi_metrics(c_map,rr_c,"C"); om=global_roi_metrics(o_map,rr_o,"O")
     nm=global_roi_metrics(n_map,rr_n,"N"); sm=global_roi_metrics(si_map,rr_si,"Si")
     ce,oe=cm["score"],om["score"]
@@ -747,7 +812,8 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None):
         "review_reasons":reasons,
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
-        "classification_note":"v23.7.48 rule: Residue requires C ROI/Global >=2.40x AND O ROI/Global >=3.00x. If both are >=2.00x but either residue gate is unmet, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used.","c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO
+        "classification_note":"v23.7.48 rule: Residue requires C ROI/Global >=2.40x AND O ROI/Global >=3.00x. If both are >=2.00x but either residue gate is unmet, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used.","c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
+        "sem_to_eds_registration":registration
     },roi
 
 
@@ -797,13 +863,18 @@ def ai_boxes_to_mask(shape, boxes):
     return mask
 
 
-def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
+def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
     """Recalculate element evidence on a user-confirmed ROI without changing auto CV results."""
     roi=(roi>0).astype(np.uint8)*255
-    cm=global_roi_metrics(c_map,cv2.resize(roi,(c_map.shape[1],c_map.shape[0]),interpolation=cv2.INTER_NEAREST),"C")
-    om=global_roi_metrics(o_map,cv2.resize(roi,(o_map.shape[1],o_map.shape[0]),interpolation=cv2.INTER_NEAREST),"O")
-    nm=global_roi_metrics(n_map,cv2.resize(roi,(n_map.shape[1],n_map.shape[0]),interpolation=cv2.INTER_NEAREST),"N")
-    sm=global_roi_metrics(si_map,cv2.resize(roi,(si_map.shape[1],si_map.shape[0]),interpolation=cv2.INTER_NEAREST),"Si")
+    registration=estimate_sem_to_eds_registration(sem_ref,se_map)
+    c_roi=map_sem_roi_to_eds(roi,c_map.shape,registration)
+    o_roi=map_sem_roi_to_eds(roi,o_map.shape,registration)
+    n_roi=map_sem_roi_to_eds(roi,n_map.shape,registration)
+    si_roi=map_sem_roi_to_eds(roi,si_map.shape,registration)
+    cm=global_roi_metrics(c_map,c_roi,"C")
+    om=global_roi_metrics(o_map,o_roi,"O")
+    nm=global_roi_metrics(n_map,n_roi,"N")
+    sm=global_roi_metrics(si_map,si_roi,"Si")
     rq=roi_quality_metrics(sem_ref,roi,1)
     cr=(cm["roi_mean"]/cm["global_mean"]) if cm["global_mean"] else 0.0
     orat=(om["roi_mean"]/om["global_mean"]) if om["global_mean"] else 0.0
@@ -826,6 +897,7 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi):
         "human_residue_score":human_score,
         "human_roi_rule_result":"Residue" if both else ("Ambiguous" if moderate else "Non-residue"),
         "human_score_rule":"C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue",
+        "human_sem_to_eds_registration":registration,
         "c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
     }
 
@@ -838,7 +910,7 @@ def run(payload):
     first=cv2.imread(paths["page_1"],cv2.IMREAD_COLOR); second=cv2.imread(paths["page_2"],cv2.IMREAD_COLOR)
     if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
     p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()
-    features,roi=residue_features(p1["sem"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"],payload.get("ai_roi_boxes"))
+    features,roi=residue_features(p1["sem"],p2["c_map"],p2["o_map"],p2["n_map"],p2["si_map"],payload.get("ai_roi_boxes"),se_map=p2["se_map"])
     raw={"sem":p1["sem"],"eds_map":p1["eds_map"],"full_element_maps_original":p2["full_element_maps_original"],"se_map":p2["se_map"],"c_map":p2["c_map"],"n_map":p2["n_map"],"o_map":p2["o_map"],"si_map":p2["si_map"]}
     for key,im in raw.items():
         fp=outdir/f"{key}.jpg"; save_crop(im,fp); paths[key]=str(fp)
@@ -846,10 +918,12 @@ def run(payload):
     fp=outdir/"sem_residue_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_residue_overlay"]=str(fp)
     # Backward-compatible asset name: it now contains the contour-only overlay.
     fp=outdir/"sem_roi_ring_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_roi_ring_overlay"]=str(fp)
-    fp=outdir/"eds_co_overlay.jpg"; save_crop(make_co_overlay(p2["c_map"],p2["o_map"],roi),fp,92); paths["eds_co_overlay"]=str(fp)
-    fp=outdir/"element_maps_enhanced.jpg"; save_crop(make_element_overview(p2,roi),fp,92); paths["element_maps_enhanced"]=str(fp)
+    registration=features.get("sem_to_eds_registration") or estimate_sem_to_eds_registration(p1["sem"],p2["se_map"])
+    roi_eds=map_sem_roi_to_eds(roi,p2["c_map"].shape,registration)
+    fp=outdir/"eds_co_overlay.jpg"; save_crop(make_co_overlay(p2["c_map"],p2["o_map"],roi_eds),fp,92); paths["eds_co_overlay"]=str(fp)
+    fp=outdir/"element_maps_enhanced.jpg"; save_crop(make_element_overview(p2,roi_eds),fp,92); paths["element_maps_enhanced"]=str(fp)
     for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
-        rr=cv2.resize(roi,(p2[key].shape[1],p2[key].shape[0]),interpolation=cv2.INTER_NEAREST)
+        rr=map_sem_roi_to_eds(roi,p2[key].shape,registration)
         # Backward-compatible asset name; yellow ring is no longer drawn.
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_box_overlay(p2[key],rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":

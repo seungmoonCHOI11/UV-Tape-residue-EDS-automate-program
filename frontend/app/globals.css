@@ -438,3 +438,9 @@
 @media(max-width:700px){.rs-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.rs-tabs{flex-wrap:wrap}.rs-rate-row{grid-template-columns:100px minmax(100px,1fr) 83px}.rs-chart{overflow:auto}.rs-report-kinds{grid-template-columns:1fr}.rs-gallery-preview{overflow:auto;min-width:600px}.rs-metrics>div{padding:15px}.rs-overlay{padding:10px}}
 
 body,button,input,select,textarea{font-family:"Noto Sans KR",Arial,sans-serif}
+
+/* v23.9.2: explicit human Ambiguous decision */
+.ambiguousDecision{display:inline-flex;align-items:center;gap:6px;border-radius:8px;padding:9px 12px;font-size:10px;font-weight:800;background:#fff9ec;border:1px solid #e9c875;color:#9a6500}
+.ambiguousDecision:hover{background:#fff4d6}
+.verificationButtons .ambiguousDecision{min-width:145px;padding:11px 14px}
+@media(max-width:700px){.verificationButtons .ambiguousDecision{min-width:110px;flex:1}}

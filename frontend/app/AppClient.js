@@ -461,7 +461,7 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
    </section>
   </div>
   <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 사용자 검증 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>
-  <div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>Non-residue로 저장</button><button className="approve" onClick={()=>human("Residue")}>Residue로 저장</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> 건너뛰기</button></div>
+  <div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>Non-residue로 저장</button><button className="ambiguousDecision" onClick={()=>human("Ambiguous")}>Ambiguous로 저장</button><button className="approve" onClick={()=>human("Residue")}>Residue로 저장</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> 건너뛰기</button></div>
   <div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> 이전</button><button className="secondary" onClick={next}>다음 <ChevronRight size={14}/></button></div>
  </div>
 }

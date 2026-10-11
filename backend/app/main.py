@@ -1186,7 +1186,7 @@ def _dynamic_asset(point_id: str, asset_type: str):
         except Exception:
             return None
 
-    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask
+    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask, estimate_sem_to_eds_registration, map_sem_roi_to_eds
 
     # Fast path for saved Human ROI: only load the image(s) actually required.
     if stored_polygons:
@@ -1199,6 +1199,8 @@ def _dynamic_asset(point_id: str, asset_type: str):
             return None
         if cv2.countNonZero(roi) < 20:
             return None
+        se = load("se_map")
+        registration = estimate_sem_to_eds_registration(sem, se)
 
         if asset_type == "sem_residue_overlay":
             out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
@@ -1206,20 +1208,20 @@ def _dynamic_asset(point_id: str, asset_type: str):
             src = load("c_map")
             if src is None:
                 return None
-            rr_mask = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+            rr_mask = map_sem_roi_to_eds(roi, src.shape, registration)
             out = make_box_overlay(enhance_element_map(src, "C"), rr_mask, roi_color=(255, 255, 255))
         elif asset_type == "o_map_enhanced_overlay":
             src = load("o_map")
             if src is None:
                 return None
-            rr_mask = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+            rr_mask = map_sem_roi_to_eds(roi, src.shape, registration)
             out = make_box_overlay(enhance_element_map(src, "O"), rr_mask, roi_color=(255, 255, 255))
         elif asset_type == "eds_co_overlay":
             c = load("c_map")
             o = load("o_map")
             if c is None or o is None:
                 return None
-            out = make_co_overlay(c, o, cv2.resize(roi, (c.shape[1], c.shape[0]), interpolation=cv2.INTER_NEAREST))
+            out = make_co_overlay(c, o, map_sem_roi_to_eds(roi, c.shape, registration))
         else:
             return None
 
@@ -1239,9 +1241,11 @@ def _dynamic_asset(point_id: str, asset_type: str):
     o = load("o_map")
     n = load("n_map")
     si = load("si_map")
+    se = load("se_map")
+    features = None
     if c is not None and o is not None and n is not None and si is not None:
         try:
-            features, roi = residue_features(sem, c, o, n, si)
+            features, roi = residue_features(sem, c, o, n, si, se_map=se)
         except Exception:
             features, roi = None, None
     else:
@@ -1249,18 +1253,21 @@ def _dynamic_asset(point_id: str, asset_type: str):
         roi = candidates[0]["mask"] if candidates else np.zeros(sem.shape[:2], np.uint8)
     if roi is None:
         return None
+    registration = (features or {}).get("sem_to_eds_registration") if isinstance(features, dict) else None
+    if not registration:
+        registration = estimate_sem_to_eds_registration(sem, se)
     if asset_type == "sem_residue_overlay":
         out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
     elif asset_type == "eds_co_overlay":
         if c is None or o is None:
             return None
-        out = make_co_overlay(c, o, roi)
+        out = make_co_overlay(c, o, map_sem_roi_to_eds(roi, c.shape, registration))
     else:
         src = c if asset_type == "c_map_enhanced_overlay" else o
         label = "C" if asset_type == "c_map_enhanced_overlay" else "O"
         if src is None:
             return None
-        rr = cv2.resize(roi, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+        rr = map_sem_roi_to_eds(roi, src.shape, registration)
         out = make_box_overlay(enhance_element_map(src, label), rr, roi_color=(255, 255, 255))
     if out is None:
         return None
@@ -1318,11 +1325,12 @@ def human_roi(point_id: str, payload: dict = Body(...)):
     sem=_load_raw_point_image(point_id,"sem")
     c=_load_raw_point_image(point_id,"c_map"); o=_load_raw_point_image(point_id,"o_map")
     n=_load_raw_point_image(point_id,"n_map"); si=_load_raw_point_image(point_id,"si_map")
+    se=_load_raw_point_image(point_id,"se_map")
     if any(x is None for x in [sem,c,o,n,si]):
         raise HTTPException(503,"Original SEM/C/O/N/Si assets are not available for manual ROI analysis.")
     mask=polygon_to_mask(sem.shape,polygons)
     if cv2.countNonZero(mask)<20: raise HTTPException(400,"ROI is too small or outside the analytical image.")
-    hf=human_roi_features(sem,c,o,n,si,mask)
+    hf=human_roi_features(sem,c,o,n,si,mask,se_map=se)
     r=RECORDS[point_id]; f=dict(r.get("features") or {})
     f.update(hf)
     # Human ROI becomes the active analysis basis immediately after SAVE.
