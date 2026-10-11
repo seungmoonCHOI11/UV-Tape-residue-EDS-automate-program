@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.10")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.11")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -1239,6 +1239,75 @@ def _collect_asset_keys(point_id: str) -> dict:
 
 
 DYNAMIC_IMAGE_LOCK = threading.RLock()
+HUMAN_OVERLAY_VERSION = "v23.9.11-static"
+HUMAN_OVERLAY_FILES = {
+    "sem_residue_overlay": "sem_human_overlay_v23911.jpg",
+    "eds_co_overlay": "eds_human_overlay_v23911.jpg",
+    "c_map_enhanced_overlay": "c_human_overlay_v23911.jpg",
+    "o_map_enhanced_overlay": "o_human_overlay_v23911.jpg",
+}
+
+def _write_human_overlay_bundle(point_id: str, sem, c, o, se, roi, registration=None, persist=True):
+    """Create all four Human-ROI verification images in one bounded-memory pass.
+
+    v23.9.11: Verification used to regenerate SEM/C/O derivatives independently
+    for every Point navigation.  That repeated OpenCV registration three times per
+    Point and could exhaust a small Render instance after several reviews.  Build
+    the complete bundle once, persist it to R2, then serve static images thereafter.
+    """
+    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, estimate_sem_to_eds_registration, map_sem_roi_to_element
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(point_id))
+    outdir = OUTPUT / "_dynamic_assets" / safe_id
+    outdir.mkdir(parents=True, exist_ok=True)
+    if registration is None:
+        registration = estimate_sem_to_eds_registration(sem, se)
+    c_mask = map_sem_roi_to_element(roi, c, se, registration)
+    o_mask = map_sem_roi_to_element(roi, o, se, registration)
+    outputs = {
+        "sem_residue_overlay": make_box_overlay(sem, roi, roi_color=(0,0,255)),
+        "c_map_enhanced_overlay": make_box_overlay(enhance_element_map(c, "C"), c_mask, roi_color=(255,255,255)),
+        "o_map_enhanced_overlay": make_box_overlay(enhance_element_map(o, "O"), o_mask, roi_color=(255,255,255)),
+        "eds_co_overlay": make_co_overlay(c, o, c_mask),
+    }
+    paths = {}
+    for asset_type, image in outputs.items():
+        if image is None:
+            continue
+        fp = outdir / HUMAN_OVERLAY_FILES[asset_type]
+        cv2.imwrite(str(fp), image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        if fp.exists() and fp.stat().st_size > 500:
+            paths[asset_type] = str(fp)
+    r = RECORDS.get(point_id)
+    if r is not None:
+        r.setdefault("assets", {}).update(paths)
+        f = r.setdefault("features", {})
+        f["human_overlay_saved_at"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+        persisted = 0
+        if persist and r2.configured:
+            project_id = str(r.get("project_id") or "workspace")
+            for asset_type, local_path in paths.items():
+                key = (r.get("r2_assets") or {}).get(asset_type) or f"projects/{project_id}/points/{point_id}/{asset_type}.jpg"
+                try:
+                    r2.upload_file(local_path, key, "image/jpeg")
+                    r.setdefault("r2_assets", {})[asset_type] = key
+                    if db.configured():
+                        db.upsert_asset(point_id, asset_type, key)
+                    persisted += 1
+                except Exception as exc:
+                    print(f"[human-overlay] persist {point_id}/{asset_type}: {type(exc).__name__}: {exc}")
+            if len(paths) == len(HUMAN_OVERLAY_FILES) and persisted == len(paths):
+                f["human_overlay_version"] = HUMAN_OVERLAY_VERSION
+            else:
+                f.pop("human_overlay_version", None)
+            if db.configured():
+                try: db.upsert_analysis(point_id, f)
+                except Exception as exc: print(f"[human-overlay] analysis flag: {exc}")
+        else:
+            f.pop("human_overlay_version", None)
+    # Release large native arrays as soon as possible.
+    del outputs, c_mask, o_mask
+    trim_process_memory()
+    return paths
 
 def _dynamic_asset(point_id: str, asset_type: str):
     # Serialize derivatives: three browser image requests otherwise write/read the
@@ -1251,7 +1320,9 @@ def _dynamic_asset(point_id: str, asset_type: str):
     except Exception as exc:
         print(f"[dynamic-image] {point_id}/{asset_type}: {type(exc).__name__}: {exc}")
         raise HTTPException(503,"ROI image generation failed; retry or inspect source assets.") from exc
-    finally: DYNAMIC_IMAGE_LOCK.release()
+    finally:
+        DYNAMIC_IMAGE_LOCK.release()
+        trim_process_memory()
 
 def _dynamic_asset_unlocked(point_id: str, asset_type: str):
     """Generate and cache Verification overlays.
@@ -1265,12 +1336,7 @@ def _dynamic_asset_unlocked(point_id: str, asset_type: str):
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(point_id))
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
-    name_map = {
-        "sem_residue_overlay": "sem_dynamic_overlay_v2399.jpg",
-        "eds_co_overlay": "eds_dynamic_overlay_v2399.jpg",
-        "c_map_enhanced_overlay": "c_dynamic_overlay_v2399.jpg",
-        "o_map_enhanced_overlay": "o_dynamic_overlay_v2399.jpg",
-    }
+    name_map = dict(HUMAN_OVERLAY_FILES)
     filename = name_map.get(asset_type)
     if not filename:
         return None
@@ -1315,10 +1381,14 @@ def _dynamic_asset_unlocked(point_id: str, asset_type: str):
 
     from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask, estimate_sem_to_eds_registration, map_sem_roi_to_eds, map_sem_roi_to_element
 
-    # Fast path for saved Human ROI: only load the image(s) actually required.
+    # Fast path for saved Human ROI. Build all verification derivatives once and
+    # persist them; subsequent Point navigation is a cheap static R2 read.
     if stored_polygons:
         sem = load("sem", ("sem_original", "sem_residue_overlay"))
-        if sem is None:
+        c = load("c_map")
+        o = load("o_map")
+        se = load("se_map")
+        if sem is None or c is None or o is None:
             return None
         try:
             roi = polygon_to_mask(sem.shape, stored_polygons)
@@ -1326,36 +1396,9 @@ def _dynamic_asset_unlocked(point_id: str, asset_type: str):
             return None
         if cv2.countNonZero(roi) < 20:
             return None
-        se = load("se_map")
         registration = estimate_sem_to_eds_registration(sem, se)
-
-        if asset_type == "sem_residue_overlay":
-            out = make_box_overlay(sem, roi, roi_color=(0, 0, 255))
-        elif asset_type == "c_map_enhanced_overlay":
-            src = load("c_map")
-            if src is None:
-                return None
-            rr_mask = map_sem_roi_to_element(roi, src, se, registration)
-            out = make_box_overlay(enhance_element_map(src, "C"), rr_mask, roi_color=(255, 255, 255))
-        elif asset_type == "o_map_enhanced_overlay":
-            src = load("o_map")
-            if src is None:
-                return None
-            rr_mask = map_sem_roi_to_element(roi, src, se, registration)
-            out = make_box_overlay(enhance_element_map(src, "O"), rr_mask, roi_color=(255, 255, 255))
-        elif asset_type == "eds_co_overlay":
-            c = load("c_map")
-            o = load("o_map")
-            if c is None or o is None:
-                return None
-            out = make_co_overlay(c, o, map_sem_roi_to_element(roi, c, se, registration))
-        else:
-            return None
-
-        if out is None:
-            return None
-        cv2.imwrite(str(target), out, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-        return str(target) if target.exists() else None
+        paths = _write_human_overlay_bundle(point_id, sem, c, o, se, roi, registration=registration, persist=True)
+        return paths.get(asset_type)
 
     # Legacy/AI-CV compatibility path: retain the previous full calculation.
     from .point_worker import residue_features, detect_residue_candidates
@@ -1475,8 +1518,11 @@ def _recalculate_human_roi_point(point_id: str):
     f["human_roi_recalculated_at"]=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     r["features"]=f
     _invalidate_dynamic_assets(point_id)
+    _write_human_overlay_bundle(point_id, sem, c, o, se, mask, persist=True)
+    f=r.get("features") or f
     if db.configured():
         db.upsert_analysis(point_id,f)
+    trim_process_memory()
     return public_record(r)
 
 
@@ -1514,6 +1560,7 @@ def _process_workspace_human_roi_recalc(job_id: str):
                 _recalculate_human_roi_point(pid)
             except Exception as e:
                 failures.append({"id":pid,"stage":"ROI_RECALC","error":f"{type(e).__name__}: {e}"})
+            trim_process_memory()
             set_job(job_id,status="processing",phase="roi_recalc",progress=min(99,2+int(i/max(total,1)*97)),completed=i-len(failures),total=total,failed_count=len(failures),failed_points=list(failures),message=f"Human ROI 재계산 중 · {i}/{total} · 실패 {len(failures)}")
         status="partial" if failures else "completed"
         set_job(job_id,status=status,phase="partial" if failures else "complete",progress=100,completed=total-len(failures),total=total,failed_count=len(failures),failed_points=list(failures),message=(f"Human ROI 재계산 완료 · {total-len(failures)}/{total}" if not failures else f"Human ROI 재계산 부분 완료 · 성공 {total-len(failures)}/{total} · 실패 {len(failures)}"))
@@ -1587,6 +1634,8 @@ def human_roi(point_id: str, payload: dict = Body(...)):
         f["human_roi_vs_ai_iou"]=round(inter/max(union,1),4)
     r["features"]=f
     _invalidate_dynamic_assets(point_id)
+    _write_human_overlay_bundle(point_id, sem, c, o, se, mask, persist=True)
+    f=r.get("features") or f
     if db.configured():
         db.upsert_analysis(point_id,f)
         try: db.add_review_history(point_id,r.get("human_result"),r.get("human_result"),"Manual ROI saved; C/O re-evaluated and stored as Ground Truth candidate.")
@@ -1614,10 +1663,13 @@ def asset(point_id:str,asset_type:str):
         if asset_type in {"sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"}:
             hf=r.get("features") or {}
             if hf.get("human_roi_polygons") or hf.get("human_roi_polygon"):
-                local_dynamic=_dynamic_asset(point_id, asset_type)
-                if local_dynamic:
-                    return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"no-store, max-age=0"})
-                raise HTTPException(503,"Human ROI overlay unavailable; inspect raw images before retrying.")
+                # If v23.9.11 has already materialized this Human-ROI overlay,
+                # skip OpenCV entirely and serve the persisted R2 object below.
+                if hf.get("human_overlay_version") != HUMAN_OVERLAY_VERSION or not key:
+                    local_dynamic=_dynamic_asset(point_id, asset_type)
+                    if local_dynamic:
+                        return FileResponse(local_dynamic, media_type="image/jpeg", headers={"Cache-Control":"private, max-age=300"})
+                    raise HTTPException(503,"Human ROI overlay unavailable; inspect raw images before retrying.")
         if local and Path(local).exists():
             return FileResponse(local,media_type="image/jpeg")
     if db.configured() and not key:
@@ -1652,7 +1704,7 @@ def asset(point_id:str,asset_type:str):
     if key and r2.configured:
         return RedirectResponse(
             r2.presigned_url(key,expires=900),
-            headers={"Cache-Control":"no-store, max-age=0"},
+            headers={"Cache-Control":"private, max-age=900"},
         )
 
     # Compatibility for old points: regenerate the requested v21 visual from the

@@ -466,7 +466,7 @@ function dynamicAsset(p,type){
  const humanSaved=(f.human_roi_saved_at||f.human_roi_polygons||f.human_roi_polygon);
  const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
  const v=needsHumanRefresh?encodeURIComponent(String(f.human_roi_saved_at||"human")):"";
- const rv="2399";
+ const rv="23911";
  return `/api/assets/${encodeURIComponent(p.id)}/${type}?rv=${rv}${v?`&v=${v}`:""}`;
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
