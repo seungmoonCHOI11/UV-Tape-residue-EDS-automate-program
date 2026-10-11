@@ -450,3 +450,7 @@ body,button,input,select,textarea{font-family:"Noto Sans KR",Arial,sans-serif}
 @media(max-width:760px){.deleteRowActions{width:100%;justify-content:flex-end;flex-wrap:wrap}.deleteRowActions button{flex:0 0 auto}}
 .reanalysisTag{background:#eef7f2!important;color:#237f74!important}.batchJobMessage{display:block!important;margin-top:7px!important;color:#4f6986!important;white-space:normal!important;line-height:1.6}
 .analysisPhaseLine{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 11px;margin:10px 0 2px;border:1px solid #dce3eb;border-radius:8px;background:#f8fafc}.analysisPhaseLine span{font-size:11px;color:#596b7e}.analysisPhaseLine b{font-size:12px;color:#192c40}
+/* v23.9.13 Human ROI canvas loading/fallback state */
+.humanRoiCanvasWrap{position:relative;min-height:170px}
+.humanRoiCanvasStatus{position:absolute;inset:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(21,25,34,.88);color:#eef3f8;border-radius:7px;font-size:12px;z-index:2;pointer-events:auto}
+.humanRoiCanvasStatus button{font-size:11px}

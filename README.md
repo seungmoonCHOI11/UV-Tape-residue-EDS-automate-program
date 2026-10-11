@@ -38,3 +38,9 @@ GitHub의 backend와 frontend를 함께 업데이트하고 Render와 Vercel 배�
 - 판정별 분리, 빈 판정 제외, SEM 갤러리 및 요약의 단일 출력 검증.
 - 기존 분석 함수들의 AST가 원본과 동일함을 확인했습니다. 표시용 헬퍼만 추가했습니다.
 - 실제 사용자의 162 Point/R2 데이터 또는 운영 Render에서의 최대 메모리는 측정하지 않았습니다. 통합 시 이미지를 다시 디코딩하지 않도록 설계했지만 모든 크기의 보고서에 대해 512MB 이하를 보장하지는 않습니다.
+
+## v23.9.15
+- Keeps v23.9.14 PDF/PPT export, merge, split-by-result, and direct document download features.
+- Restores Verification display/interaction to v23.9.13 behavior.
+- C/O maps in Verification are no longer display-converted to grayscale outside the analytical mask.
+
