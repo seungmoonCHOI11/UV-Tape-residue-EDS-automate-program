@@ -81,6 +81,8 @@ export default function App(){
  const identifiedPoints=useMemo(()=>assignSets(points,projectList),[points,projectList]);
  const uploadingRef=useRef(false);
  const activeAnalysis=analysisQueue.some(isActiveJob);
+ const activeJob=analysisQueue.find(isActiveJob)||analysisQueue[0]||null;
+ const activeJobIsReanalysis=activeJob?.job_type==="reanalysis";
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -174,6 +176,7 @@ export default function App(){
  const terminalKey=analysisQueue.filter(x=>TERMINAL_JOBS.has(x.status)).map(x=>`${x.job_id}:${x.status}`).join(",");
  useEffect(()=>{if(queueLoaded&&terminalKey){loadProjectList();loadData(null,{silent:true});}},[terminalKey,queueLoaded]);
  useEffect(()=>{const h=e=>{if(typeof e.detail?.index!=="number")return;setIdx(e.detail.index);setVerificationOpen(true)};window.addEventListener("uvtape:open-point",h);return()=>window.removeEventListener("uvtape:open-point",h)},[]);
+ useEffect(()=>{const h=()=>setAnalysisModalOpen(true);window.addEventListener("uvtape:open-analysis-status",h);return()=>window.removeEventListener("uvtape:open-analysis-status",h)},[]);
 function nextUnverified(start=0){
  for(let i=Math.max(0,start);i<points.length;i++) if(!points[i].human_result) return i;
  return -1;
@@ -275,35 +278,34 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
  async function runProjectAI(){if(!project)return notify("먼저 분석 데이터를 불러오세요.");setAiBusy(true);notify("OpenAI가 전체 실험 결과를 분석하고 있습니다...");try{const r=await fetch(`${API}/api/projects/${project}/ai-analysis`,{method:"POST"});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"AI analysis failed");setAiAnalysis(j);setPage("AI Analysis");notify("AI 연구 분석 완료")}catch(e){notify("AI 분석 오류: "+e.message)}finally{setAiBusy(false)}}
 async function reanalyzeProject(targetProjectId,batchMeta={}){
    if(!targetProjectId)return notify("재분석할 배치를 선택할 수 없습니다.");
+   if(activeAnalysis)return notify("진행 중인 분석 또는 재분석이 끝난 뒤 시작하세요.");
    const files=Array.isArray(batchMeta?.files)?batchMeta.files.filter(Boolean):[];
    const label=safeText(batchMeta?.name,"UV Tape Residue");
    const sourceLabel=files.length?files.join(", "):"저장된 원본 PDF";
    const pointCount=Number(batchMeta?.point_count||0);
    if(!files.length)return notify("이 배치에는 저장된 원본 PDF 정보가 없어 개별 재분석을 시작할 수 없습니다.");
    if(!window.confirm(`이 배치만 다시 분석할까요?\n\n${label}\n${sourceLabel}${pointCount?`\n현재 ${pointCount} Points`:""}\n\n다른 배치는 건드리지 않습니다. 기존 Human ROI와 사용자 검증 판정은 보존합니다.`))return;
-   setBusy(true);setProgress(5);setProgressPhase("reanalysis");setProgressMessage(`${sourceLabel} · 재분석 준비 중`);
+   setBusy(true);
    try{
      const r=await fetch(`${API}/api/projects/${targetProjectId}/reanalyze`,{method:"POST"});
      const j=await r.json();if(!r.ok)throw new Error(j.detail||j.message||"re-analysis failed");
-     const poll=async()=>{
-       const pr=await fetch(`${API}/api/jobs/${j.job_id}`,{cache:"no-store"});
-       const st=await pr.json();
-       setProgress(st.progress||0);setProgressPhase(st.phase||"reanalysis");setProgressMessage(st.message||`${sourceLabel} · 재분석 중...`);
-       if(st.status==="completed"||st.status==="partial"){
-         await loadProjectList();
-         await loadData(null,{silent:true});
-         setBusy(false);
-         notify(st.status==="partial"?`${sourceLabel} · 재분석 부분 완료 · 실패 ${st.failed_count||0} Point`:`${sourceLabel} · 재분석 완료`);
-         setTimeout(()=>{setProgressPhase("idle");setProgressMessage("");setProgress(0)},1000);
-         return;
-       }
-       if(st.status==="failed"||st.status==="cancelled"||st.status==="interrupted"){
-         setBusy(false);throw new Error(st.error||st.message||"재분석 실패");
-       }
-       setTimeout(poll,1200);
-     };
-     await poll();
-   }catch(e){setBusy(false);setProgressPhase("idle");setProgressMessage("");setProgress(0);notify("재분석 오류: "+e.message)}
+     setAnalysisQueue([{
+       job_id:j.job_id,
+       job_type:"reanalysis",
+       project_id:targetProjectId,
+       batch_name:label,
+       files,
+       total:j.expected_points||pointCount||0,
+       status:"queued",
+       phase:"queued",
+       progress:5,
+       completed:0,
+       message:`${sourceLabel} · 원본 PDF를 불러와 재분석을 준비합니다.`
+     }]);
+     setAnalysisModalOpen(true);
+     notify(`${sourceLabel} · 배치 재분석을 시작했습니다. 다른 화면으로 이동해도 계속 진행됩니다.`);
+   }catch(e){notify("재분석 오류: "+e.message)}
+   finally{setBusy(false)}
  }
 
  async function openVerification(){
@@ -318,7 +320,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  if(!mounted)return <div className="startupShell"><InitialLoading/></div>;
  if(initialLoading)return <div className="startupShell"><InitialLoading/></div>;
  const p=identifiedPoints[idx],filtered=identifiedPoints.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.6</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`분석 중 · ${Math.round(analysisQueue[0]?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
+ return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.7</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
  {dataState==="error"&&<div className="workspaceAlert" role="alert"><div><b>데이터를 불러오지 못했습니다.</b><span>{points.length?"마지막으로 불러온 데이터를 표시하고 있습니다.":"저장된 Point 수를 확인할 수 없습니다. 다시 불러와 주세요."}</span></div><button className="secondary" onClick={()=>loadData(null,{silent:true})}>다시 불러오기</button></div>}
  {page==="Dashboard"&&<WorkspaceDashboard points={identifiedPoints} classify={pointClass} go={goNav} dataState={dataState} jobs={analysisQueue} openJob={()=>setAnalysisModalOpen(true)} onCondition={key=>{setConditionView(key);goNav("Condition View")}} onPoint={point=>{setIdx(points.findIndex(x=>x.id===point.id));setVerificationOpen(true)}}/>}
  {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy||activeAnalysis||!queueLoaded} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
@@ -326,7 +328,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  {page==="AI Analysis"&&<AIInterpretation points={identifiedPoints} api={API}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
  {page==="Condition View"&&<ConditionView points={identifiedPoints} selected={conditionView} setSelected={setConditionView} go={goNav}/>}
- {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
+ {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList} analysisQueue={analysisQueue}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">저장 데이터 불러오는 중</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>프로젝트 연결 확인</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -337,7 +339,8 @@ function AnalysisBatchModal({items,open,close}){
  if(!open)return null;
  const item=items[0],active=item&&isActiveJob(item),pct=Math.round(item?.progress||0);
  const roiJob=item?.job_type==="human_roi_recalc"||item?.phase==="roi_recalc";
- const labels=roiJob?{completed:"Human ROI 재계산 완료",partial:"Human ROI 일부 재계산",failed:"Human ROI 재계산 실패",interrupted:"Human ROI 재계산 중단",cancelled:"Human ROI 재계산 취소",queued:"Human ROI 재계산 대기",processing:"Human ROI 재계산 중"}:{completed:"분석 완료",partial:"일부 Point만 저장됨",failed:"분석 실패",interrupted:"분석 중단",cancelled:"분석 취소",queued:"분석 대기",processing:"분석 중"};
+ const reanalysisJob=item?.job_type==="reanalysis";
+ const labels=roiJob?{completed:"Human ROI 재계산 완료",partial:"Human ROI 일부 재계산",failed:"Human ROI 재계산 실패",interrupted:"Human ROI 재계산 중단",cancelled:"Human ROI 재계산 취소",queued:"Human ROI 재계산 대기",processing:"Human ROI 재계산 중"}:reanalysisJob?{completed:"배치 재분석 완료",partial:"배치 재분석 일부 완료",failed:"배치 재분석 실패",interrupted:"배치 재분석 중단",cancelled:"배치 재분석 취소",queued:"배치 재분석 대기",processing:"배치 재분석 중"}:{completed:"분석 완료",partial:"일부 Point만 저장됨",failed:"분석 실패",interrupted:"분석 중단",cancelled:"분석 취소",queued:"분석 대기",processing:"분석 중"};
  const failures=Array.isArray(item?.failed_points)?item.failed_points:[];
  const missing=Array.isArray(item?.missing_points)?item.missing_points:[];
  const incomplete=Array.isArray(item?.incomplete_points)?item.incomplete_points:[];
@@ -345,13 +348,17 @@ function AnalysisBatchModal({items,open,close}){
  const detected=Number.isFinite(Number(item?.detected_points))?Number(item.detected_points):null;
  const total=Number(item?.total||0);
  const mode=item?.recognition_mode==="point_label"?"PDF Point label 기준":item?.recognition_mode==="page_order"?"3-page 순서 기준":"";
+ const reanalysisSaving=reanalysisJob&&["database","save","complete","partial"].includes(item?.phase);
+ const primaryDone=reanalysisJob?(reanalysisSaving?Number(item?.completed||0):Number(item?.processed??item?.completed??0)):Number(item?.completed||0);
+ const primaryLabel=roiJob?"재계산 완료":reanalysisJob?(reanalysisSaving?"DB 반영":"Point 처리"):"저장 완료";
+ const phaseLabel=roiJob?"Human ROI 재계산":reanalysisJob?({queued:"원본 PDF 준비",analysis:"Point 재분석",database:"기존 Point 반영",complete:"완료",partial:"부분 완료",error:"오류"}[item?.phase]||"배치 재분석"):({queued:"분석 준비",analysis:"Point 분석",database:"결과 저장",reconcile:"최종 저장 검증",repair:"누락 복구",complete:"완료",partial:"부분 완료",error:"오류"}[item?.phase]||"분석 진행");
  return <div className="progressOverlay"><div className="progressModal batchProgressModal">
-  <div className="progressTop"><div><span className="badge"><Activity size={13}/>{roiJob?" HUMAN ROI":" PDF ANALYSIS"}</span><h3>{labels[item?.status]||"작업 상태 확인"}</h3></div><b>{pct}%</b></div>
-  <p>{item?.files?.join(", ")}</p><div className="progressTrack"><div className="progressBar" style={{width:`${pct}%`}}/></div>
-  <p>{item?.message}</p>
+  <div className="progressTop"><div><span className="badge"><Activity size={13}/>{roiJob?" HUMAN ROI":reanalysisJob?" BATCH REANALYSIS":" PDF ANALYSIS"}</span><h3>{labels[item?.status]||"작업 상태 확인"}</h3></div><b>{pct}%</b></div>
+  <p>{reanalysisJob&&item?.batch_name?<><strong>{item.batch_name}</strong><br/></>:null}{item?.files?.join(", ")}</p><div className="progressTrack"><div className="progressBar" style={{width:`${pct}%`}}/></div>
+  <p>{item?.message}</p><div className="analysisPhaseLine"><span>현재 단계</span><b>{phaseLabel}</b></div>
   <div className="analysisStatusGrid">
-   <div><small>{roiJob?"재계산 완료":"저장 완료"}</small><b>{item?.completed||0} / {total||0}</b></div>
-   <div><small>{roiJob?"대상 Human ROI":"PDF Point 인식"}</small><b>{roiJob?(total||"확인 중"):(detected==null?"확인 중":`${detected} / ${total||detected}`)}</b>{!roiJob&&mode&&<span>{mode}</span>}</div>
+   <div><small>{primaryLabel}</small><b>{primaryDone} / {total||0}</b></div>
+   <div><small>{roiJob?"대상 Human ROI":reanalysisJob?"PDF Point / 대상":"PDF Point 인식"}</small><b>{roiJob?(total||"확인 중"):(detected==null?"확인 중":`${detected} / ${total||detected}`)}</b>{!roiJob&&mode&&<span>{mode}</span>}</div>
    <div><small>{roiJob?"재계산 오류":"미완성 / 오류"}</small><b>{item?.failed_count||incomplete.length||0}</b></div>
   </div>
   {recovered.length>0&&<div className="analysisRecovered"><b>자동 복구 {recovered.length} Point</b><span>{recovered.join(", ")}</span></div>}
@@ -359,7 +366,7 @@ function AnalysisBatchModal({items,open,close}){
   {missing.length>0&&<div className="analysisIssueBox"><b>PDF에서 매칭되지 않은 Point {missing.length}개</b><p>{missing.map(x=>x.id||`W${x.wafer}-P${x.point}`).join(", ")}</p></div>}
   {failures.length>0&&<div className="analysisFailureList"><b>실패 Point / 원인</b>{failures.map((f,i)=><div className="analysisFailureItem" key={`${f.id||i}-${i}`}><div><strong>{f.id||`W${f.wafer}-P${f.point}`}</strong><span>{f.stage||"analysis"}</span></div><p>{f.error||"Unknown error"}</p></div>)}</div>}
   {item?.storage_warning&&<p className="analysisWarning">{item.storage_warning}</p>}
-  <div className="batchProgressBottom"><span>{roiJob?(active?"기존 Human ROI 도형과 사용자 검증 판정은 유지한 채 C/O 좌표와 수치만 다시 계산합니다.":"완료 후 Verification을 다시 열면 새 C/O 좌표와 수치가 표시됩니다."):(active?"다른 화면에서 작업해도 분석은 계속됩니다. 분석이 끝나면 Point와 이미지의 저장 상태를 확인합니다.":"완료 수치는 최종 저장 검증 결과입니다. 자동 복구/미완성 Point도 여기서 확인할 수 있습니다.")}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+  <div className="batchProgressBottom"><span>{roiJob?(active?"기존 Human ROI 도형과 사용자 검증 판정은 유지한 채 C/O 좌표와 수치만 다시 계산합니다.":"완료 후 Verification을 다시 열면 새 C/O 좌표와 수치가 표시됩니다."):reanalysisJob?(active?"다른 화면으로 이동하거나 이 창을 닫아도 재분석은 계속됩니다. 기존 Human ROI와 사용자 검증 판정은 보존됩니다.":"완료 후 해당 배치의 새 crop/분석 결과가 기존 Point에 반영됩니다."):(active?"다른 화면에서 작업해도 분석은 계속됩니다. 분석이 끝나면 Point와 이미지의 저장 상태를 확인합니다.":"완료 수치는 최종 저장 검증 결과입니다. 자동 복구/미완성 Point도 여기서 확인할 수 있습니다.")}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
  </div></div>
 }
 function Metric({t,v,s}){return <div className="metric"><small>{t}</small><b>{v}</b><span>{s}</span></div>}
@@ -686,9 +693,9 @@ function Compare({points,selected,setSelected}){
  </div>
 }
 
-function DeleteData({projectList,currentProject,deleteProject,busy,reanalyze,api,reloadProjects}){
+function DeleteData({projectList,currentProject,deleteProject,busy,reanalyze,api,reloadProjects,analysisQueue=[]}){
  const list=Array.isArray(projectList)?projectList:[];
- return <div className="content"><div className="intro"><div><h2>데이터 관리</h2><p>업로드 배치별로 필요한 데이터만 재분석하거나 삭제합니다. 정상 배치는 그대로 두고, crop이 틀어진 PDF 배치만 재분석하면 됩니다.</p></div></div><section className="panel maintenancePanel batchReanalysisGuide"><div><b>선택 재분석</b><p>각 배치 오른쪽의 <strong>이 배치 재분석</strong>을 누르면 해당 원본 PDF만 다시 처리합니다. 다른 배치와 기존 Human ROI / 사용자 검증 판정은 유지됩니다.</p></div></section><BatchIdentity projects={projectList} api={api} onSaved={reloadProjects} disabled={busy}/><section className="panel deleteDataPanel"><div className="panelHead"><b>저장된 업로드 배치</b><small>원본 PDF별로 재분석할 수 있습니다. 재분석이 필요한 배치만 실행하면 시간을 크게 줄일 수 있습니다.</small></div>{!list.length?<div className="deleteEmpty">저장된 업로드 배치가 없습니다.</div>:<div className="deleteList">{list.map((x,i)=>{const hasSource=Array.isArray(x.files)&&x.files.length>0;return <div className={`deleteRow ${x.id===currentProject?"current":""}`} key={x.id}><div className="deleteMeta"><b>{x.name||"UV Tape Residue"}{x.id===currentProject&&<span className="currentTag">현재 배치</span>}</b><span>{x.created_at?new Date(x.created_at).toLocaleString("ko-KR"):"-"} · {x.point_count||0} points</span><small>{(x.files||[]).join(", ")||"원본 PDF 정보 없음"}</small></div><div className="deleteRowActions"><button className="secondary batchReanalyzeBtn" disabled={busy||!hasSource} title={hasSource?"이 원본 PDF 배치만 재분석":"저장된 원본 PDF 정보가 없어 재분석할 수 없습니다."} onClick={()=>reanalyze(x.id,x)}><RotateCcw size={13}/> 이 배치 재분석</button><button className="danger" disabled={busy} onClick={()=>deleteProject(x.id,x)}><Trash2 size={13}/> 배치 삭제</button></div></div>})}</div>}</section></div>
+ return <div className="content"><div className="intro"><div><h2>데이터 관리</h2><p>업로드 배치별로 필요한 데이터만 재분석하거나 삭제합니다. 정상 배치는 그대로 두고, crop이 틀어진 PDF 배치만 재분석하면 됩니다.</p></div></div><section className="panel maintenancePanel batchReanalysisGuide"><div><b>선택 재분석</b><p>각 배치 오른쪽의 <strong>이 배치 재분석</strong>을 누르면 해당 원본 PDF만 다시 처리합니다. 다른 배치와 기존 Human ROI / 사용자 검증 판정은 유지됩니다.</p></div></section><BatchIdentity projects={projectList} api={api} onSaved={reloadProjects} disabled={busy}/><section className="panel deleteDataPanel"><div className="panelHead"><b>저장된 업로드 배치</b><small>원본 PDF별로 재분석할 수 있습니다. 재분석이 필요한 배치만 실행하면 시간을 크게 줄일 수 있습니다.</small></div>{!list.length?<div className="deleteEmpty">저장된 업로드 배치가 없습니다.</div>:<div className="deleteList">{list.map((x,i)=>{const hasSource=Array.isArray(x.files)&&x.files.length>0;const job=analysisQueue.find(j=>j?.job_type==="reanalysis"&&j?.project_id===x.id);const running=job&&isActiveJob(job);return <div className={`deleteRow ${x.id===currentProject?"current":""}`} key={x.id}><div className="deleteMeta"><b>{x.name||"UV Tape Residue"}{x.id===currentProject&&<span className="currentTag">현재 배치</span>}{running&&<span className="currentTag reanalysisTag">재분석 {Math.round(job.progress||0)}%</span>}</b><span>{x.created_at?new Date(x.created_at).toLocaleString("ko-KR"):"-"} · {x.point_count||0} points</span><small>{(x.files||[]).join(", ")||"원본 PDF 정보 없음"}</small>{job&&<small className="batchJobMessage">{job.message||((TERMINAL_JOBS.has(job.status)?"재분석 상태":"재분석 중"))}</small>}</div><div className="deleteRowActions">{job&&<button className="secondary" onClick={()=>window.dispatchEvent(new CustomEvent("uvtape:open-analysis-status"))}><Activity size={13}/> 진행 상태</button>}<button className="secondary batchReanalyzeBtn" disabled={busy||!hasSource} title={hasSource?"이 원본 PDF 배치만 재분석":"저장된 원본 PDF 정보가 없어 재분석할 수 없습니다."} onClick={()=>reanalyze(x.id,x)}><RotateCcw size={13}/> 이 배치 재분석</button><button className="danger" disabled={busy} onClick={()=>deleteProject(x.id,x)}><Trash2 size={13}/> 배치 삭제</button></div></div>})}</div>}</section></div>
 }
 function Reports({exportFile,exportWorkspaceFile,project,points}){return <div className="content"><div className="intro"><div><span className="badge"><FileText size={13}/> ENGINEERING REPORT</span><h2>Reports & Export</h2><p>조건 비교용 요약 리포트와 Point 상세 결과를 분리해서 출력합니다.</p></div></div><div className="reportSectionTitle"><b>Condition / Wafer Position Summary</b><span>MAIN: W1 Corner / W4 Edge / W5 Middle · W9 Reference는 substrate별 별도 집계</span></div><div className="reportGrid engineeringReports"><Report t="Engineering Summary PPT" d="MAIN 조건별 Residue incidence, Power×Time matrix, W1/W4/W5 위치 비교 + W9 substrate별 Reference" a={()=>exportWorkspaceFile("summary-ppt")} disabled={!points.length}/><Report t="Engineering Summary PDF" d="회사 보고용 5-page summary. MAIN 조건/위치 + W9 Reference 분리" a={()=>exportWorkspaceFile("summary-pdf")} disabled={!points.length}/></div><div className="reportSectionTitle secondaryReportTitle"><b>Point Detail</b><span>현재 Project의 SEM / EDS 상세 원본 결과</span></div><div className="reportGrid"><Report t="Point PPT" d="SEM / Spectrum / EDS Map / Element Maps / Data / Result" a={()=>exportFile("ppt")} disabled={!project}/><Report t="Point PDF" d="동일 레이아웃으로 1 Point = 1 Page" a={()=>exportFile("pdf")} disabled={!project}/><Report t="Analysis JSON" d="현재 Project 분석 데이터 export" a={()=>exportFile("json")} disabled={!project}/></div></div>}
 function Report({t,d,a,disabled}){return <div className="reportCard"><FileText size={20}/><b>{t}</b><p>{d}</p><button className="secondary" disabled={disabled} onClick={a}><Download size={14}/> Export</button></div>}

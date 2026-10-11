@@ -748,8 +748,15 @@ def job_status(job_id: str, project_id: str=None):
 
 @app.get("/api/analysis/current")
 def current_upload():
+    # Surface an active re-analysis / ROI job as well as a normal upload so a
+    # browser refresh can reconnect to the live progress card. Upload jobs are
+    # still the only jobs persisted into project metadata across a server restart.
     with JOB_LOCK:
-        jobs=[{**v,"job_id":k} for k,v in JOBS.items() if v.get("persist_upload")]
+        all_jobs=[{**v,"job_id":k} for k,v in JOBS.items()]
+        active=[j for j in all_jobs if j.get("status") in {"queued","processing"}]
+        jobs=[j for j in all_jobs if j.get("persist_upload")]
+    if active:
+        return {"job":active[-1]}
     if jobs:
         return {"job":jobs[-1]}
     if db.configured():
@@ -974,7 +981,7 @@ def reanalyze_project(project_id: str):
         try: process_reanalysis_job(job_id,project_id,meta)
         finally: ANALYSIS_SLOT.release()
     try:
-        set_job(job_id,status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
+        set_job(job_id,job_type="reanalysis",files=meta.get("files") or [],status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
         threading.Thread(target=run_reanalysis,daemon=True).start()
     except BaseException:
         ANALYSIS_SLOT.release()
