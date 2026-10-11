@@ -101,6 +101,154 @@ def _registration_signal(im, shape):
     hp-=float(hp[usable].mean()) if np.any(usable) else 0.0
     return hp
 
+def _axis_activity_bounds(gray, axis):
+    """Return the longest textured image-content run on rows/columns.
+
+    Bruker element panels can contain different top/bottom bands even when the
+    nominal panel crop has the same size.  We detect the actual textured image
+    rectangle from geometry/texture only; elemental intensity is never optimized,
+    so C/O evidence cannot pull the ROI toward a brighter signal.
+    """
+    g=gray.astype(np.float32)
+    if axis==0:  # rows
+        lo=np.percentile(g,10,axis=1); hi=np.percentile(g,90,axis=1)
+        texture=np.mean(np.abs(np.diff(g,axis=1)),axis=1) if g.shape[1]>1 else np.zeros(g.shape[0])
+    else:  # columns
+        lo=np.percentile(g,10,axis=0); hi=np.percentile(g,90,axis=0)
+        texture=np.mean(np.abs(np.diff(g,axis=0)),axis=0) if g.shape[0]>1 else np.zeros(g.shape[1])
+    activity=(hi-lo)+0.85*texture
+    n=len(activity)
+    if n<8 or not np.any(np.isfinite(activity)):
+        return 0,n,0.0
+    a=np.nan_to_num(activity,nan=0.0,posinf=0.0,neginf=0.0)
+    p35=float(np.percentile(a,35)); p80=float(np.percentile(a,80))
+    threshold=max(1.8,p35+0.18*max(p80-p35,0.0))
+    active=(a>threshold).astype(np.uint8)*255
+    # Bridge short gaps inside the analytical field, but keep broad uniform
+    # header/footer bands separate from the real map image.
+    k=max(3,int(round(n*0.018)))
+    if k%2==0: k+=1
+    active=cv2.morphologyEx(active.reshape(-1,1),cv2.MORPH_CLOSE,np.ones((k,1),np.uint8)).ravel()
+    runs=[]; start=None
+    for i,v in enumerate(active):
+        if v and start is None: start=i
+        if start is not None and (not v or i==n-1):
+            end=i if not v else i+1
+            if end-start>=max(6,int(n*0.08)):
+                score=(end-start)*(float(np.median(a[start:end]))+1.0)
+                runs.append((score,start,end))
+            start=None
+    if not runs:
+        return 0,n,0.0
+    _,start,end=max(runs,key=lambda z:z[0])
+    if end-start<int(n*0.24):
+        return 0,n,0.0
+    pad=max(1,int(n*0.004))
+    start=max(0,start-pad); end=min(n,end+pad)
+    confidence=float(np.clip((end-start)/max(n,1),0,1))
+    return int(start),int(end),round(confidence,4)
+
+
+def estimate_panel_content_rect(im):
+    """Estimate the true analytical image rectangle inside an element-map panel.
+
+    First find the non-black panel footprint, then trim only broad uniform
+    header/footer bands.  This is intentionally geometry-only; it never moves
+    the ROI toward a stronger C/O signal.
+    """
+    if im is None or getattr(im,'size',0)==0:
+        return {"x0":0,"y0":0,"x1":0,"y1":0,"confidence":0.0,"method":"full_panel_fallback"}
+    arr=im if im.ndim==3 else cv2.cvtColor(im,cv2.COLOR_GRAY2BGR)
+    gray=cv2.cvtColor(arr,cv2.COLOR_BGR2GRAY)
+    h,w=gray.shape[:2]
+    peak=np.max(arr,axis=2)
+    nonblack=peak>6
+    row_occ=np.mean(nonblack,axis=1); col_occ=np.mean(nonblack,axis=0)
+    rows=np.where(row_occ>0.08)[0]; cols=np.where(col_occ>0.08)[0]
+    if len(rows)<int(h*0.30) or len(cols)<int(w*0.30):
+        return {"x0":0,"y0":0,"x1":w,"y1":h,"confidence":0.0,"method":"full_panel_fallback"}
+    y0,y1=int(rows[0]),int(rows[-1]+1); x0,x1=int(cols[0]),int(cols[-1]+1)
+
+    def row_activity(y):
+        line=gray[y,x0:x1].astype(np.float32)
+        if line.size<4: return 0.0
+        return float(np.percentile(line,90)-np.percentile(line,10)+0.85*np.mean(np.abs(np.diff(line))))
+
+    acts=np.array([row_activity(y) for y in range(y0,y1)],np.float32)
+    positive=acts[acts>0.5]
+    if positive.size:
+        threshold=max(1.5,float(np.median(positive))*0.18)
+        good=acts>threshold
+        # Require 3 nearby textured rows so one label/scale-bar line cannot define
+        # the beginning of the analytical image.
+        kernel=np.ones(3,np.uint8)
+        stable=cv2.morphologyEx((good.astype(np.uint8)*255).reshape(-1,1),cv2.MORPH_CLOSE,kernel.reshape(-1,1)).ravel()>0
+        idx=np.where(stable)[0]
+        if len(idx):
+            ny0=y0+int(idx[0]); ny1=y0+int(idx[-1]+1)
+            # Only trim broad bands; never collapse onto the residue itself.
+            if ny1-ny0>=int((y1-y0)*0.55):
+                y0,y1=ny0,ny1
+
+    # Columns are usually already aligned by the panel crop. Trim only obvious
+    # black side borders, not low-signal element-map regions.
+    width=x1-x0; height=y1-y0
+    if width<int(w*0.35) or height<int(h*0.35):
+        return {"x0":0,"y0":0,"x1":w,"y1":h,"confidence":0.0,"method":"full_panel_fallback"}
+    confidence=float(np.clip(min(width/max(w,1),height/max(h,1)),0,1))
+    return {"x0":x0,"y0":y0,"x1":x1,"y1":y1,"confidence":round(confidence,4),"method":"nonblack_rect_uniform_band_trim"}
+
+
+def _paste_rect_mask(src_mask, src_rect, target_shape, target_rect):
+    th,tw=target_shape[:2]
+    out=np.zeros((th,tw),np.uint8)
+    sx0,sy0,sx1,sy1=[int(src_rect[k]) for k in ("x0","y0","x1","y1")]
+    tx0,ty0,tx1,ty1=[int(target_rect[k]) for k in ("x0","y0","x1","y1")]
+    sx0=max(0,min(sx0,src_mask.shape[1]-1)); sx1=max(sx0+1,min(sx1,src_mask.shape[1]))
+    sy0=max(0,min(sy0,src_mask.shape[0]-1)); sy1=max(sy0+1,min(sy1,src_mask.shape[0]))
+    tx0=max(0,min(tx0,tw-1)); tx1=max(tx0+1,min(tx1,tw))
+    ty0=max(0,min(ty0,th-1)); ty1=max(ty0+1,min(ty1,th))
+    crop=src_mask[sy0:sy1,sx0:sx1]
+    if crop.size==0: return out
+    mapped=cv2.resize(crop,(tx1-tx0,ty1-ty0),interpolation=cv2.INTER_NEAREST)
+    out[ty0:ty1,tx0:tx1]=mapped
+    return out
+
+
+def map_sem_roi_to_element(roi,target_image,se_map=None,registration=None,return_info=False):
+    """Map SEM ROI to one element panel using independent panel geometry.
+
+    SEM is first registered to Page-2 SE (geometry bridge).  The SE analytical
+    content rectangle is then normalized into the target element panel's own
+    content rectangle.  This fixes per-panel header/footer offsets (especially O)
+    without choosing a shift that maximizes elemental intensity.
+    """
+    if target_image is None or getattr(target_image,'size',0)==0:
+        shape=(0,0) if target_image is None else target_image.shape
+        out=np.zeros(shape[:2],np.uint8) if len(shape)>=2 else np.zeros((0,0),np.uint8)
+        return (out,{"method":"missing_target"}) if return_info else out
+    fallback=map_sem_roi_to_eds(roi,target_image.shape,registration)
+    if se_map is None or getattr(se_map,'size',0)==0:
+        info={"method":"resize_translation_fallback","source_rect":None,"target_rect":estimate_panel_content_rect(target_image)}
+        return (fallback,info) if return_info else fallback
+    se_mask=map_sem_roi_to_eds(roi,se_map.shape,registration)
+    src_rect=estimate_panel_content_rect(se_map)
+    tgt_rect=estimate_panel_content_rect(target_image)
+    # If either panel's analytical rectangle could not be established reliably,
+    # preserve the previous conservative mapping instead of inventing a shift.
+    if src_rect.get("confidence",0)<=0 or tgt_rect.get("confidence",0)<=0:
+        info={"method":"resize_translation_fallback","source_rect":src_rect,"target_rect":tgt_rect}
+        return (fallback,info) if return_info else fallback
+    out=_paste_rect_mask(se_mask,src_rect,target_image.shape,tgt_rect)
+    # Preserve topology: an implausibly tiny/huge mapped mask falls back safely.
+    a0=max(cv2.countNonZero(se_mask),1); a1=cv2.countNonZero(out)
+    if a1<max(8,int(a0*0.20)) or a1>int(a0*5.0):
+        info={"method":"resize_translation_fallback","source_rect":src_rect,"target_rect":tgt_rect,"area_ratio":round(a1/a0,4)}
+        return (fallback,info) if return_info else fallback
+    info={"method":"se_to_element_content_rect","source_rect":src_rect,"target_rect":tgt_rect,"area_ratio":round(a1/a0,4)}
+    return (out,info) if return_info else out
+
+
 def estimate_sem_to_eds_registration(sem_ref,se_map):
     """Estimate a conservative SEM->Page-2 translation in Page-2 pixels.
 
@@ -654,8 +802,8 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None)
     for c in candidates:
         # Candidate pixels themselves are used for the signal comparison; no local ring.
         cmask=c["mask"]
-        roi_c=map_sem_roi_to_eds(cmask,c_map.shape,registration)
-        roi_o=map_sem_roi_to_eds(cmask,o_map.shape,registration)
+        roi_c=map_sem_roi_to_element(cmask,c_map,se_map,registration)
+        roi_o=map_sem_roi_to_element(cmask,o_map,se_map,registration)
         cm=global_roi_metrics(c_map,roi_c,"C"); om=global_roi_metrics(o_map,roi_o,"O")
         candidate_area=int(cv2.countNonZero(cmask)); vals=gray[cmask>0].astype(np.float32)
         morph_z=(float(np.median(vals))-gmed)/gstd if vals.size else 0.0
@@ -725,10 +873,10 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None)
     roi=np.zeros((h,w),np.uint8)
     for d in selected: roi=cv2.bitwise_or(roi,d["c"]["mask"])
     # Recalculate element metrics on the final irregular ROI.
-    rr_c=map_sem_roi_to_eds(roi,c_map.shape,registration)
-    rr_o=map_sem_roi_to_eds(roi,o_map.shape,registration)
-    rr_n=map_sem_roi_to_eds(roi,n_map.shape,registration)
-    rr_si=map_sem_roi_to_eds(roi,si_map.shape,registration)
+    rr_c,c_panel_info=map_sem_roi_to_element(roi,c_map,se_map,registration,return_info=True)
+    rr_o,o_panel_info=map_sem_roi_to_element(roi,o_map,se_map,registration,return_info=True)
+    rr_n,n_panel_info=map_sem_roi_to_element(roi,n_map,se_map,registration,return_info=True)
+    rr_si,si_panel_info=map_sem_roi_to_element(roi,si_map,se_map,registration,return_info=True)
     cm=global_roi_metrics(c_map,rr_c,"C"); om=global_roi_metrics(o_map,rr_o,"O")
     nm=global_roi_metrics(n_map,rr_n,"N"); sm=global_roi_metrics(si_map,rr_si,"Si")
     ce,oe=cm["score"],om["score"]
@@ -813,7 +961,9 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None)
         "n_note":"N is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "si_note":"Si is a diagnostic global-vs-ROI comparison and is not part of the current residue score.",
         "classification_note":"v23.7.48 rule: Residue requires C ROI/Global >=2.40x AND O ROI/Global >=3.00x. If both are >=2.00x but either residue gate is unmet, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used.","c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
-        "sem_to_eds_registration":registration
+        "sem_to_eds_registration":registration,
+        "element_panel_registration":{"C":c_panel_info,"O":o_panel_info,"N":n_panel_info,"Si":si_panel_info},
+        "roi_registration_version":"v23.9.3-panel-geometry"
     },roi
 
 
@@ -867,10 +1017,10 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
     """Recalculate element evidence on a user-confirmed ROI without changing auto CV results."""
     roi=(roi>0).astype(np.uint8)*255
     registration=estimate_sem_to_eds_registration(sem_ref,se_map)
-    c_roi=map_sem_roi_to_eds(roi,c_map.shape,registration)
-    o_roi=map_sem_roi_to_eds(roi,o_map.shape,registration)
-    n_roi=map_sem_roi_to_eds(roi,n_map.shape,registration)
-    si_roi=map_sem_roi_to_eds(roi,si_map.shape,registration)
+    c_roi,c_map_info=map_sem_roi_to_element(roi,c_map,se_map,registration,return_info=True)
+    o_roi,o_map_info=map_sem_roi_to_element(roi,o_map,se_map,registration,return_info=True)
+    n_roi,n_map_info=map_sem_roi_to_element(roi,n_map,se_map,registration,return_info=True)
+    si_roi,si_map_info=map_sem_roi_to_element(roi,si_map,se_map,registration,return_info=True)
     cm=global_roi_metrics(c_map,c_roi,"C")
     om=global_roi_metrics(o_map,o_roi,"O")
     nm=global_roi_metrics(n_map,n_roi,"N")
@@ -898,6 +1048,8 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
         "human_roi_rule_result":"Residue" if both else ("Ambiguous" if moderate else "Non-residue"),
         "human_score_rule":"C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue",
         "human_sem_to_eds_registration":registration,
+        "human_element_panel_registration":{"C":c_map_info,"O":o_map_info,"N":n_map_info,"Si":si_map_info},
+        "human_roi_registration_version":"v23.9.3-panel-geometry",
         "c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
     }
 
@@ -919,11 +1071,11 @@ def run(payload):
     # Backward-compatible asset name: it now contains the contour-only overlay.
     fp=outdir/"sem_roi_ring_overlay.jpg"; save_crop(make_box_overlay(p1["sem"],roi_sem,roi_color=(0,0,255)),fp,92); paths["sem_roi_ring_overlay"]=str(fp)
     registration=features.get("sem_to_eds_registration") or estimate_sem_to_eds_registration(p1["sem"],p2["se_map"])
-    roi_eds=map_sem_roi_to_eds(roi,p2["c_map"].shape,registration)
+    roi_eds=map_sem_roi_to_element(roi,p2["c_map"],p2["se_map"],registration)
     fp=outdir/"eds_co_overlay.jpg"; save_crop(make_co_overlay(p2["c_map"],p2["o_map"],roi_eds),fp,92); paths["eds_co_overlay"]=str(fp)
     fp=outdir/"element_maps_enhanced.jpg"; save_crop(make_element_overview(p2,roi_eds),fp,92); paths["element_maps_enhanced"]=str(fp)
     for label,key in [("SE","se_map"),("C","c_map"),("N","n_map"),("O","o_map"),("Si","si_map")]:
-        rr=map_sem_roi_to_eds(roi,p2[key].shape,registration)
+        rr=map_sem_roi_to_element(roi,p2[key],p2["se_map"],registration)
         # Backward-compatible asset name; yellow ring is no longer drawn.
         fp=outdir/f"{key}_roi_ring.jpg"; save_crop(make_box_overlay(p2[key],rr,roi_color=(255,255,255)),fp,92); paths[f"{key}_roi_ring"]=str(fp)
         if label!="SE":

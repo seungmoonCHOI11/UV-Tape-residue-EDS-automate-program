@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.1")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.3")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -1139,10 +1139,10 @@ def _dynamic_asset(point_id: str, asset_type: str):
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
     name_map = {
-        "sem_residue_overlay": "sem_dynamic_overlay.jpg",
-        "eds_co_overlay": "eds_dynamic_overlay.jpg",
-        "c_map_enhanced_overlay": "c_dynamic_overlay.jpg",
-        "o_map_enhanced_overlay": "o_dynamic_overlay.jpg",
+        "sem_residue_overlay": "sem_dynamic_overlay_v2393.jpg",
+        "eds_co_overlay": "eds_dynamic_overlay_v2393.jpg",
+        "c_map_enhanced_overlay": "c_dynamic_overlay_v2393.jpg",
+        "o_map_enhanced_overlay": "o_dynamic_overlay_v2393.jpg",
     }
     filename = name_map.get(asset_type)
     if not filename:
@@ -1186,7 +1186,7 @@ def _dynamic_asset(point_id: str, asset_type: str):
         except Exception:
             return None
 
-    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask, estimate_sem_to_eds_registration, map_sem_roi_to_eds
+    from .point_worker import make_box_overlay, make_co_overlay, enhance_element_map, polygon_to_mask, estimate_sem_to_eds_registration, map_sem_roi_to_eds, map_sem_roi_to_element
 
     # Fast path for saved Human ROI: only load the image(s) actually required.
     if stored_polygons:
@@ -1208,20 +1208,20 @@ def _dynamic_asset(point_id: str, asset_type: str):
             src = load("c_map")
             if src is None:
                 return None
-            rr_mask = map_sem_roi_to_eds(roi, src.shape, registration)
+            rr_mask = map_sem_roi_to_element(roi, src, se, registration)
             out = make_box_overlay(enhance_element_map(src, "C"), rr_mask, roi_color=(255, 255, 255))
         elif asset_type == "o_map_enhanced_overlay":
             src = load("o_map")
             if src is None:
                 return None
-            rr_mask = map_sem_roi_to_eds(roi, src.shape, registration)
+            rr_mask = map_sem_roi_to_element(roi, src, se, registration)
             out = make_box_overlay(enhance_element_map(src, "O"), rr_mask, roi_color=(255, 255, 255))
         elif asset_type == "eds_co_overlay":
             c = load("c_map")
             o = load("o_map")
             if c is None or o is None:
                 return None
-            out = make_co_overlay(c, o, map_sem_roi_to_eds(roi, c.shape, registration))
+            out = make_co_overlay(c, o, map_sem_roi_to_element(roi, c, se, registration))
         else:
             return None
 
@@ -1261,13 +1261,13 @@ def _dynamic_asset(point_id: str, asset_type: str):
     elif asset_type == "eds_co_overlay":
         if c is None or o is None:
             return None
-        out = make_co_overlay(c, o, map_sem_roi_to_eds(roi, c.shape, registration))
+        out = make_co_overlay(c, o, map_sem_roi_to_element(roi, c, se, registration))
     else:
         src = c if asset_type == "c_map_enhanced_overlay" else o
         label = "C" if asset_type == "c_map_enhanced_overlay" else "O"
         if src is None:
             return None
-        rr = map_sem_roi_to_eds(roi, src.shape, registration)
+        rr = map_sem_roi_to_element(roi, src, se, registration)
         out = make_box_overlay(enhance_element_map(src, label), rr, roi_color=(255, 255, 255))
     if out is None:
         return None
@@ -1303,9 +1303,103 @@ def _human_roi_mask_for_point(point_id: str, shape):
 
 def _invalidate_dynamic_assets(point_id: str):
     safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id
-    for name in ["sem_dynamic_overlay.jpg","c_dynamic_overlay.jpg","o_dynamic_overlay.jpg","eds_dynamic_overlay.jpg"]:
+    for name in [
+        "sem_dynamic_overlay.jpg","c_dynamic_overlay.jpg","o_dynamic_overlay.jpg","eds_dynamic_overlay.jpg",
+        "sem_dynamic_overlay_v2393.jpg","c_dynamic_overlay_v2393.jpg","o_dynamic_overlay_v2393.jpg","eds_dynamic_overlay_v2393.jpg",
+    ]:
         try: (outdir/name).unlink(missing_ok=True)
         except Exception: pass
+
+
+def _recalculate_human_roi_point(point_id: str):
+    """Recalculate one saved Human ROI with the current panel-registration logic."""
+    if point_id not in RECORDS:
+        point(point_id)
+    r=RECORDS[point_id]
+    f=dict(r.get("features") or {})
+    polygons=f.get("human_roi_polygons") or f.get("human_roi_polygon")
+    if not polygons:
+        raise ValueError("Saved Human ROI was not found.")
+    from .point_worker import polygon_to_mask, human_roi_features
+    sem=_load_raw_point_image(point_id,"sem")
+    c=_load_raw_point_image(point_id,"c_map"); o=_load_raw_point_image(point_id,"o_map")
+    n=_load_raw_point_image(point_id,"n_map"); si=_load_raw_point_image(point_id,"si_map")
+    se=_load_raw_point_image(point_id,"se_map")
+    if any(x is None for x in [sem,c,o,n,si]):
+        raise RuntimeError("Original SEM/C/O/N/Si assets are not available.")
+    mask=polygon_to_mask(sem.shape,polygons)
+    if cv2.countNonZero(mask)<20:
+        raise ValueError("Saved Human ROI is too small or outside the analytical image.")
+    hf=human_roi_features(sem,c,o,n,si,mask,se_map=se)
+    f.update(hf)
+    f["residue_score"]=hf.get("human_residue_score")
+    f["result"]=hf.get("human_roi_rule_result")
+    f["confidence"]="Human ROI"
+    f["human_roi_recalculated_at"]=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    r["features"]=f
+    _invalidate_dynamic_assets(point_id)
+    if db.configured():
+        db.upsert_analysis(point_id,f)
+    return public_record(r)
+
+
+@app.post("/api/points/{point_id}/human-roi/recalculate")
+def recalculate_human_roi(point_id: str):
+    try:
+        return _recalculate_human_roi_point(point_id)
+    except ValueError as e:
+        raise HTTPException(400,str(e))
+    except Exception as e:
+        raise HTTPException(503,f"Human ROI recalculation failed: {e}")
+
+
+def _load_workspace_records_for_roi_recalc():
+    if db.configured():
+        packed=db.get_all_points_with_data()
+        for row,analysis,assets in packed:
+            pid=str(row.get("project_id"))
+            rec=db_record(pid,row,analysis,assets)
+            rec["project_id"]=pid
+            RECORDS[rec["id"]]=rec
+    return list(RECORDS.values())
+
+
+def _process_workspace_human_roi_recalc(job_id: str):
+    failures=[]
+    try:
+        records=_load_workspace_records_for_roi_recalc()
+        targets=[r for r in records if (r.get("features") or {}).get("human_roi_polygons") or (r.get("features") or {}).get("human_roi_polygon")]
+        total=len(targets)
+        set_job(job_id,job_type="human_roi_recalc",status="processing",phase="roi_recalc",progress=2,completed=0,total=total,failed_count=0,failed_points=[],message=f"저장된 Human ROI {total} Point의 C/O 좌표와 값을 다시 계산합니다.")
+        for i,r in enumerate(targets,1):
+            pid=str(r.get("id"))
+            try:
+                _recalculate_human_roi_point(pid)
+            except Exception as e:
+                failures.append({"id":pid,"stage":"ROI_RECALC","error":f"{type(e).__name__}: {e}"})
+            set_job(job_id,status="processing",phase="roi_recalc",progress=min(99,2+int(i/max(total,1)*97)),completed=i-len(failures),total=total,failed_count=len(failures),failed_points=list(failures),message=f"Human ROI 재계산 중 · {i}/{total} · 실패 {len(failures)}")
+        status="partial" if failures else "completed"
+        set_job(job_id,status=status,phase="partial" if failures else "complete",progress=100,completed=total-len(failures),total=total,failed_count=len(failures),failed_points=list(failures),message=(f"Human ROI 재계산 완료 · {total-len(failures)}/{total}" if not failures else f"Human ROI 재계산 부분 완료 · 성공 {total-len(failures)}/{total} · 실패 {len(failures)}"))
+    except Exception as e:
+        traceback.print_exc()
+        set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"Human ROI 전체 재계산 실패: {e}")
+    finally:
+        try: ANALYSIS_SLOT.release()
+        except RuntimeError: pass
+
+
+@app.post("/api/workspace/human-roi/recalculate")
+def recalculate_workspace_human_rois():
+    if not ANALYSIS_SLOT.acquire(blocking=False):
+        raise HTTPException(409,"현재 PDF 분석/재분석 또는 다른 무거운 작업이 진행 중입니다.")
+    job_id=str(uuid.uuid4())
+    set_job(job_id,job_type="human_roi_recalc",status="queued",phase="queued",progress=1,completed=0,total=0,failed_count=0,failed_points=[],message="저장된 Human ROI 재계산을 준비합니다.")
+    try:
+        threading.Thread(target=_process_workspace_human_roi_recalc,args=(job_id,),daemon=True).start()
+    except BaseException:
+        ANALYSIS_SLOT.release()
+        raise
+    return {"job_id":job_id,"expected_points":0,"message":"Human ROI recalculation queued"}
 
 
 @app.post("/api/points/{point_id}/human-roi")
