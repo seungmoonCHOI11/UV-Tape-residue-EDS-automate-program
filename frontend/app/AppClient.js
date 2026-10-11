@@ -324,7 +324,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  if(!mounted)return <div className="startupShell"><InitialLoading/></div>;
  if(initialLoading)return <div className="startupShell"><InitialLoading/></div>;
  const p=identifiedPoints[idx],filtered=identifiedPoints.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.10</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
+ return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.12</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
  {dataState==="error"&&<div className="workspaceAlert" role="alert"><div><b>데이터를 불러오지 못했습니다.</b><span>{points.length?"마지막으로 불러온 데이터를 표시하고 있습니다.":"저장된 Point 수를 확인할 수 없습니다. 다시 불러와 주세요."}</span></div><button className="secondary" onClick={()=>loadData(null,{silent:true})}>다시 불러오기</button></div>}
  {page==="Dashboard"&&<WorkspaceDashboard points={identifiedPoints} classify={pointClass} go={goNav} dataState={dataState} jobs={analysisQueue} openJob={()=>setAnalysisModalOpen(true)} onCondition={key=>{setConditionView(key);goNav("Condition View")}} onPoint={point=>{setIdx(points.findIndex(x=>x.id===point.id));setVerificationOpen(true)}}/>}
  {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy||activeAnalysis||!queueLoaded} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
@@ -466,7 +466,7 @@ function dynamicAsset(p,type){
  const humanSaved=(f.human_roi_saved_at||f.human_roi_polygons||f.human_roi_polygon);
  const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
  const v=needsHumanRefresh?encodeURIComponent(String(f.human_roi_saved_at||"human")):"";
- const rv="23911";
+ const rv="23912";
  return `/api/assets/${encodeURIComponent(p.id)}/${type}?rv=${rv}${v?`&v=${v}`:""}`;
 }
 function Review({p,idx,total,prev,next,human,saveHumanRoi}){
@@ -523,13 +523,47 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi}){
  </div>
 }
 function HumanRoiEditor({p,saveHumanRoi}){
- const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null);
- const canvasRef=useRef(); const wrapRef=useRef();
- useEffect(()=>{if(!open)return; const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem; setSrc(imageUrl(u)); const raw=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]); const stored=raw.map(poly=>Array.isArray(poly)?poly.filter(q=>q&&Number.isFinite(Number(q.x))&&Number.isFinite(Number(q.y))).map(q=>({x:Number(q.x),y:Number(q.y)})):[]).filter(poly=>poly.length>=3); setRegions(stored); setCurrent([]); setDrawing(false);},[open,p]);
- useEffect(()=>{if(!open||!src)return; const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return; const img=new Image();img.onload=()=>{const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);c.width=Math.max(1,Math.round(img.naturalWidth*scale));c.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
-   const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>1){ctx.strokeStyle="#ff2525";ctx.lineWidth=active?4:4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();if(!active&&poly.length>=3){ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();}}};
-   regions.forEach(r=>drawPoly(r,false)); drawPoly(current,true);
- };img.src=src;},[open,src,regions,current]);
+ const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [src,setSrc]=useState(null), [imageReadyTick,setImageReadyTick]=useState(0);
+ const canvasRef=useRef(); const wrapRef=useRef(); const baseImgRef=useRef(null); const loadSeqRef=useRef(0);
+ const pointKey=String(p?.id||`${p?.set_number||"-"}-${p?.wafer||"-"}-${p?.point||"-"}`);
+ // Keep the ROI editor open while Verification advances, but reset its data to the newly selected Point.
+ // Depending on the whole `p` object was not enough because async image loads from the previous Point
+ // could finish late and repaint the canvas after the header had already moved to the next Point.
+ useEffect(()=>{
+   setCurrent([]);setDrawing(false);baseImgRef.current=null;setImageReadyTick(t=>t+1);
+   if(!open){setSrc(null);return;}
+   const u=dynamicAsset(p,"sem")||p.assets?.sem_residue_overlay||p.assets?.sem;
+   setSrc(imageUrl(u));
+   const raw=Array.isArray(p.features?.human_roi_polygons)?p.features.human_roi_polygons:(Array.isArray(p.features?.human_roi_polygon)&&p.features.human_roi_polygon.length>=3?[p.features.human_roi_polygon]:[]);
+   const stored=raw.map(poly=>Array.isArray(poly)?poly.filter(q=>q&&Number.isFinite(Number(q.x))&&Number.isFinite(Number(q.y))).map(q=>({x:Number(q.x),y:Number(q.y)})):[]).filter(poly=>poly.length>=3);
+   setRegions(stored);
+ },[open,pointKey]);
+ // Load the SEM once per Point/source. A sequence token prevents a slow response from the previous Point
+ // from overwriting the canvas after Verification has advanced.
+ useEffect(()=>{
+   const seq=++loadSeqRef.current;
+   baseImgRef.current=null;
+   if(!open||!src){setImageReadyTick(t=>t+1);return;}
+   let cancelled=false;
+   const img=new Image();
+   img.onload=()=>{if(cancelled||seq!==loadSeqRef.current)return;baseImgRef.current=img;setImageReadyTick(t=>t+1)};
+   img.onerror=()=>{if(cancelled||seq!==loadSeqRef.current)return;baseImgRef.current=null;setImageReadyTick(t=>t+1)};
+   img.src=src;
+   return()=>{cancelled=true;if(seq===loadSeqRef.current)loadSeqRef.current+=1;img.onload=null;img.onerror=null;};
+ },[open,src,pointKey]);
+ // Redraw from the already-loaded base image while drawing. Do not create a new Image on every mouse move.
+ useEffect(()=>{
+   if(!open)return;
+   const c=canvasRef.current,w=wrapRef.current;if(!c||!w)return;
+   const img=baseImgRef.current,ctx=c.getContext("2d");
+   if(!img){ctx?.clearRect(0,0,c.width||1,c.height||1);return;}
+   const maxW=Math.max(320,w.clientWidth);const maxH=430;const scale=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);
+   const nextW=Math.max(1,Math.round(img.naturalWidth*scale)),nextH=Math.max(1,Math.round(img.naturalHeight*scale));
+   if(c.width!==nextW)c.width=nextW;if(c.height!==nextH)c.height=nextH;
+   ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
+   const drawPoly=(poly,active=false)=>{if(!poly?.length)return;ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});if(poly.length>1){ctx.strokeStyle="#ff2525";ctx.lineWidth=4;ctx.lineJoin="round";ctx.lineCap="round";ctx.stroke();if(!active&&poly.length>=3){ctx.beginPath();poly.forEach((q,i)=>{const x=q.x*c.width,y=q.y*c.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath();}}};
+   regions.forEach(r=>drawPoly(r,false));drawPoly(current,true);
+ },[open,imageReadyTick,regions,current,pointKey]);
  if(!open)return <div className="humanRoiBar"><button className="secondary" onClick={()=>setOpen(true)}><MousePointer2 size={14}/>{Array.isArray(p.features?.human_roi_polygon)||Array.isArray(p.features?.human_roi_polygons)?"수동 ROI 수정":"수동 ROI 지정"}</button><span>{(p.features?.human_roi_polygons?.length||0)>1?`${p.features.human_roi_polygons.length}개 Human ROI 저장됨`:Array.isArray(p.features?.human_roi_polygon)?"저장된 수동 ROI 있음":"AI/CV ROI가 틀리면 직접 지정"}</span></div>;
  const pointFromEvent=e=>{const c=canvasRef.current;if(!c)return null;const r=c.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};};
  const startDraw=e=>{e.preventDefault();const q=pointFromEvent(e);if(!q)return;setDrawing(true);setCurrent([q]);try{canvasRef.current.setPointerCapture(e.pointerId)}catch{}};
@@ -537,30 +571,18 @@ function HumanRoiEditor({p,saveHumanRoi}){
  const endDraw=e=>{if(!drawing)return;e?.preventDefault?.();setDrawing(false);try{if(e?.pointerId!=null)canvasRef.current.releasePointerCapture(e.pointerId)}catch{};if(current.length>=3){setRegions(v=>[...v,smoothClosedPath(current)]);setCurrent([])}};
  const smoothClosedPath=poly=>{
    if(!Array.isArray(poly)||poly.length<6)return poly||[];
-   const pts=[];
-   const minStep=0.0018;
-   for(const q of poly){
-     const last=pts[pts.length-1];
-     if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q);
-   }
-   if(pts.length<6)return pts;
-   const n=pts.length;
-   return pts.map((q,i)=>{
-     const a=pts[(i-1+n)%n],b=pts[(i+1)%n];
-     return {
-       x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),
-       y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))
-     };
-   });
+   const pts=[];const minStep=0.0018;
+   for(const q of poly){const last=pts[pts.length-1];if(!last||Math.hypot(q.x-last.x,q.y-last.y)>=minStep)pts.push(q)}
+   if(pts.length<6)return pts;const n=pts.length;
+   return pts.map((q,i)=>{const a=pts[(i-1+n)%n],b=pts[(i+1)%n];return {x:Math.max(0,Math.min(1,q.x*0.70+(a.x+b.x)*0.15)),y:Math.max(0,Math.min(1,q.y*0.70+(a.y+b.y)*0.15))}});
  };
  const finishRegion=()=>{if(current.length<3)return;setRegions(v=>[...v,smoothClosedPath(current)]);setCurrent([]);setDrawing(false)};
  const undo=()=>setCurrent(v=>v.slice(0,-Math.min(12,v.length||0)));
  const clear=()=>{setRegions([]);setCurrent([]);setDrawing(false)};
  const removeLastRegion=()=>setRegions(v=>v.slice(0,-1));
  const save=async()=>{const all=current.length>=3?[...regions,smoothClosedPath(current)]:regions;if(!all.length)return;setSaving(true);try{await saveHumanRoi(all)}finally{setSaving(false)}};
- return <div className="humanRoiEditor"><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓는 순간 선이 자동으로 닫히고 smoothing되어 하나의 ROI로 완료됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>빨간색=Human ROI 작성/저장 · 마우스 놓으면 자동 영역 완료 · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>취소</button><button className="primary" disabled={saving||(!regions.length&&current.length<3)} onClick={save}>{saving?"저장 중…":"ROI 저장"}</button></div></div>
+ return <div className="humanRoiEditor" data-point-id={pointKey}><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓는 순간 선이 자동으로 닫히고 smoothing되어 하나의 ROI로 완료됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} /></div><div className="humanRoiEditorHint"><span>현재 Point: SET{p.set_number} P{p.point} · 현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>빨간색=Human ROI 작성/저장 · 마우스 놓으면 자동 영역 완료 · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>취소</button><button className="primary" disabled={saving||(!regions.length&&current.length<3)} onClick={save}>{saving?"저장 중…":"ROI 저장"}</button></div></div>
 }
-
 function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,wafer,setWafer,resultFilter,setResultFilter,human,saveHumanRoi,recalculateSavedHumanRois}){
  const dialogRef=useDialog(close);
  const visible=points.filter(x=>{
