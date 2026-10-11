@@ -48,14 +48,11 @@ def test_element_mapping_uses_each_panel_own_content_rect():
     reg=estimate_sem_to_eds_registration(sem,se)
     mc,ci=map_sem_roi_to_element(roi,c,se,reg,return_info=True)
     mo,oi=map_sem_roi_to_element(roi,o,se,reg,return_info=True)
-    assert ci['method']=='se_to_element_content_rect'
-    assert oi['method']=='se_to_element_content_rect'
-    cy,cx=np.where(mc>0)
-    oy,ox=np.where(mo>0)
-    # O content starts materially lower than C, so its mapped ROI should too.
-    assert oy.mean() > cy.mean() + 10
-    assert 160 < cx.mean() < 200
-    assert 160 < ox.mean() < 200
+    assert ci['method']=='shared_page2_geometry'
+    assert oi['method']=='shared_page2_geometry'
+    # Element panels are one shared EDS coordinate system. Uniform bands or
+    # elemental intensity differences must never shift one element relative to another.
+    assert np.array_equal(mc,mo)
 
 
 def test_mapping_never_optimizes_toward_element_brightness():

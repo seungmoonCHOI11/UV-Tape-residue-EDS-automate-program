@@ -216,79 +216,149 @@ def _paste_rect_mask(src_mask, src_rect, target_shape, target_rect):
 
 
 def map_sem_roi_to_element(roi,target_image,se_map=None,registration=None,return_info=False):
-    """Map SEM ROI to one element panel using independent panel geometry.
+    """Map SEM ROI to an element panel using one shared Page-2 geometry.
 
-    SEM is first registered to Page-2 SE (geometry bridge).  The SE analytical
-    content rectangle is then normalized into the target element panel's own
-    content rectangle.  This fixes per-panel header/footer offsets (especially O)
-    without choosing a shift that maximizes elemental intensity.
+    C/N/O/Si panels in the Bruker Page-2 grid represent the same field of view
+    and pixel coordinate system.  They must therefore receive the *same ROI mask*.
+    v23.9.3 tried to infer a separate content rectangle for each element panel;
+    that could make O drift vertically relative to C.  v23.9.4 intentionally
+    removes all element-specific shifts.
     """
     if target_image is None or getattr(target_image,'size',0)==0:
         shape=(0,0) if target_image is None else target_image.shape
         out=np.zeros(shape[:2],np.uint8) if len(shape)>=2 else np.zeros((0,0),np.uint8)
         return (out,{"method":"missing_target"}) if return_info else out
-    fallback=map_sem_roi_to_eds(roi,target_image.shape,registration)
-    if se_map is None or getattr(se_map,'size',0)==0:
-        info={"method":"resize_translation_fallback","source_rect":None,"target_rect":estimate_panel_content_rect(target_image)}
-        return (fallback,info) if return_info else fallback
-    se_mask=map_sem_roi_to_eds(roi,se_map.shape,registration)
-    src_rect=estimate_panel_content_rect(se_map)
-    tgt_rect=estimate_panel_content_rect(target_image)
-    # If either panel's analytical rectangle could not be established reliably,
-    # preserve the previous conservative mapping instead of inventing a shift.
-    if src_rect.get("confidence",0)<=0 or tgt_rect.get("confidence",0)<=0:
-        info={"method":"resize_translation_fallback","source_rect":src_rect,"target_rect":tgt_rect}
-        return (fallback,info) if return_info else fallback
-    out=_paste_rect_mask(se_mask,src_rect,target_image.shape,tgt_rect)
-    # Preserve topology: an implausibly tiny/huge mapped mask falls back safely.
-    a0=max(cv2.countNonZero(se_mask),1); a1=cv2.countNonZero(out)
-    if a1<max(8,int(a0*0.20)) or a1>int(a0*5.0):
-        info={"method":"resize_translation_fallback","source_rect":src_rect,"target_rect":tgt_rect,"area_ratio":round(a1/a0,4)}
-        return (fallback,info) if return_info else fallback
-    info={"method":"se_to_element_content_rect","source_rect":src_rect,"target_rect":tgt_rect,"area_ratio":round(a1/a0,4)}
-    return (out,info) if return_info else out
+    bridge_shape=(se_map.shape if se_map is not None and getattr(se_map,'size',0) else target_image.shape)
+    shared=map_sem_roi_to_eds(roi,bridge_shape,registration)
+    if shared.shape[:2]!=target_image.shape[:2]:
+        shared=cv2.resize(shared,(target_image.shape[1],target_image.shape[0]),interpolation=cv2.INTER_NEAREST)
+    info={
+        "method":"shared_page2_geometry",
+        "target_width":int(target_image.shape[1]),"target_height":int(target_image.shape[0]),
+        "registration_method":(registration or {}).get("method","resize_fallback"),
+        "scale":(registration or {}).get("scale"),"rotation_deg":(registration or {}).get("rotation_deg"),
+    }
+    return (shared,info) if return_info else shared
+
+def _similarity_from_sift(sem_ref, se_map):
+    """Estimate SEM -> Page-2 SE similarity transform with SIFT + RANSAC.
+
+    Page-1 SEM and Page-2 SE can use different fields of view/magnifications, so
+    translation-only registration is not sufficient.  This transform allows one
+    shared isotropic scale, a small rotation, and translation.  The result maps
+    coordinates in the *original SEM crop* directly into Page-2 SE pixels.
+    """
+    try:
+        if sem_ref is None or se_map is None or getattr(sem_ref,'size',0)==0 or getattr(se_map,'size',0)==0:
+            return None
+        sgray=cv2.cvtColor(sem_ref,cv2.COLOR_BGR2GRAY) if sem_ref.ndim==3 else sem_ref.copy()
+        tgray=cv2.cvtColor(se_map,cv2.COLOR_BGR2GRAY) if se_map.ndim==3 else se_map.copy()
+        # Remove report footer/scale-bar rows from feature detection while keeping
+        # the original coordinate system intact.
+        smask=analytical_mask(sgray.shape,footer_fraction=0.82)
+        tmask=analytical_mask(tgray.shape,footer_fraction=0.82)
+        clahe=cv2.createCLAHE(clipLimit=1.8,tileGridSize=(8,8))
+        sgray=clahe.apply(sgray); tgray=clahe.apply(tgray)
+        sift=cv2.SIFT_create(nfeatures=1400,contrastThreshold=0.018,edgeThreshold=12,sigma=1.4)
+        ks,ds=sift.detectAndCompute(sgray,smask)
+        kt,dt=sift.detectAndCompute(tgray,tmask)
+        if ds is None or dt is None or len(ks)<6 or len(kt)<6:
+            return None
+        matcher=cv2.BFMatcher(cv2.NORM_L2)
+        pairs=matcher.knnMatch(ds,dt,k=2)
+        good=[]
+        for pair in pairs:
+            if len(pair)<2: continue
+            m,n=pair
+            if m.distance < 0.74*n.distance:
+                good.append(m)
+        if len(good)<5:
+            return None
+        src=np.float32([ks[m.queryIdx].pt for m in good]).reshape(-1,1,2)
+        dst=np.float32([kt[m.trainIdx].pt for m in good]).reshape(-1,1,2)
+        M,inliers=cv2.estimateAffinePartial2D(src,dst,method=cv2.RANSAC,ransacReprojThreshold=4.5,maxIters=4000,confidence=0.995,refineIters=25)
+        if M is None:
+            return None
+        inlier_count=int(inliers.sum()) if inliers is not None else 0
+        a,b=float(M[0,0]),float(M[1,0])
+        scale=float((a*a+b*b)**0.5)
+        rotation=float(np.degrees(np.arctan2(b,a)))
+        sh,sw=sgray.shape[:2]; th,tw=tgray.shape[:2]
+        inlier_ratio=inlier_count/max(len(good),1)
+        # Typical reports differ by magnification but not by large rotation or
+        # anisotropic distortion.  Keep bounds broad enough for 10/20 um FOV changes.
+        plausible=(np.isfinite(scale) and np.isfinite(rotation)
+                   and 0.22<=scale<=1.35 and abs(rotation)<=10.0
+                   and inlier_count>=4 and inlier_ratio>=0.28)
+        if not plausible:
+            return None
+        return {
+            "accepted":True,
+            "method":"sift_similarity",
+            "matrix":[[round(float(v),8) for v in row] for row in M.tolist()],
+            "scale":round(scale,5),"rotation_deg":round(rotation,4),
+            "matches":len(good),"inliers":inlier_count,"inlier_ratio":round(inlier_ratio,4),
+            "source_width":sw,"source_height":sh,"width":tw,"height":th,
+        }
+    except Exception:
+        return None
 
 
 def estimate_sem_to_eds_registration(sem_ref,se_map):
-    """Estimate a conservative SEM->Page-2 translation in Page-2 pixels.
+    """Estimate SEM -> Page-2 SE transform.
 
-    Only translation is allowed on purpose: the source report template already fixes
-    scale/aspect ratio, so allowing arbitrary affine distortion can move a correct ROI.
-    Low-confidence or implausibly large estimates fall back to zero shift.
+    v23.9.4 first estimates a true similarity transform (scale + small rotation +
+    translation).  This is required because Page-1 SEM and Page-2 EDS/SE can use
+    different magnifications/FOVs.  If feature registration is not reliable, the
+    older conservative resize + translation fallback is retained.
     """
     if sem_ref is None or se_map is None or getattr(sem_ref,'size',0)==0 or getattr(se_map,'size',0)==0:
         return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":0.0,"method":"resize_fallback"}
+    sim=_similarity_from_sift(sem_ref,se_map)
+    if sim:
+        return sim
     h,w=se_map.shape[:2]
     try:
         a=_registration_signal(sem_ref,(h,w)); b=_registration_signal(se_map,(h,w))
         window=cv2.createHanningWindow((w,h),cv2.CV_32F)
         (dx,dy),response=cv2.phaseCorrelate(a,b,window)
         dx=float(dx); dy=float(dy); response=float(response)
-        # Normal report-to-report acquisition offsets are small.  Reject a phase
-        # correlation peak that would move the ROI by a physically implausible amount.
         plausible=(np.isfinite(dx) and np.isfinite(dy) and np.isfinite(response)
                    and abs(dx)<=w*0.12 and abs(dy)<=h*0.12 and response>=0.015)
         if not plausible:
-            return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":round(response if np.isfinite(response) else 0.0,4),"method":"resize_fallback","width":w,"height":h}
-        return {"accepted":True,"dx_px":round(dx,3),"dy_px":round(dy,3),"response":round(response,4),"method":"se_phase_translation","width":w,"height":h}
+            return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":round(response if np.isfinite(response) else 0.0,4),"method":"resize_fallback","width":w,"height":h,"source_width":sem_ref.shape[1],"source_height":sem_ref.shape[0]}
+        return {"accepted":True,"dx_px":round(dx,3),"dy_px":round(dy,3),"response":round(response,4),"method":"resize_phase_translation","width":w,"height":h,"source_width":sem_ref.shape[1],"source_height":sem_ref.shape[0]}
     except Exception:
-        return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":0.0,"method":"resize_fallback","width":w,"height":h}
+        return {"accepted":False,"dx_px":0.0,"dy_px":0.0,"response":0.0,"method":"resize_fallback","width":w,"height":h,"source_width":sem_ref.shape[1],"source_height":sem_ref.shape[0]}
+
 
 def map_sem_roi_to_eds(roi,target_shape,registration=None):
-    """Map an SEM-space ROI into the Page-2 element-map coordinate system."""
+    """Map an SEM-space ROI into the shared Page-2 EDS coordinate system."""
     th,tw=target_shape[:2]
     if roi is None:
         return np.zeros((th,tw),np.uint8)
     reg=registration or {}
+    # Similarity matrix is defined from original SEM pixels directly to the
+    # Page-2 SE coordinate system; do not pre-resize the mask in this path.
+    if reg.get("accepted") and reg.get("method")=="sift_similarity" and reg.get("matrix"):
+        try:
+            M=np.asarray(reg["matrix"],dtype=np.float32).reshape(2,3).copy()
+            rw=int(reg.get("width") or tw); rh=int(reg.get("height") or th)
+            base=cv2.warpAffine((roi>0).astype(np.uint8)*255,M,(rw,rh),flags=cv2.INTER_NEAREST,borderMode=cv2.BORDER_CONSTANT,borderValue=0)
+            if (rh,rw)!=(th,tw):
+                base=cv2.resize(base,(tw,th),interpolation=cv2.INTER_NEAREST)
+            return base
+        except Exception:
+            pass
+    # Legacy fallback: normalize to target size, then apply the small translation.
     rw=int(reg.get("width") or tw); rh=int(reg.get("height") or th)
     base=cv2.resize((roi>0).astype(np.uint8)*255,(rw,rh),interpolation=cv2.INTER_NEAREST)
-    if reg.get("accepted"):
+    if reg.get("accepted") and reg.get("method")=="resize_phase_translation":
         M=np.float32([[1,0,float(reg.get("dx_px",0.0))],[0,1,float(reg.get("dy_px",0.0))]])
         base=cv2.warpAffine(base,M,(rw,rh),flags=cv2.INTER_NEAREST,borderMode=cv2.BORDER_CONSTANT,borderValue=0)
     if (rh,rw)!=(th,tw):
         base=cv2.resize(base,(tw,th),interpolation=cv2.INTER_NEAREST)
     return base
-
 
 def _candidate_score(gray, labels, stats, idx, background, analysis_mask):
     x,y,ww,hh,area=stats[idx]
@@ -963,7 +1033,7 @@ def residue_features(sem_ref,c_map,o_map,n_map,si_map,ai_boxes=None,se_map=None)
         "classification_note":"v23.7.48 rule: Residue requires C ROI/Global >=2.40x AND O ROI/Global >=3.00x. If both are >=2.00x but either residue gate is unmet, the result is Ambiguous. If either is below 2.00x, the result is Non-residue. SEM morphology and spatial overlap are diagnostics only and cannot override the C/O rule. The whole analytical image is the baseline after excluding the bottom metadata/scale-bar region; Local Ring is not used.","c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
         "sem_to_eds_registration":registration,
         "element_panel_registration":{"C":c_panel_info,"O":o_panel_info,"N":n_panel_info,"Si":si_panel_info},
-        "roi_registration_version":"v23.9.3-panel-geometry"
+        "roi_registration_version":"v23.9.4-shared-page2-similarity"
     },roi
 
 
@@ -1049,7 +1119,7 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
         "human_score_rule":"C >=2.40x and O >=3.00x -> Residue; both >=2.00x but either residue gate unmet -> Ambiguous; otherwise Non-residue",
         "human_sem_to_eds_registration":registration,
         "human_element_panel_registration":{"C":c_map_info,"O":o_map_info,"N":n_map_info,"Si":si_map_info},
-        "human_roi_registration_version":"v23.9.3-panel-geometry",
+        "human_roi_registration_version":"v23.9.4-shared-page2-similarity",
         "c_residue_ratio_threshold":C_RESIDUE_RATIO,"o_residue_ratio_threshold":O_RESIDUE_RATIO,
     }
 

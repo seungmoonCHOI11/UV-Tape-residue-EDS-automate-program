@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.3")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.4")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -1139,10 +1139,10 @@ def _dynamic_asset(point_id: str, asset_type: str):
     outdir = OUTPUT / "_dynamic_assets" / safe_id
     outdir.mkdir(parents=True, exist_ok=True)
     name_map = {
-        "sem_residue_overlay": "sem_dynamic_overlay_v2393.jpg",
-        "eds_co_overlay": "eds_dynamic_overlay_v2393.jpg",
-        "c_map_enhanced_overlay": "c_dynamic_overlay_v2393.jpg",
-        "o_map_enhanced_overlay": "o_dynamic_overlay_v2393.jpg",
+        "sem_residue_overlay": "sem_dynamic_overlay_v2394.jpg",
+        "eds_co_overlay": "eds_dynamic_overlay_v2394.jpg",
+        "c_map_enhanced_overlay": "c_dynamic_overlay_v2394.jpg",
+        "o_map_enhanced_overlay": "o_dynamic_overlay_v2394.jpg",
     }
     filename = name_map.get(asset_type)
     if not filename:
@@ -1305,7 +1305,7 @@ def _invalidate_dynamic_assets(point_id: str):
     safe_id=re.sub(r"[^A-Za-z0-9_-]","_",str(point_id)); outdir=OUTPUT/"_dynamic_assets"/safe_id
     for name in [
         "sem_dynamic_overlay.jpg","c_dynamic_overlay.jpg","o_dynamic_overlay.jpg","eds_dynamic_overlay.jpg",
-        "sem_dynamic_overlay_v2393.jpg","c_dynamic_overlay_v2393.jpg","o_dynamic_overlay_v2393.jpg","eds_dynamic_overlay_v2393.jpg",
+        "sem_dynamic_overlay_v2394.jpg","c_dynamic_overlay_v2394.jpg","o_dynamic_overlay_v2394.jpg","eds_dynamic_overlay_v2394.jpg",
     ]:
         try: (outdir/name).unlink(missing_ok=True)
         except Exception: pass
