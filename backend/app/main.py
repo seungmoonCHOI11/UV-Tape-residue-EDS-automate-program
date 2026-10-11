@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 import cv2, numpy as np
 from dotenv import load_dotenv
 
-from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence
+from .analysis import extract_pdfs, normalize_conditions, condition_point_sequence, trim_process_memory
 from .ai import ai_available
 from .r2_storage import r2
 from .persistence import persist_point, reconcile_project, build_manifest, PersistenceError
@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.9")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.10")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -49,14 +49,20 @@ def set_job(job_id, **updates):
     with JOB_LOCK:
         JOBS.setdefault(job_id, {}).update(updates)
         snapshot=dict(JOBS[job_id])
-    # New uploads use existing project metadata: no schema migration is required.
-    if snapshot.get("persist_upload") and db.configured():
+    # Persist upload and re-analysis progress in existing project metadata so a
+    # Render process restart is distinguishable from a browser/network hiccup.
+    # No schema migration is required.
+    persist_kind = "upload_job" if snapshot.get("persist_upload") else ("reanalysis_job" if snapshot.get("persist_reanalysis") else None)
+    if persist_kind and db.configured():
         try:
             with JOB_PERSIST_LOCK:
                 project=db.get_project(snapshot["project_id"])
                 meta=json.loads(project.get("description") or "{}")
-                meta["upload_job"]={**snapshot,"job_id":job_id}
-                meta["queue_status"]=snapshot.get("status")
+                meta[persist_kind]={**snapshot,"job_id":job_id}
+                if persist_kind == "upload_job":
+                    meta["queue_status"]=snapshot.get("status")
+                else:
+                    meta["reanalysis_status"]=snapshot.get("status")
                 db.update_project(snapshot["project_id"],description=json.dumps(meta,ensure_ascii=False))
         except Exception as exc:
             print(f"[job] progress persistence failed: {exc}")
@@ -722,18 +728,41 @@ def upload(files: list[UploadFile]=File(...), conditions_json: str=Form(...),
         raise
 
 
-def persisted_upload_job(project_id,job_id=None):
+def persisted_project_job(project_id,job_id=None):
+    """Recover the last upload/re-analysis status from project metadata.
+
+    If the in-memory job disappeared while the persisted snapshot still says the
+    job was active, the Render process restarted.  Report ``interrupted`` rather
+    than leaving the browser forever at "server connection checking".
+    """
     if not db.configured() or not project_id:
         return None
     project=db.get_project(project_id)
     meta=json.loads(project.get("description") or "{}")
-    saved=meta.get("upload_job")
-    if not saved or (job_id and saved.get("job_id")!=job_id):
+    candidates=[]
+    for key,job_type in (("reanalysis_job","reanalysis"),("upload_job","upload")):
+        saved=meta.get(key)
+        if not saved:
+            continue
+        saved={**saved,"job_type":saved.get("job_type") or job_type}
+        if job_id and saved.get("job_id")!=job_id:
+            continue
+        candidates.append(saved)
+    if not candidates:
         return None
+    saved=candidates[0]
     if saved.get("status") in {"queued","processing"}:
         saved={**saved,"status":"interrupted","phase":"interrupted",
-               "message":"서버가 재시작되어 분석이 중단되었습니다. 저장 완료 Point는 유지됩니다. 자동 재개는 수행하지 않습니다."}
+               "message":("Render 서버 프로세스가 재시작되어 배치 재분석이 중단되었습니다. "
+                          "이미 반영된 Point는 유지됩니다. 서버가 안정된 뒤 이 배치 재분석을 다시 실행하세요."
+                          if saved.get("job_type")=="reanalysis" else
+                          "서버가 재시작되어 분석이 중단되었습니다. 저장 완료 Point는 유지됩니다. 자동 재개는 수행하지 않습니다.")}
     return saved
+
+
+# Backward-compatible name used by older code paths.
+def persisted_upload_job(project_id,job_id=None):
+    return persisted_project_job(project_id,job_id)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -761,8 +790,19 @@ def current_upload():
         return {"job":jobs[-1]}
     if db.configured():
         try:
+            # A re-analysis may target an older batch, not the latest project.
+            # Search recent project metadata for a persisted active job first.
+            for project in db.get_projects(limit=200):
+                try:
+                    meta=json.loads(project.get("description") or "{}")
+                except Exception:
+                    continue
+                for key in ("reanalysis_job","upload_job"):
+                    saved=meta.get(key) or {}
+                    if saved.get("status") in {"queued","processing"}:
+                        return {"job":persisted_project_job(project["id"],saved.get("job_id"))}
             project=db.get_latest_project()
-            return {"job":persisted_upload_job(project["id"]) if project else None}
+            return {"job":persisted_project_job(project["id"]) if project else None}
         except Exception as exc: raise HTTPException(503,"최근 분석 상태를 불러올 수 없습니다.") from exc
     return {"job":None}
 
@@ -777,6 +817,9 @@ def _download_r2_source(key: str, destination: Path):
 
 def process_reanalysis_job(job_id,project_id,meta):
     try:
+        # Re-analysis can follow several heavy batches on the same Render process.
+        # Release stale Python/native arenas before downloading/opening the next PDF.
+        trim_process_memory()
         conditions=meta.get("conditions") or []
         pages_per_point=int(meta.get("pages_per_point",3) or 3)
         files=meta.get("files") or []
@@ -786,10 +829,18 @@ def process_reanalysis_job(job_id,project_id,meta):
         if not files:
             raise ValueError("Stored source PDF metadata was not found.")
 
-        temp=UPLOAD/"_reanalyze"/project_id
+        # Only one analysis/re-analysis may run at a time (ANALYSIS_SLOT), so
+        # leftover temp folders from previously killed Render processes are stale.
+        rean_root=UPLOAD/"_reanalyze"
+        rean_root.mkdir(parents=True,exist_ok=True)
+        for stale in rean_root.iterdir():
+            if stale.name != project_id and stale.is_dir():
+                shutil.rmtree(stale,ignore_errors=True)
+        temp=rean_root/project_id
         if temp.exists():
-            shutil.rmtree(temp)
+            shutil.rmtree(temp,ignore_errors=True)
         temp.mkdir(parents=True,exist_ok=True)
+        trim_process_memory()
         pdf_paths=[]
         for name in files:
             key=keys.get(name) or f"projects/{project_id}/source/{name}"
@@ -797,6 +848,7 @@ def process_reanalysis_job(job_id,project_id,meta):
             _download_r2_source(key,local)
             pdf_paths.append(local)
 
+        trim_process_memory()
         expected=len(condition_point_sequence(normalize_conditions(conditions)))
         failures=[]
         structure_info={"detected_points":None,"missing_count":None,"missing_points":[],"recognition_mode":None}
@@ -823,6 +875,10 @@ def process_reanalysis_job(job_id,project_id,meta):
             )
 
         def point_progress(done,total,phase):
+            # Native allocations from PDF/OpenCV can remain in the parent heap.
+            # Trim at wafer-sized checkpoints in addition to per-Point worker cleanup.
+            if done and (done % 9 == 0 or done == total):
+                trim_process_memory()
             set_job(
                 job_id,phase="analysis",
                 progress=min(75,10+int(done/max(total,1)*65)),
@@ -848,6 +904,7 @@ def process_reanalysis_job(job_id,project_id,meta):
             point_error_callback=failure_cb,
             structure_callback=structure_cb,
         )
+        trim_process_memory()
 
         set_job(job_id,phase="database",progress=76,completed=0,total=expected,message="재분석 결과를 기존 Point에 반영하고 있습니다.")
         saved_count=0
@@ -934,6 +991,8 @@ def process_reanalysis_job(job_id,project_id,meta):
             RECORDS[r["id"]]=r
             _invalidate_dynamic_assets(r["id"])
             saved_count+=1
+            if saved_count % 9 == 0:
+                trim_process_memory()
             set_job(
                 job_id,phase="database",
                 progress=min(99,76+int(i/max(len(records),1)*23)),
@@ -952,6 +1011,7 @@ def process_reanalysis_job(job_id,project_id,meta):
             message="기존 데이터 재분석이 완료되었습니다."
 
         shutil.rmtree(temp,ignore_errors=True)
+        trim_process_memory()
         set_job(
             job_id,status=final_status,phase="partial" if partial else "complete",
             progress=99 if partial else 100,completed=saved_count,total=expected,
@@ -964,6 +1024,8 @@ def process_reanalysis_job(job_id,project_id,meta):
         )
     except Exception as e:
         traceback.print_exc()
+        shutil.rmtree(UPLOAD/"_reanalyze"/project_id,ignore_errors=True)
+        trim_process_memory()
         set_job(job_id,status="failed",phase="error",progress=0,error=str(e),message=f"재분석 실패: {e}")
 
 @app.post("/api/projects/{project_id}/reanalyze")
@@ -978,11 +1040,14 @@ def reanalyze_project(project_id: str):
     if not ANALYSIS_SLOT.acquire(blocking=False):
         raise HTTPException(409,"현재 PDF 분석 또는 재분석이 진행 중입니다.")
     def run_reanalysis():
-        try: process_reanalysis_job(job_id,project_id,meta)
-        finally: ANALYSIS_SLOT.release()
+        try:
+            process_reanalysis_job(job_id,project_id,meta)
+        finally:
+            trim_process_memory()
+            ANALYSIS_SLOT.release()
     try:
-        set_job(job_id,job_type="reanalysis",files=meta.get("files") or [],status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
-        threading.Thread(target=run_reanalysis,daemon=True).start()
+        set_job(job_id,persist_reanalysis=True,job_type="reanalysis",files=meta.get("files") or [],status="queued",phase="queued",progress=5,completed=0,total=expected,project_id=project_id,message="R2에 저장된 원본 PDF를 불러오는 중입니다.")
+        threading.Thread(target=run_reanalysis,daemon=True,name=f"reanalyze-{project_id[:8]}").start()
     except BaseException:
         ANALYSIS_SLOT.release()
         raise

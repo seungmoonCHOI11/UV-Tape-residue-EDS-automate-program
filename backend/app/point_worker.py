@@ -1314,10 +1314,23 @@ def human_roi_features(sem_ref,c_map,o_map,n_map,si_map,roi,se_map=None):
 
 def run(payload):
     outdir=Path(payload["output_dir"]); outdir.mkdir(parents=True,exist_ok=True); paths={}
-    for local_no,info in enumerate(payload["pages"],1):
-        with fitz.open(Path(info["path"])) as doc:
+    # v23.9.10 normally receives one tiny 3-page mini PDF. Reuse the open
+    # document instead of reopening it for Page 1/2/3; this also remains correct
+    # for the original multi-file fallback path.
+    open_docs={}
+    try:
+        for local_no,info in enumerate(payload["pages"],1):
+            src=str(Path(info["path"]))
+            doc=open_docs.get(src)
+            if doc is None:
+                doc=fitz.open(src); open_docs[src]=doc
             page=doc.load_page(int(info["index"])); data=render_page_to_jpeg(page); out=outdir/f"page_{local_no}.jpg"; out.write_bytes(data); paths[f"page_{local_no}"]=str(out); del data,page
-        gc.collect()
+            gc.collect()
+    finally:
+        for doc in open_docs.values():
+            try: doc.close()
+            except Exception: pass
+        open_docs.clear(); gc.collect()
     first=cv2.imread(paths["page_1"],cv2.IMREAD_COLOR); second=cv2.imread(paths["page_2"],cv2.IMREAD_COLOR)
     if first is None or second is None: raise RuntimeError("Unable to read rendered source pages")
     p1=crop_page1_layout(first); p2=crop_page2_element_maps(second); del first,second; gc.collect()

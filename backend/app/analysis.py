@@ -4,7 +4,66 @@ import re
 import subprocess
 import sys
 import gc
+import os
 from pathlib import Path
+
+
+def trim_process_memory():
+    """Best-effort release of Python and native heap pages back to Linux.
+
+    Render's small instances can keep OpenCV/PyMuPDF native arenas resident even
+    after objects are freed.  ``malloc_trim(0)`` is glibc/Linux specific, so every
+    call is intentionally safe to ignore on unsupported platforms.
+    """
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except Exception:
+        pass
+
+
+def _make_point_mini_pdf(group, destination):
+    """Copy only this Point's source pages into a tiny temporary PDF.
+
+    The child worker then opens a 3-page PDF instead of repeatedly opening a
+    80/240+ page merged source PDF.  Original source page metadata is retained in
+    the record separately, so this changes memory usage only, not Point mapping.
+    """
+    import pymupdf as fitz
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    docs = {}
+    out = fitz.open()
+    try:
+        for src, page_index in group:
+            key = str(src)
+            doc = docs.get(key)
+            if doc is None:
+                doc = fitz.open(key)
+                docs[key] = doc
+            idx = int(page_index)
+            if idx < 0 or idx >= len(doc):
+                raise IndexError(f"Source page {idx} is outside {Path(key).name}")
+            out.insert_pdf(doc, from_page=idx, to_page=idx)
+        if len(out) != len(group):
+            raise RuntimeError(f"Mini PDF page count mismatch: {len(out)} != {len(group)}")
+        out.save(str(destination), garbage=2, deflate=True)
+        return destination
+    finally:
+        try:
+            out.close()
+        except Exception:
+            pass
+        for doc in docs.values():
+            try:
+                doc.close()
+            except Exception:
+                pass
+        trim_process_memory()
 
 ZONE_MAP = {1:"Center",2:"Center",3:"Center",4:"Edge",5:"Diamond",6:"Edge",7:"Edge",8:"Center",9:"Diamond"}
 
@@ -190,6 +249,9 @@ def extract_pdfs(
     sequence = condition_point_sequence(conditions, position_substrates, default_substrate)
     pdf_paths = [Path(p) for p in pdf_paths]
     groups = _build_point_groups(pdf_paths, pages_per_point)
+    # Close/trim the large source-document parsing footprint before launching
+    # the first one-Point worker. This matters most for 81+ Point merged PDFs.
+    trim_process_memory()
     if not groups:
         raise ValueError("No analyzable Point groups were found in the PDF.")
 
@@ -286,6 +348,9 @@ def extract_pdfs(
         **__import__("os").environ,
         "OMP_NUM_THREADS":"1", "OPENBLAS_NUM_THREADS":"1", "MKL_NUM_THREADS":"1",
         "NUMEXPR_NUM_THREADS":"1", "VECLIB_MAXIMUM_THREADS":"1", "OPENCV_OPENCL_RUNTIME":"disabled",
+        # Keep glibc from creating many native arenas in the worker. The worker
+        # is single-threaded, so additional arenas only increase RSS on Render.
+        "MALLOC_ARENA_MAX":"2", "MALLOC_TRIM_THRESHOLD_":"65536",
     }
 
     for done_index, (sequence_index, meta, group) in enumerate(aligned, 1):
@@ -296,6 +361,21 @@ def extract_pdfs(
         point_id=f"{power}_{time}_W{meta['wafer']}_P{meta['point']}"
         pdir=output_dir/point_id; pdir.mkdir(parents=True,exist_ok=True)
         result_path=pdir/'_point_result.json'
+        mini_pdf_path=pdir/'_point_source.pdf'
+        worker_pages=[{"path":src,"index":page_index} for src,page_index in group]
+        worker_source_mode="original_pdf"
+        if os.getenv("POINT_MINI_PDF","1").strip().lower() not in {"0","false","no","off"}:
+            try:
+                _make_point_mini_pdf(group, mini_pdf_path)
+                worker_pages=[{"path":str(mini_pdf_path),"index":i} for i in range(len(group))]
+                worker_source_mode="mini_pdf"
+            except Exception as mini_exc:
+                # Safety fallback: analysis must remain possible if a rare PDF
+                # object cannot be copied by PyMuPDF. The UI result is unchanged.
+                print(f"[mini-pdf] {point_id} fallback to original source: {mini_exc}")
+                try: mini_pdf_path.unlink(missing_ok=True)
+                except Exception: pass
+                trim_process_memory()
         payload={
             "id":point_id,"power":power,"time":time,"wafer":meta['wafer'],
             "point":meta['point'],"zone":meta['zone'],
@@ -307,13 +387,17 @@ def extract_pdfs(
             "pages_per_point":pages_per_point,
             "source_pages":[{"file":Path(src).name,"page":page_index+1} for src,page_index in group],
             "output_dir":str(pdir),"result_path":str(result_path),
-            "pages":[{"path":src,"index":page_index} for src,page_index in group],
+            "pages":worker_pages,
+            "worker_source_mode":worker_source_mode,
             "roi_reference_examples":roi_reference_examples or [],
         }
         payload_path=pdir/'_point_input.json'
         payload_path.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
         stage = "worker"
         try:
+            # Return idle native pages before the child is fork/exec'd so the
+            # parent + worker peak stays below small Render instance limits.
+            trim_process_memory()
             proc=subprocess.run(
                 [sys.executable,str(worker),str(payload_path)],
                 env=child_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
@@ -330,6 +414,7 @@ def extract_pdfs(
             record["sequence_index"]=sequence_index+1
             record["manifest_id"]=point_id
             record["source_point_id"]=point_id
+            record.setdefault("features",{})["worker_source_mode"]=worker_source_mode
 
             # AI ROI refinement is optional. AI failure is recorded in the Point
             # features and must not turn a valid CV result into a failed Point.
@@ -380,6 +465,7 @@ def extract_pdfs(
             record["sequence_index"]=sequence_index+1
             record["manifest_id"]=point_id
             record["source_point_id"]=point_id
+            record.setdefault("features",{})["worker_source_mode"]=worker_source_mode
 
             stage = "save"
             if record_callback:
@@ -427,7 +513,10 @@ def extract_pdfs(
             except Exception: pass
             try: result_path.unlink(missing_ok=True)
             except Exception: pass
-            gc.collect()
+            try: mini_pdf_path.unlink(missing_ok=True)
+            except Exception: pass
+            trim_process_memory()
+    trim_process_memory()
     return records
 
 def extract_pdf(pdf_path: Path, output_dir: Path, conditions=None, pages_per_point=3):
