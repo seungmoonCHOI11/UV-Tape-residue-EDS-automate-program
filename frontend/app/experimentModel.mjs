@@ -13,3 +13,11 @@ export function cleanPreset(raw){
  for(const [key,allowed] of [['results',['Residue','Non-residue','Ambiguous']],['score_bands',['0-60','60-70','70-80','80-90','90-100','missing']]])if(Array.isArray(f[key])&&f[key].every(x=>allowed.includes(x)))filters[key]=f[key];
  return {version:1,name:String(raw.name||'보고서 설정').trim().slice(0,80),kind:raw.kind,filters,includeVerification:raw.includeVerification===true,perPage:[10,12,16,20].includes(raw.perPage)?raw.perPage:12,groupScores:raw.groupScores!==false,groupConditions:raw.groupConditions!==false};
 }
+
+export function assignSets(points,projects){
+ const meta=new Map(projects.map(p=>[String(p.id),p])),groups=new Map();
+ for(const p of points){const key=`${p.power} / ${p.time}`;if(!groups.has(key))groups.set(key,new Set());groups.get(key).add(String(p.project_id||'unknown'));}
+ const indices=new Map();
+ for(const [key,ids] of groups){const used=new Set();const ordered=[...ids].sort((a,b)=>String(meta.get(a)?.created_at||'').localeCompare(String(meta.get(b)?.created_at||''))||a.localeCompare(b));for(const id of ordered){const saved=Number(meta.get(id)?.repeat_no);let n=Number.isInteger(saved)&&saved>0&&!used.has(saved)?saved:Math.max(0,...used)+1;used.add(n);indices.set(`${key}|${id}`,n)}}
+ return points.map(p=>({...p,set_number:indices.get(`${p.power} / ${p.time}|${p.project_id||'unknown'}`),research_identity:meta.get(String(p.project_id))?.research_identity||{}}));
+}

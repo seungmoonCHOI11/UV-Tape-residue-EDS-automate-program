@@ -1,0 +1,2 @@
+v23.9.1
+Verification SET labels and ordered navigation; independent records preserved.

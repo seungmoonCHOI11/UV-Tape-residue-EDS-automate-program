@@ -44,3 +44,5 @@ button,input,select,textarea{font-family:inherit}button{transition:background .1
 @media(max-width:600px){.ex-candidates{grid-template-columns:1fr}.ex-batch,.ex-presets,.ex-ai-controls,.ex-pad,.ex-picked{padding:16px}.ex-scatter-chart{padding:0 8px 15px}.ex-scatter-chart svg{min-width:480px}.ex-scatter-chart{overflow-x:auto}.ex-board-head{min-height:170px}.ex-toolbar input:not([type=checkbox]){width:100%}.startupShell .initialLoading{padding:18px}}
 
 .ex-picked{max-height:480px;overflow:auto}.ex-picked h4{margin-top:0}.ex-board .search{white-space:nowrap;gap:14px}.ex-board .search input{min-width:0;flex:1}.ex-scatter .ex-toolbar label{white-space:nowrap}
+
+.verificationPointItem{grid-template-columns:76px minmax(0,1fr)}.verificationPointItem>span{font-size:12px;white-space:nowrap}.verificationTop b small{font-size:11px;color:var(--muted)}
