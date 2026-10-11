@@ -444,3 +444,7 @@ body,button,input,select,textarea{font-family:"Noto Sans KR",Arial,sans-serif}
 .ambiguousDecision:hover{background:#fff4d6}
 .verificationButtons .ambiguousDecision{min-width:145px;padding:11px 14px}
 @media(max-width:700px){.verificationButtons .ambiguousDecision{min-width:110px;flex:1}}
+
+/* v23.9.6: batch-scoped re-analysis controls */
+.deleteRowActions{display:flex;align-items:center;gap:8px;flex:none}.batchReanalyzeBtn{white-space:nowrap}.batchReanalysisGuide strong{color:#25364a}.batchReanalysisGuide{margin-bottom:18px}
+@media(max-width:760px){.deleteRowActions{width:100%;justify-content:flex-end;flex-wrap:wrap}.deleteRowActions button{flex:0 0 auto}}
