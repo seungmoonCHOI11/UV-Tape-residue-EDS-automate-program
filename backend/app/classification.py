@@ -3,8 +3,8 @@
 Human verification remains the final ground truth. Automatic labels and scores can
 be evaluated with one of three screening criteria without rewriting stored data:
 - co: C AND O (legacy/current production rule)
-- cno: C AND N AND O (exploratory, mainly for Si-reference review)
-- c_n_or_o: C AND (N OR O) (exploratory, mainly for Si-reference review)
+- cno: C AND N AND O (exploratory elemental-combination screening across substrates)
+- c_n_or_o: C AND (N OR O) (exploratory elemental-combination screening across substrates)
 """
 from __future__ import annotations
 

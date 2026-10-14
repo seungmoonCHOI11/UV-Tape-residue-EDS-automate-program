@@ -4,8 +4,8 @@ export const DEFAULT_N_THRESHOLD=2.40;
 export const MODERATE_THRESHOLD=2.00;
 export const SCREENING_CRITERIA=[
  {id:'co',label:'C AND O',short:'C·O',description:'기존 기준 · C와 O가 모두 강하게 증가'},
- {id:'cno',label:'C AND N AND O',short:'C·N·O',description:'Si 기판 탐색 · C, N, O가 모두 증가'},
- {id:'c_n_or_o',label:'C AND (N OR O)',short:'C·(N 또는 O)',description:'Si 기판 탐색 · C는 필수, N 또는 O 중 하나가 증가'},
+ {id:'cno',label:'C AND N AND O',short:'C·N·O',description:'전체 기판 탐색 · C, N, O가 모두 증가'},
+ {id:'c_n_or_o',label:'C AND (N OR O)',short:'C·(N 또는 O)',description:'전체 기판 탐색 · C는 필수, N 또는 O 중 하나가 증가'},
 ];
 export const normalizeCriterion=v=>SCREENING_CRITERIA.some(x=>x.id===v)?v:'co';
 export const finiteNumber=v=>{if(v===null||v===undefined||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null};

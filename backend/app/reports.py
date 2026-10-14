@@ -205,7 +205,7 @@ def export_engineering_ppt(records,out):
         "Spatial robustness: compare W1 Corner, W4 Edge, W5 Middle and report max-min residue-rate spread.",
         "Ambiguous points are reported separately and are not silently counted as Non-residue.",
         "Coverage assumes the MAIN engineering set is W1/W4/W5 x P1-P9 = 27 points per condition; W9 is excluded.",
-        "W9/reference substrates (for example Si) are compared only against the same W9 substrate group and never mixed into MAIN ranking.",
+        "W9/reference data are grouped by substrate type and never mixed into MAIN W1/W4/W5 ranking.",
     ]
     y=1.5
     for b in bullets:
@@ -213,14 +213,14 @@ def export_engineering_ppt(records,out):
         tx=s.shapes.add_textbox(Inches(.9),Inches(y+.13),Inches(11.55),Inches(.35));p=tx.text_frame.paragraphs[0];p.text=b;p.font.size=Pt(10);p.font.color.rgb=NAVY
         y+=.82
     # Slide 5: W9 reference datasets, separated by substrate
-    s=prs.slides.add_slide(blank);_ppt_title(s,"W9 Reference / Other","Excluded from MAIN ranking; compare W9 datasets by substrate type (e.g., Si vs Si only)")
+    s=prs.slides.add_slide(blank);_ppt_title(s,"W9 Reference / Other","Excluded from MAIN ranking; compare W9 datasets separately by substrate type")
     if refs:
         data=[["Condition","W9 substrate","N","Residue n (%)","Non n (%)","Ambiguous n (%)","Human verified"]]
         for x in refs:
             data.append([x["condition"],x["substrate"],x["points"],f"{x['residue']} ({x['residue_rate']:.1f}%)",f"{x['non']} ({_rate(x['non'],x['points']):.1f}%)",f"{x['ambiguous']} ({x['ambiguous_rate']:.1f}%)",f"{x['verified']}/{x['points']}"])
         _ppt_table(s,data,.5,1.45,12.25,min(5.3,.58*len(data)+.5),font_size=8)
     else:
-        note=s.shapes.add_textbox(Inches(.7),Inches(1.55),Inches(11.8),Inches(.8));p=note.text_frame.paragraphs[0];p.text="No W9 reference data yet. Future W9 Si uploads will appear here and will be compared only with W9 Si datasets.";p.font.size=Pt(12);p.font.color.rgb=NAVY
+        note=s.shapes.add_textbox(Inches(.7),Inches(1.55),Inches(11.8),Inches(.8));p=note.text_frame.paragraphs[0];p.text="No W9 reference data yet. Future W9 uploads will appear here and will be grouped and compared by substrate type.";p.font.size=Pt(12);p.font.color.rgb=NAVY
 
     prs.save(out);return out
 
@@ -296,7 +296,7 @@ def export_engineering_pdf(records,out):
     if len(data)>1:
         table(data,28,H-82,[130,90,45,95,95,95,70],row_h=28,fs=6.7)
     else:
-        c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica",10);c.drawString(42,H-98,"No W9 reference data yet. Future W9 Si data will be grouped here separately.")
+        c.setFillColorRGB(.08,.14,.22);c.setFont("Helvetica",10);c.drawString(42,H-98,"No W9 reference data yet. Future W9 data will be grouped here separately by substrate type.")
     c.save();return out
 
 
