@@ -152,3 +152,14 @@ button,input,select,textarea{font-family:inherit}button{transition:background .1
 @media(max-width:1250px){.verificationLayout{grid-template-columns:minmax(0,1fr) 330px!important}.verificationWorkspace{grid-template-columns:210px minmax(0,1fr)!important}}
 @media(max-width:1050px){.verificationWorkspace{grid-template-columns:1fr!important}.verificationLayout{grid-template-columns:1fr!important}.analysisResultCard .ratioSectionHead{align-items:flex-start;flex-direction:column}}
 @media(max-width:700px){.analysisResultCard .ratioFocus.ratioFocusThree{grid-template-columns:1fr!important}.analysisResultCard .ratioSectionHead>small{text-align:left}.analysisResultCard .ratioRuleLegend>span{grid-template-columns:7px auto;row-gap:2px}.analysisResultCard .ratioRuleLegend em{grid-column:2;text-align:left}}
+
+/* v23.9.25 · Verification substrate + wafer selectors */
+.verificationQueue{width:auto}
+.verificationQueue label{min-width:0}
+.verificationQueue select{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.verificationQueueCount{display:flex;flex-direction:column;gap:3px}
+.verificationQueueCount b{font-size:10px;color:var(--ink)}
+.verificationQueueCount span{font-size:9.5px;color:var(--muted)}
+@media(min-width:1051px){
+  .verificationWorkspace{grid-template-columns:270px minmax(0,1fr)!important}
+}
