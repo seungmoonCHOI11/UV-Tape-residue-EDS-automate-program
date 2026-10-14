@@ -10,6 +10,17 @@ export function autoRuleStats(points,criterion,nThreshold=2.40,cThreshold=2.40,o
  return {n,residue,non,ambiguous,rate:n?100*residue/n:null,upper:n?100*(residue+ambiguous)/n:null,verified:verified.length,agreement,nAvailable};
 }
 
+
+export function toggleRuleSelection(current,id,allIds=SCREENING_CRITERIA.map(r=>r.id)){
+ const valid=[...new Set((Array.isArray(current)?current:[]).filter(x=>allIds.includes(x)))];
+ const base=valid.length?valid:[...allIds];
+ if(!allIds.includes(id))return base;
+ // When all rules are visible, one click means "show only this rule".
+ if(base.length===allIds.length)return [id];
+ if(base.includes(id))return base.length===1?base:base.filter(x=>x!==id);
+ return [...base,id].filter(x=>allIds.includes(x));
+}
+
 export function ruleDistributions(points,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
  return SCREENING_CRITERIA.map(rule=>({rule,...autoRuleStats(points,rule.id,nThreshold,cThreshold,oThreshold)}));
 }

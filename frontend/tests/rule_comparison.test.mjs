@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {autoRuleStats,ruleDistributions,ruleTransitions,buildRuleStrata} from '../app/ruleComparisonModel.mjs';
+import {autoRuleStats,ruleDistributions,ruleTransitions,buildRuleStrata,toggleRuleSelection} from '../app/ruleComparisonModel.mjs';
 
 const pts=[
  {id:'a',power:'150W',time:'30s',wafer:1,point:1,substrate_type:'Si',human_result:'Residue',features:{c_roi_global_ratio:3.0,n_roi_global_ratio:1.5,o_roi_global_ratio:3.5}},
@@ -43,12 +43,23 @@ test('parallel rule counts react to adjustable C/N/O thresholds independently',(
  assert.notDeepEqual(loose,strict);
 });
 
-test('comparison rule cards remain clickable while parallel summaries stay enabled',async()=>{
+test('rule card selection supports one, two, or three visible rules',()=>{
+ const all=['co','cno','cn'];
+ assert.deepEqual(toggleRuleSelection(all,'co',all),['co']);
+ assert.deepEqual(toggleRuleSelection(['co'],'cno',all),['co','cno']);
+ assert.deepEqual(toggleRuleSelection(['co','cno'],'co',all),['cno']);
+ assert.deepEqual(toggleRuleSelection(['cno'],'cno',all),['cno']);
+ assert.deepEqual(toggleRuleSelection(['co','cno'],'cn',all),['co','cno','cn']);
+});
+
+test('comparison rule cards filter the tables while C/N/O thresholds stay adjustable',async()=>{
  const fs=await import('node:fs');
  const src=fs.readFileSync(new URL('../app/ResearchTools.js',import.meta.url),'utf8');
- assert.ok(src.includes('onClick={()=>setCriterion(x.id)}'));
+ assert.ok(src.includes('toggleVisibleRule'));
+ assert.ok(src.includes('visibleRules.map'));
+ assert.ok(src.includes('visibleRuleIds.includes'));
+ assert.ok(src.includes('카드를 눌러 1~3개 기준을 선택하세요'));
  assert.ok(src.includes('C 기준'));
  assert.ok(src.includes('N 기준'));
  assert.ok(src.includes('O 기준'));
- assert.ok(src.includes('세 기준의 전체 통계는 항상 동시에 계산됩니다'));
 });
