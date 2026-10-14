@@ -21,7 +21,7 @@ UPLOAD=Path(os.getenv("UPLOAD_DIR",BASE/"data/uploads"))
 OUTPUT=Path(os.getenv("OUTPUT_DIR",BASE/"data/outputs"))
 UPLOAD.mkdir(parents=True,exist_ok=True); OUTPUT.mkdir(parents=True,exist_ok=True)
 
-app=FastAPI(title="UV Tape Residue EDS API",version="23.9.16")
+app=FastAPI(title="UV Tape Residue EDS API",version="23.9.17")
 # Browser frontend is hosted on Vercel while this API is hosted separately.
 # The API does not use browser credentials/cookies, so allow cross-origin requests
 # from Vercel and other configured origins. This prevents XHR from surfacing a
@@ -1239,7 +1239,7 @@ def _collect_asset_keys(point_id: str) -> dict:
 
 
 DYNAMIC_IMAGE_LOCK = threading.RLock()
-HUMAN_OVERLAY_VERSION = "v23.9.16-static-cno"
+HUMAN_OVERLAY_VERSION = "v23.9.17-static-cno"
 HUMAN_OVERLAY_FILES = {
     "sem_residue_overlay": "sem_human_overlay_v23916.jpg",
     "eds_co_overlay": "eds_human_overlay_v23916.jpg",

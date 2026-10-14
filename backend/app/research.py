@@ -3,12 +3,13 @@ from collections import defaultdict
 import math, re
 from typing import Literal
 from pydantic import BaseModel, Field
-from .classification import record_result, auto_result, record_score, criterion_rule_text, N_RESIDUE_RATIO
+from .classification import record_result, auto_result, record_score, criterion_rule_text, N_RESIDUE_RATIO, feature_element_ratios
 
 POSITIONS={1:'Corner',4:'Edge',5:'Middle',9:'Reference'}
 RESULTS=('Residue','Non-residue','Ambiguous')
 BANDS=('0-60','60-70','70-80','80-90','90-100','missing')
 Criterion = Literal['co','cno','c_n_or_o']
+AUTO_CRITERIA=('co','cno','c_n_or_o')
 
 class Cohort(BaseModel):
     scope: Literal['main','reference','other','all']='main'
@@ -80,6 +81,14 @@ def select(records, opts:Cohort):
         if opts.score_bands is not None and band(p,opts.criterion,opts.n_threshold) not in opts.score_bands:continue
         out.append(p)
     return sorted(out,key=lambda p:(natural(condition(p)),substrate(p),integer(p.get('wafer')),integer(p.get('point')),str(p.get('project_id','')),str(p.get('id',''))))
+
+def auto_stats(points,criterion='co',n_threshold=N_RESIDUE_RATIO):
+    n=len(points);labels=[label(auto_result(p,criterion,n_threshold)) or 'Ambiguous' for p in points]
+    r=sum(x=='Residue' for x in labels);a=sum(x=='Ambiguous' for x in labels)
+    verified=[p for p in points if label(p.get('human_result'))]
+    agree=sum((label(auto_result(p,criterion,n_threshold)) or 'Ambiguous')==label(p.get('human_result')) for p in verified)
+    n_available=sum(feature_element_ratios((p.get('features') or {}),prefer_human=True)[1] is not None for p in points)
+    return {'n':n,'residue':r,'non':n-r-a,'ambiguous':a,'rate':100*r/n if n else None,'upper':100*(r+a)/n if n else None,'verified':len(verified),'agreement':100*agree/len(verified) if verified else None,'n_available':n_available}
 def stats(points,basis='final',criterion='co',n_threshold=N_RESIDUE_RATIO):
     n=len(points);r=sum(decision(p,basis,criterion,n_threshold)=='Residue' for p in points);a=sum(decision(p,basis,criterion,n_threshold)=='Ambiguous' for p in points)
     return {'n':n,'residue':r,'non':n-r-a,'ambiguous':a,'rate':100*r/n if n else None,'upper':100*(r+a)/n if n else None,'verified':sum(bool(label(p.get('human_result'))) for p in points)}
@@ -117,4 +126,4 @@ def page_count(records,opts):
     if opts.kind=='points':return len(records)
     if opts.kind=='gallery':return sum(math.ceil(len(a)/opts.per_page) for _,a in gallery_groups(records,opts))
     s=summary(records,opts.cohort)
-    return 1+sum(math.ceil(len(x['conditions'])/5)+1 for x in s['strata'])
+    return 1+sum(2*math.ceil(len(x['conditions'])/5)+2 for x in s['strata'])

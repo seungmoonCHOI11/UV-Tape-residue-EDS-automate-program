@@ -172,6 +172,36 @@ def summary_pages(doc,records,opts):
     st=stats(records,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
     doc.table(['Selected points','Residue','Non-residue','Ambiguous','Human verified'],[[str(st[k]) for k in ['n','residue','non','ambiguous','verified']]],.4,3.9,[2.5]*5,row_h=.65,size=15)
     doc.text(.4,5.5,12,1.25,f"Scope: {opts.cohort.scope} | Decision basis: {opts.cohort.basis}\nRate = residue points / observed points. Ambiguous remains in denominator.\nPooled location rates reflect condition mix. Balanced rates equally weight common conditions.\nSelected-rule score is a screening index, not probability, chemical concentration or removal efficiency.",12,color=MUTED)
+    # Three automatic rules are always reported in parallel for screening sensitivity.
+    for sub in sorted({substrate(p) for p in records}):
+        pts=[p for p in records if substrate(p)==sub]
+        doc.page('Three-rule screening overview',f"Substrate: {sub} | Same {len(pts)} points | Human verification shown only as a reference")
+        labels={'co':'C AND O','cno':'C AND N AND O','c_n_or_o':'C AND (N OR O)'}
+        overview=[]
+        for rule in AUTO_CRITERIA:
+            stx=auto_stats(pts,rule,opts.cohort.n_threshold)
+            overview.append([labels[rule],f"{stx['residue']}/{stx['n']}",str(stx['non']),str(stx['ambiguous']),percent(stx['rate']),'-' if rule=='co' else f"{stx['n_available']}/{stx['n']}",percent(stx['agreement'])])
+        doc.table(['Auto rule','Residue / n','Non','Amb.','Residue %','N available','Human agreement'],overview,.35,1.35,[2.45,1.55,1.0,1.0,1.45,1.45,2.25],row_h=.62,size=11)
+        doc.text(.4,4.55,12.2,.8,'All three rows are recomputed from the same stored C/N/O ROI/Global ratios. Human agreement is descriptive agreement on verified points, not model accuracy.',10,color=MUTED)
+        keys=sorted({condition(p) for p in pts},key=natural)
+        ws=([1,4,5] if opts.cohort.scope=='main' else sorted({integer(p.get('wafer')) for p in pts}))
+        if opts.cohort.wafers is not None:ws=[w for w in ws if w in opts.cohort.wafers]
+        for start in range(0,len(keys),5):
+            chunk=keys[start:start+5]
+            doc.page('Condition x location x rule',f"Substrate: {sub} | Automatic screening only | N threshold {opts.cohort.n_threshold:.2f}x")
+            headers=['Condition','Rule']+[f"W{w} {POSITIONS.get(w,'Other')}" for w in ws]+['Overall']
+            widths=[2.0,1.65]+[6.2/max(1,len(ws))]*len(ws)+[1.35]
+            table_rows=[]
+            for key in chunk:
+                a=[p for p in pts if condition(p)==key]
+                for rule in AUTO_CRITERIA:
+                    row=[key,{'co':'C·O','cno':'C·N·O','c_n_or_o':'C·(N or O)'}[rule]]
+                    for w in ws:
+                        z=auto_stats([p for p in a if integer(p.get('wafer'))==w],rule,opts.cohort.n_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
+                    z=auto_stats(a,rule,opts.cohort.n_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
+                    table_rows.append(row)
+            doc.table(headers,table_rows,.35,1.32,widths,row_h=.34,size=8)
+            doc.text(.4,6.55,12.2,.28,'Rate = automatic Residue points / observed points. Ambiguous remains in the denominator.',9,color=MUTED)
     for s in data['strata']:
         for start in range(0,len(s['conditions']),5):
             rows=s['conditions'][start:start+5];ws=[c['wafer'] for c in rows[0]['cells']] if rows else []
@@ -249,13 +279,13 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     for part_file in outputs:part_file.unlink()
     outputs=[final]
     # Always deliver an audit manifest and original-SEM hashes alongside the outputs.
-    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold),'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
+    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold),'all_auto_rules':{r:criterion_rule_text(r,opts.cohort.n_threshold) for r in AUTO_CRITERIA},'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
     (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8')
     with (folder/'points.csv').open('w',encoding='utf-8-sig',newline='') as f:
-        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Result','Human','Criterion','C ratio','N ratio','O ratio','Score','Score band','Sample ID','Repeat','Measured on','Batch label'])
+        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Selected result','Human','Selected criterion','C ratio','N ratio','O ratio','Selected score','Score band','Auto C-O','Score C-O','Auto C-N-O','Score C-N-O','Auto C-(N or O)','Score C-(N or O)','Sample ID','Repeat','Measured on','Batch label'])
         for p in records:
             _,c,n,o,_=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
-            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold),label(p.get('human_result')) or '',opts.cohort.criterion,c,n,o,score(p,opts.cohort.criterion,opts.cohort.n_threshold),band(p,opts.cohort.criterion,opts.cohort.n_threshold),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
+            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold),label(p.get('human_result')) or '',opts.cohort.criterion,c,n,o,score(p,opts.cohort.criterion,opts.cohort.n_threshold),band(p,opts.cohort.criterion,opts.cohort.n_threshold),auto_result(p,'co',opts.cohort.n_threshold),score(p,'co',opts.cohort.n_threshold),auto_result(p,'cno',opts.cohort.n_threshold),score(p,'cno',opts.cohort.n_threshold),auto_result(p,'c_n_or_o',opts.cohort.n_threshold),score(p,'c_n_or_o',opts.cohort.n_threshold),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
             writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in row])
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
