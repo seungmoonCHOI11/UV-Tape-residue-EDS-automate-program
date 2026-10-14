@@ -8,6 +8,7 @@ import useDialog from "./useDialog";
 import WorkspaceDashboard from "./WorkspaceDashboard";
 import ResearchTools from "./ResearchTools";
 import {DEFAULT_FILTERS} from "./researchModel.mjs";
+import {SCREENING_CRITERIA,DEFAULT_N_THRESHOLD,C_THRESHOLD,O_THRESHOLD,MODERATE_THRESHOLD,pointRatios,criterionScore,criterionResult,autoClass as screeningAutoClass,finalClass as screeningFinalClass,screeningScore,criterionMeta,normalizeResultLabel as screeningNormalizeResult,hasHumanROI as screeningHasHumanROI} from "./screeningModel.mjs";
 import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2,MousePointer2,RotateCcw} from "lucide-react";
 
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
@@ -77,13 +78,20 @@ export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),conditionInputs=useRef({});
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>({"1":"SiCN","4":"SiCN","5":"SiCN","9":"Si"})),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]),[analysisModalOpen,setAnalysisModalOpen]=useState(false);
  const [dataState,setDataState]=useState("loading");
+ const [screeningCriterion,setScreeningCriterion]=useState(()=>typeof window!=="undefined"?(localStorage.getItem("uvtape:screeningCriterion")||"co"):"co");
+ const [nStrongThreshold,setNStrongThreshold]=useState(()=>{if(typeof window==="undefined")return DEFAULT_N_THRESHOLD;const v=Number(localStorage.getItem("uvtape:nStrongThreshold"));return Number.isFinite(v)&&v>2?v:DEFAULT_N_THRESHOLD});
  const [researchFilters,setResearchFilters]=useState(DEFAULT_FILTERS);
  const [queueLoaded,setQueueLoaded]=useState(false);
  const identifiedPoints=useMemo(()=>assignSets(points,projectList),[points,projectList]);
+ useEffect(()=>{try{localStorage.setItem("uvtape:screeningCriterion",screeningCriterion)}catch{}},[screeningCriterion]);
+ useEffect(()=>{try{localStorage.setItem("uvtape:nStrongThreshold",String(nStrongThreshold))}catch{}},[nStrongThreshold]);
  const uploadingRef=useRef(false);
  const activeAnalysis=analysisQueue.some(isActiveJob);
  const activeJob=analysisQueue.find(isActiveJob)||analysisQueue[0]||null;
  const activeJobIsReanalysis=activeJob?.job_type==="reanalysis";
+ const classifyPoint=p=>pointClass(p,screeningCriterion,nStrongThreshold);
+ const autoClassifyPoint=p=>autoPointClass(p,screeningCriterion,nStrongThreshold);
+ const scorePoint=p=>displayScore(p,screeningCriterion,nStrongThreshold);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -262,7 +270,7 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
      const r=await fetch(`${API}/api/points/${p.id}/human-roi`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polygons:polygon})});
      const j=await r.json(); if(!r.ok)throw new Error(j.detail||"ROI 저장 실패");
      const normalized=normalizePointRecord(j); setPoints(points.map(z=>z.id===p.id?normalized:z));
-     notify("Human ROI 저장 완료 · C/O 재계산 및 Ground Truth 데이터 저장");
+     notify("Human ROI 저장 완료 · C/N/O 재계산 및 Ground Truth 데이터 저장");
      return j;
    }catch(e){notify(e.message||"ROI 저장 실패");throw e;}
  }
@@ -270,11 +278,11 @@ function updateCondition(i,key,value){setConditions(cs=>cs.map((c,n)=>n===i?{...
    const count=points.filter(x=>hasHumanROI(x.features||{})).length;
    if(!count)return notify("저장된 Human ROI가 없습니다.");
    if(activeAnalysis)return notify("진행 중인 분석이 끝난 뒤 Human ROI 전체 재계산을 실행하세요.");
-   if(!window.confirm(`저장된 Human ROI ${count} Point의 C/O 좌표와 값을 새 정합 기준으로 다시 계산할까요?\n\nROI 도형과 사용자 검증 판정은 유지됩니다. PDF 재분석은 하지 않습니다.`))return;
+   if(!window.confirm(`저장된 Human ROI ${count} Point의 C/N/O 좌표와 값을 새 정합 기준으로 다시 계산할까요?\n\nROI 도형과 사용자 검증 판정은 유지됩니다. PDF 재분석은 하지 않습니다.`))return;
    try{
      const r=await fetch(`${API}/api/workspace/human-roi/recalculate`,{method:"POST"});
      const j=await r.json(); if(!r.ok)throw new Error(j.detail||"Human ROI 재계산 시작 실패");
-     setAnalysisQueue([{job_id:j.job_id,project_id:"",files:["Saved Human ROI recalculation"],total:j.expected_points||count,status:"queued",progress:1,completed:0,message:"저장된 Human ROI 좌표와 C/O 값을 다시 계산합니다."}]);
+     setAnalysisQueue([{job_id:j.job_id,project_id:"",files:["Saved Human ROI recalculation"],total:j.expected_points||count,status:"queued",progress:1,completed:0,message:"저장된 Human ROI 좌표와 C/N/O 값을 다시 계산합니다."}]);
      setAnalysisModalOpen(true);
      notify(`Human ROI ${count} Point 재계산을 시작했습니다.`);
    }catch(e){notify(e.message||"Human ROI 재계산 시작 실패")}
@@ -323,16 +331,16 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  async function exportWorkspaceFile(kind){if(!points.length)return notify("먼저 분석 데이터를 추가하세요.");const r=await fetch(`${API}/api/workspace/export/${kind}`,{method:"POST"});if(!r.ok)return notify("Engineering Summary export 실패");const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement("a");a.href=u;a.download=kind==="summary-ppt"?"UV_Tape_Engineering_Summary.pptx":"UV_Tape_Engineering_Summary.pdf";a.click();URL.revokeObjectURL(u);notify("Engineering Summary export 완료")}
  if(!mounted)return <div className="startupShell"><InitialLoading/></div>;
  if(initialLoading)return <div className="startupShell"><InitialLoading/></div>;
- const p=identifiedPoints[idx],filtered=identifiedPoints.filter(x=>(result==="All"||pointClass(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
- return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.15</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
+ const p=identifiedPoints[idx],filtered=identifiedPoints.filter(x=>(result==="All"||classifyPoint(x)===result)&&Object.values(x).join(" ").toLowerCase().includes(q.toLowerCase()));
+ return <div className="app"><a className="skipLink" href="#workspace-main">본문으로 이동</a><aside className="workspaceSidebar"><div className="logo"><b>EDS</b><div><span>Insight Lab</span><small>UV Tape Residue</small></div></div><nav aria-label="주 메뉴">{NAV_GROUPS.map(([label,items])=><div className="navGroup" key={label}><div className="navGroupTitle">{label}</div>{items.map(([n,I])=><button title={PAGE_LABELS[n]} aria-label={PAGE_LABELS[n]} aria-current={(verificationOpen?n==="Verification":page===n)?"page":undefined} className={(verificationOpen?n==="Verification":page===n)?"nav active":"nav"} key={n} onClick={()=>goNav(n)}><I size={18}/><span>{PAGE_LABELS[n]}</span></button>)}</div>)}</nav><div className="sideBottom"><button className={page==="Delete Data"?"nav active":"nav"} onClick={()=>goNav("Delete Data")} title="데이터 관리"><Database size={18}/><span>데이터 관리</span></button><div className="workspaceVersion">SEM / EDS Workspace <span>v23.9.16</span></div></div></aside><main id="workspace-main" tabIndex={-1}><header><div className="workspaceBreadcrumb"><span>UV Tape Residue</span><ChevronRight size={13}/><h1>{PAGE_LABELS[page]}</h1></div><div className="headerActions">{analysisQueue.length>0&&<button className="secondary" onClick={()=>setAnalysisModalOpen(true)}><Activity size={15}/>{activeAnalysis?`${activeJobIsReanalysis?"재분석":"분석"} 중 · ${Math.round(activeJob?.progress||0)}%`:"최근 분석 상태"}</button>}<span className={`ready ${dataState}`} role="status"><i/>{dataState==="error"?"연결 확인 필요":dataState==="loading"?"데이터 확인 중":points.length?"데이터 연결됨":"연결됨 · 저장 데이터 없음"}</span></div></header>
  {dataState==="error"&&<div className="workspaceAlert" role="alert"><div><b>데이터를 불러오지 못했습니다.</b><span>{points.length?"마지막으로 불러온 데이터를 표시하고 있습니다.":"저장된 Point 수를 확인할 수 없습니다. 다시 불러와 주세요."}</span></div><button className="secondary" onClick={()=>loadData(null,{silent:true})}>다시 불러오기</button></div>}
- {page==="Dashboard"&&<WorkspaceDashboard points={identifiedPoints} classify={pointClass} go={goNav} dataState={dataState} jobs={analysisQueue} openJob={()=>setAnalysisModalOpen(true)} onCondition={key=>{setConditionView(key);goNav("Condition View")}} onPoint={point=>{setIdx(points.findIndex(x=>x.id===point.id));setVerificationOpen(true)}}/>}
+ {page==="Dashboard"&&<WorkspaceDashboard points={identifiedPoints} classify={classifyPoint} go={goNav} dataState={dataState} jobs={analysisQueue} openJob={()=>setAnalysisModalOpen(true)} onCondition={key=>{setConditionView(key);goNav("Condition View")}} onPoint={point=>{setIdx(points.findIndex(x=>x.id===point.id));setVerificationOpen(true)}}/>}
  {page==="New Analysis"&&<UploadPage conditionInputs={conditionInputs} setConditionFile={setConditionFile} upload={upload} conditions={conditions} updateCondition={updateCondition} addCondition={addCondition} removeCondition={removeCondition} pagesPerPoint={pagesPerPoint} setPagesPerPoint={setPagesPerPoint} draggingCondition={draggingCondition} setDraggingCondition={setDraggingCondition} expectedPointsForCondition={expectedPointsForCondition} expectedPoints={expectedPoints} busy={busy||activeAnalysis||!queueLoaded} analysisQueue={analysisQueue} substrateType={substrateType} setSubstrateType={setSubstrateType} sampleCategory={sampleCategory} setSampleCategory={setSampleCategory} positionSubstrates={positionSubstrates} setPositionSubstrates={setPositionSubstrates}/>} 
  {page==="Verification"&&<section className="panel emptyPanel"><Check size={24}/><b>결과 검증 창을 열어 주세요.</b><small>Point 목록에서 측정 결과와 원소 맵을 확인할 수 있습니다.</small><button className="secondary" onClick={openVerification}>검증 열기</button></section>}
  {page==="AI Analysis"&&<AIInterpretation points={identifiedPoints} api={API}/>}
- {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult}/>}
- {page==="Condition View"&&<ConditionView points={identifiedPoints} selected={conditionView} setSelected={setConditionView} go={goNav}/>}
- {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={pointClass} autoClass={autoPointClass} scoreFn={displayScore} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList} analysisQueue={analysisQueue}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
+ {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult} classify={classifyPoint} scoreFn={scorePoint} criterion={screeningCriterion} nThreshold={nStrongThreshold}/>}
+ {page==="Condition View"&&<ConditionView points={identifiedPoints} selected={conditionView} setSelected={setConditionView} go={goNav} classify={classifyPoint}/>}
+ {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList} analysisQueue={analysisQueue}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">저장 데이터 불러오는 중</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>프로젝트 연결 확인</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -370,7 +378,7 @@ function AnalysisBatchModal({items,open,close}){
   {missing.length>0&&<div className="analysisIssueBox"><b>PDF에서 매칭되지 않은 Point {missing.length}개</b><p>{missing.map(x=>x.id||`W${x.wafer}-P${x.point}`).join(", ")}</p></div>}
   {failures.length>0&&<div className="analysisFailureList"><b>실패 Point / 원인</b>{failures.map((f,i)=><div className="analysisFailureItem" key={`${f.id||i}-${i}`}><div><strong>{f.id||`W${f.wafer}-P${f.point}`}</strong><span>{f.stage||"analysis"}</span></div><p>{f.error||"Unknown error"}</p></div>)}</div>}
   {item?.storage_warning&&<p className="analysisWarning">{item.storage_warning}</p>}
-  <div className="batchProgressBottom"><span>{roiJob?(active?"기존 Human ROI 도형과 사용자 검증 판정은 유지한 채 C/O 좌표와 수치만 다시 계산합니다.":"완료 후 Verification을 다시 열면 새 C/O 좌표와 수치가 표시됩니다."):reanalysisJob?(active?"다른 화면으로 이동하거나 이 창을 닫아도 재분석은 계속됩니다. 기존 Human ROI와 사용자 검증 판정은 보존됩니다.":"완료 후 해당 배치의 새 crop/분석 결과가 기존 Point에 반영됩니다."):(active?"다른 화면에서 작업해도 분석은 계속됩니다. 분석이 끝나면 Point와 이미지의 저장 상태를 확인합니다.":"완료 수치는 최종 저장 검증 결과입니다. 자동 복구/미완성 Point도 여기서 확인할 수 있습니다.")}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
+  <div className="batchProgressBottom"><span>{roiJob?(active?"기존 Human ROI 도형과 사용자 검증 판정은 유지한 채 C/N/O 좌표와 수치만 다시 계산합니다.":"완료 후 Verification을 다시 열면 새 C/N/O 좌표와 수치가 표시됩니다."):reanalysisJob?(active?"다른 화면으로 이동하거나 이 창을 닫아도 재분석은 계속됩니다. 기존 Human ROI와 사용자 검증 판정은 보존됩니다.":"완료 후 해당 배치의 새 crop/분석 결과가 기존 Point에 반영됩니다."):(active?"다른 화면에서 작업해도 분석은 계속됩니다. 분석이 끝나면 Point와 이미지의 저장 상태를 확인합니다.":"완료 수치는 최종 저장 검증 결과입니다. 자동 복구/미완성 Point도 여기서 확인할 수 있습니다.")}</span><button className="secondary" onClick={close}>{active?"백그라운드로 보내기":"닫기"}</button></div>
  </div></div>
 }
 function Metric({t,v,s}){return <div className="metric"><small>{t}</small><b>{v}</b><span>{s}</span></div>}
@@ -381,76 +389,72 @@ function UploadPage({conditionInputs,setConditionFile,upload,conditions,updateCo
  const addFiles=fs=>{if(fs?.length===1)setConditionFile(0,fs[0]);else if(fs?.length>1)window.alert("PDF는 한 번에 하나만 선택하세요.")};
  return <div className="content"><div className="intro"><div><h2>새 분석</h2><p>PDF 하나를 업로드하고 백그라운드로 분석합니다. 다음 PDF는 현재 작업이 끝난 뒤 등록하세요.</p></div></div><section className="panel"><div className="panelHead"><b>01 · 원본 PDF</b><small>파일 선택 또는 끌어다 놓기</small></div><div className={`drop ${dragging?"dragging":""}`} role="button" tabIndex={0} aria-label="EDS PDF 선택" onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();conditionInputs.current[0]?.click()}}} onClick={()=>conditionInputs.current[0]?.click()} onDragOver={e=>{e.preventDefault();setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);addFiles(e.dataTransfer.files)}}><FileUp size={30}/><b>{dragging?"여기에 PDF를 놓으세요":"EDS PDF를 끌어다 놓거나 클릭해서 선택하세요"}</b><small>PDF 1개 · 업로드 완료 후 다른 메뉴로 이동할 수 있습니다.</small><input ref={el=>{conditionInputs.current[0]=el}} hidden type="file" accept=".pdf,application/pdf" onChange={e=>addFiles(e.target.files)}/></div>{files.map((f,i)=><div className="file" key={`${f.name}-${i}`}><FileText size={14}/><span>{f.name}</span><small>{(f.size/1024/1024).toFixed(1)} MB</small><button className="iconBtn" onClick={()=>updateCondition(0,"file",null)}><Trash2 size={13}/></button></div>)}</section><section className="panel samplePanel"><div className="panelHead"><div><b>02 · 시료와 기판</b><small>선택한 PDF에 적용됩니다. Wafer별 기판을 지정합니다. W1/W4/W5는 main 위치, W9는 reference/other로 분리 집계합니다.</small></div></div><div className="sampleControls"><label>시료 구분<select value={sampleCategory} onChange={e=>{const v=e.target.value;setSampleCategory(v);if(v==="MAIN")setSubstrateType("SiCN")}}><option value="MAIN">MAIN</option><option value="ANOTHER">ANOTHER</option></select></label><label>기본 기판<select value={substrateType} onChange={e=>setSubstrateType(e.target.value)}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label></div><div className="positionSubstrateGrid"><div className="positionSubstrateTitle">위치별 기판</div>{Array.from({length:9},(_,i)=>i+1).map(pos=><label key={pos}>W{pos}<select value={positionSubstrates[String(pos)]||substrateType||"SiCN"} onChange={e=>setPositionSubstrates(m=>({...m,[String(pos)]:e.target.value}))}><option>SiCN</option><option>Si</option><option>SiN</option><option>SiO2</option></select></label>)}</div></section><section className="panel conditionPanel"><div className="panelHead"><div className="conditionHead"><div><b>03 · 측정 조건</b><small>한 PDF에 여러 조건이 있으면 PDF에 나오는 순서대로 추가하세요.</small></div><button className="secondary" onClick={addCondition}><Plus size={13}/> 조건 추가</button></div></div>{conditions.map((c,i)=><div className="conditionRow" key={i}><div className="conditionTitle">조건 {i+1}</div><label>Power (W)<input value={c.power} onChange={e=>updateCondition(i,"power",e.target.value)}/></label><label>Time (s)<input value={c.time} onChange={e=>updateCondition(i,"time",e.target.value)}/></label><div className="selectionGroup"><span className="selectionLabel">Wafer</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(w=>{const a=parseSelection(c.wafers);return <label className="check" key={w}><input type="checkbox" checked={a.includes(w)} onChange={()=>{const next=a.includes(w)?a.filter(x=>x!==w):[...a,w].sort((x,y)=>x-y);updateCondition(i,"wafers",next.join(","))}}/><span>W{w}</span></label>})}</div></div><div className="selectionGroup"><span className="selectionLabel">Point</span><div className="checks">{Array.from({length:9},(_,n)=>n+1).map(pt=>{const a=parseSelection(c.points);return <label className="check" key={pt}><input type="checkbox" checked={a.includes(pt)} onChange={()=>{const next=a.includes(pt)?a.filter(x=>x!==pt):[...a,pt].sort((x,y)=>x-y);updateCondition(i,"points",next.join(","))}}/><span>P{pt}</span></label>})}</div></div>{conditions.length>1&&<button className="iconBtn" onClick={()=>{if(i===0&&conditions[0].file)updateCondition(1,"file",conditions[0].file);removeCondition(i)}}><Trash2 size={14}/></button>}</div>)}<div className="mappingSummary"><span>Point당 페이지 <input className="smallInput" type="number" min="1" value={pagesPerPoint} onChange={e=>setPagesPerPoint(Math.max(1,Number(e.target.value)||1))}/></span><b>예상 Point: {expectedPoints()}</b><span>예상 페이지: {expectedPoints()*pagesPerPoint}</span></div></section><div className="actions"><button className="primary" disabled={busy} onClick={upload}><Play size={14}/>{busy?"현재 작업 처리 중...":"분석 시작"}</button></div></div>}
 function elementRatioDisplayScore(ratio,strong){
- const x=finiteNumber(ratio);
- if(x==null)return null;
- if(x<2)return Math.max(0,Math.min(59,(x/2)*59));
- if(x<strong)return 60+((x-2)/(strong-2))*10;
- const equivalent=x*(3/strong);
- const k=0.23, denom=1-Math.exp(-k*17);
- const normalized=(1-Math.exp(-k*(equivalent-3)))/denom;
+ const x=finiteNumber(ratio);if(x==null)return null;
+ if(x<2.00)return Math.max(0,Math.min(59,(x/2.00)*59));
+ if(x<strong)return 60+((x-2.00)/(strong-2.00))*10;
+ const equivalent=x*(3/strong),k=0.23,denom=1-Math.exp(-k*17),normalized=(1-Math.exp(-k*(equivalent-3)))/denom;
  return Math.min(100,70+30*Math.max(0,normalized));
 }
 function coRatioDisplayScore(cRatio,oRatio){
- const c=elementRatioDisplayScore(cRatio,2.40), o=elementRatioDisplayScore(oRatio,3.00);
- if(c==null||o==null)return null;
- return Math.round(Math.min(c,o)*10)/10;
+ const c=elementRatioDisplayScore(cRatio,2.40),o=elementRatioDisplayScore(oRatio,3.00);
+ return c==null||o==null?null:Math.min(c,o);
 }
 function coRatioRuleResult(cRatio,oRatio){
- const c=finiteNumber(cRatio), o=finiteNumber(oRatio);
+ const c=finiteNumber(cRatio),o=finiteNumber(oRatio);
  if(c==null||o==null)return null;
- if(c>=2.40 && o>=3.00)return "Residue";
- if(c>=2.00 && o>=2.00)return "Ambiguous";
+ if(c>=2.40&&o>=3.00)return "Residue";
+ if(c>=2.00&&o>=2.00)return "Ambiguous";
  return "Non-residue";
 }
 function hasHumanROI(f={}){
- return (Array.isArray(f.human_roi_polygons)&&f.human_roi_polygons.some(r=>Array.isArray(r)&&r.length>=3))||(Array.isArray(f.human_roi_polygon)&&f.human_roi_polygon.length>=3);
+ const polys=f?.human_roi_polygons;
+ return (Array.isArray(polys)&&polys.length>0)||(Array.isArray(f?.human_roi_polygon)&&f.human_roi_polygon.length>=3)||Boolean(f?.human_roi_saved_at);
 }
-function finiteNumber(v){
- if(v===null||v===undefined||v==="")return null;
- const n=Number(v);
- return Number.isFinite(n)?n:null;
-}
+function finiteNumber(v){if(v===null||v===undefined||v==="")return null;const n=Number(v);return Number.isFinite(n)?n:null}
 function normalizeResultLabel(v){
- // v23.7.51: legacy rows can contain stale/non-string result payloads.
- // Never allow one malformed Point to crash Verification or other aggregate views.
- if(typeof v!=="string")return null;
- const raw=v.trim();
- const k=raw.toLowerCase().replace(/[\s_]+/g,"-");
- if(["residue","r"].includes(k))return "Residue";
- if(["non-residue","nonresidue","non-res","n"].includes(k))return "Non-residue";
- if(["ambiguous","review","unknown","a"].includes(k))return "Ambiguous";
+ const s=String(v||"").trim().toLowerCase().replace(/_/g,"-");
+ if(!s)return null;
+ if(s==="residue"||s==="r")return "Residue";
+ if(s==="ambiguous"||s==="review"||s==="a")return "Ambiguous";
+ if(s==="non-residue"||s==="nonresidue"||s==="non residue"||s==="n")return "Non-residue";
+ if(s==="skip"||s==="skipped")return "Skip";
  return null;
 }
 function currentRatios(p){
  const f=p?.features||{};
- const ratio=(roi,global)=>{const a=finiteNumber(roi),b=finiteNumber(global);return a!=null&&b!=null&&b!==0?a/b:null};
- const hc=finiteNumber(f.human_c_ratio),ho=finiteNumber(f.human_o_ratio);
- if(hasHumanROI(f) && hc!=null && ho!=null) return {c:hc,o:ho,source:"Human ROI"};
- const storedC=finiteNumber(f.c_roi_global_ratio),storedO=finiteNumber(f.o_roi_global_ratio);
- const c=storedC!=null?storedC:ratio(f.c_roi_mean,f.c_global_mean);
- const o=storedO!=null?storedO:ratio(f.o_roi_mean,f.o_global_mean);
- return {c,o,source:"Auto ROI"};
+ const human=hasHumanROI(f);
+ const pick=(...xs)=>{for(const x of xs){const n=finiteNumber(x);if(n!=null)return n}return null};
+ const autoC=pick(f.c_roi_global_ratio,finiteNumber(f.c_roi_mean)!=null&&finiteNumber(f.c_global_mean)>0?Number(f.c_roi_mean)/Number(f.c_global_mean):null);
+ const autoO=pick(f.o_roi_global_ratio,finiteNumber(f.o_roi_mean)!=null&&finiteNumber(f.o_global_mean)>0?Number(f.o_roi_mean)/Number(f.o_global_mean):null);
+ const autoN=pick(f.n_roi_global_ratio,finiteNumber(f.n_roi_mean)!=null&&finiteNumber(f.n_global_mean)>0?Number(f.n_roi_mean)/Number(f.n_global_mean):null,finiteNumber(f.n_log2_ratio)!=null?Math.pow(2,Number(f.n_log2_ratio)):null);
+ if(human){
+   return {c:pick(f.human_c_ratio,autoC),n:pick(f.human_n_ratio),o:pick(f.human_o_ratio,autoO),source:"human"};
+ }
+ return {c:autoC,n:autoN,o:autoO,source:"auto"};
 }
-function autoPointClass(p){
- const f=p?.features||{},r=currentRatios(p),live=coRatioRuleResult(r.c,r.o);
- if(live)return live;
- const candidates=[p?.cv_result,p?.result,f.result,f.human_roi_rule_result];
- for(const v of candidates){const normalized=normalizeResultLabel(v);if(normalized)return normalized;}
- return "Ambiguous";
+function autoPointClass(p,criterion="co",nThreshold=2.40){
+ if(criterion==="co"){
+   const r=currentRatios(p),byRatio=coRatioRuleResult(r.c,r.o);
+   if(byRatio)return byRatio;
+   const f=p?.features||{};
+   for(const candidate of [p?.result,p?.auto_result,f?.result,f?.human_roi_rule_result,f?.co_rule_result]){const n=normalizeResultLabel(candidate);if(n&&n!=="Skip")return n}
+   return "Ambiguous";
+ }
+ return screeningAutoClass(p,criterion,nThreshold);
 }
-function pointClass(p){
+function pointClass(p,criterion="co",nThreshold=2.40){
  const human=normalizeResultLabel(p?.human_result);
- return human||autoPointClass(p);
+ if(human&&human!=="Skip")return human;
+ return autoPointClass(p,criterion,nThreshold);
 }
-function verificationResult(x){return pointClass(x)}
+function verificationResult(x,criterion="co",nThreshold=2.40){return pointClass(x,criterion,nThreshold)}
 function resultCssClass(v){return pointClass({human_result:v,features:{}}).toLowerCase().replace(/[^a-z]+/g,"-")}
-
-function displayScore(p){
- if(Object.prototype.hasOwnProperty.call(p||{},"evaluation_score"))return p.evaluation_score;
- const ratios=currentRatios(p),live=coRatioDisplayScore(ratios.c,ratios.o);
- if(live!=null)return live;
- const f=p?.features||{},raw=typeof f.residue_score==="number"?f.residue_score:p?.residue_score;
- return typeof raw==="number"&&Number.isFinite(raw)?Math.round((raw<=1.000001?raw*100:raw)*10)/10:null;
+function displayScore(p,criterion="co",nThreshold=2.40){
+ if(criterion!=="co")return screeningScore(p,criterion,nThreshold);
+ const r=currentRatios(p),ratioScore=coRatioDisplayScore(r.c,r.o);
+ if(ratioScore!=null)return ratioScore;
+ const stored=finiteNumber(p?.score??p?.evaluation_score??p?.features?.evaluation_score);
+ return stored;
 }
 
 function scoreClass(score){return score==null?"unknown":score>=70?"high":score>=60?"review":"low"}
@@ -464,64 +468,60 @@ function dynamicAsset(p,type){
  if(!p?.id)return null;
  const f=p.features||{};
  const humanSaved=(f.human_roi_saved_at||f.human_roi_polygons||f.human_roi_polygon);
- const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
+ const needsHumanRefresh=humanSaved && ["sem_residue_overlay","c_map_enhanced_overlay","n_map_enhanced_overlay","o_map_enhanced_overlay","eds_co_overlay"].includes(type);
  const v=needsHumanRefresh?encodeURIComponent(String(f.human_roi_saved_at||"human")):"";
- const rv="23915";
+ const rv="23916";
  return `/api/assets/${encodeURIComponent(p.id)}/${type}?rv=${rv}${v?`&v=${v}`:""}`;
 }
-function Review({p,idx,total,prev,next,human,saveHumanRoi}){
- const f=p.features||{};
- const hasHumanROIFlag=hasHumanROI(f), liveRatios=currentRatios(p);
- const humanROIActive=hasHumanROIFlag;
- const cRatio=liveRatios.c, oRatio=liveRatios.o;
- const score=humanROIActive&&typeof cRatio==='number'&&typeof oRatio==='number'?coRatioDisplayScore(cRatio,oRatio):(humanROIActive&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p));
+function Review({p,idx,total,prev,next,human,saveHumanRoi,criterion,setCriterion,nThreshold,setNThreshold}){
+ const f=p.features||{},hasHumanROIFlag=hasHumanROI(f),liveRatios=currentRatios(p),humanROIActive=hasHumanROIFlag;
+ const {c:cRatio,n:nRatio,o:oRatio}=liveRatios,meta=criterionMeta(criterion,nThreshold);
+ const score=criterionScore(liveRatios,criterion,nThreshold)??(criterion==='co'&&humanROIActive&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p,criterion,nThreshold));
  const coverage=humanROIActive&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
  const maskQuality=humanROIActive&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
- const resultLabel=pointClass(p);
- const confidence=humanROIActive?"Human ROI":safeText(f.confidence||p?.confidence,"-");
+ const autoLabel=autoPointClass(p,criterion,nThreshold),resultLabel=pointClass(p,criterion,nThreshold),confidence=humanROIActive?'Human ROI':safeText(f.confidence||p?.confidence,'-');
  const maps={
-   // If Human ROI is already saved, never fall back to the old AI/CV overlay.
-   // While the fresh Human ROI overlay is loading, show the original image/map
-   // instead of briefly displaying the stale AI ROI.
-   sem:humanROIActive?[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem],
-   eds:[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original],
-   c:humanROIActive?[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map]:[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
-   o:humanROIActive?[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map]:[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
+   sem:humanROIActive?[dynamicAsset(p,'sem_residue_overlay'),p.assets?.sem]:[dynamicAsset(p,'sem_residue_overlay'),p.assets?.sem_residue_overlay,p.assets?.sem],
+   eds:[dynamicAsset(p,'eds_map'),p.assets?.eds_map,p.assets?.full_element_maps_original],
+   c:humanROIActive?[dynamicAsset(p,'c_map_enhanced_overlay'),p.assets?.c_map]:[dynamicAsset(p,'c_map_enhanced_overlay'),p.assets?.c_map_enhanced_overlay,p.assets?.c_map_roi_ring,p.assets?.c_map],
+   n:humanROIActive?[dynamicAsset(p,'n_map_enhanced_overlay'),p.assets?.n_map]:[dynamicAsset(p,'n_map_enhanced_overlay'),p.assets?.n_map_enhanced_overlay,p.assets?.n_map_roi_ring,p.assets?.n_map],
+   o:humanROIActive?[dynamicAsset(p,'o_map_enhanced_overlay'),p.assets?.o_map]:[dynamicAsset(p,'o_map_enhanced_overlay'),p.assets?.o_map_enhanced_overlay,p.assets?.o_map_roi_ring,p.assets?.o_map]
  };
- const fmtRatio=(x)=>x==null?"-":`${x.toFixed(2)}×`;
- const ratioClass=(x,strong)=>x==null?"neutral":x>=strong?"strong":x>=2.00?"positive":x<=0.90?"negative":"neutral";
- const ratioText=(x)=>x==null?"-":fmtRatio(x);
- const metric=(v)=>typeof v==='number'?Math.round(v*100):null;
+ const fmtRatio=x=>x==null?'—':`${x.toFixed(2)}×`;
+ const nScore=nRatio==null?null:(elementRatioDisplayScore(nRatio,nThreshold)/100);
  return <div className="verificationPanel">
   <div className="verificationTop v21Top">
-   <div><b>SET{p.set_number} · P{p.point}<small>　{idx+1} / {total}</small></b><small className="ex-point-identity">{identityText(p)}</small><span>{safeText(p.power)} · {safeText(p.time)} · W{safeText(p.wafer)} · P{safeText(p.point)} · {safeText(p.substrate_type||f.substrate_type,"SiCN")}</span></div>
-   <div className="verificationTopActions"><span className={`autoBadge ${resultCssClass(resultLabel)}`}>{resultLabel} · {p.human_result?"검증 판정":"자동 판정"}</span><button className="iconBtn" aria-label="이전 Point" onClick={prev}><ChevronLeft size={16}/></button><button className="iconBtn" aria-label="다음 Point" onClick={next}><ChevronRight size={16}/></button></div>
+   <div><b>SET{p.set_number} · P{p.point}<small>　{idx+1} / {total}</small></b><small className="ex-point-identity">{identityText(p)}</small><span>{safeText(p.power)} · {safeText(p.time)} · W{safeText(p.wafer)} · P{safeText(p.point)} · {safeText(p.substrate_type||f.substrate_type,'SiCN')}</span></div>
+   <div className="verificationTopActions"><span className={`autoBadge ${resultCssClass(resultLabel)}`}>{resultLabel} · {p.human_result?'검증 판정':'자동 판정'}</span><button className="iconBtn" aria-label="이전 Point" onClick={prev}><ChevronLeft size={16}/></button><button className="iconBtn" aria-label="다음 Point" onClick={next}><ChevronRight size={16}/></button></div>
   </div>
   <div className="verificationLayout">
    <div className="verificationVisualColumn">
-    <div className="verificationImages"><Visual title={humanROIActive?"SEM / Human ROI":"SEM / Residue ROI"} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
-    <div className="v21ElementStrip">
-      <div className="focusPanel"><b>{humanROIActive?"C Map (Human ROI)":"C Map (ROI)"}</b><ImageWithFallback sources={maps.c} alt={humanROIActive?"C map with Human ROI":"C map with ROI"}/></div>
-      <div className="focusPanel"><b>{humanROIActive?"O Map (Human ROI)":"O Map (ROI)"}</b><ImageWithFallback sources={maps.o} alt={humanROIActive?"O map with Human ROI":"O map with ROI"}/></div>
+    <div className="verificationImages"><Visual title={humanROIActive?'SEM / Human ROI':'SEM / Residue ROI'} sources={maps.sem}/><Visual title="Full EDS Map" sources={maps.eds}/></div>
+    <div className="v21ElementStrip v21ElementStripThree">
+      <div className="focusPanel"><b>{humanROIActive?'C Map (Human ROI)':'C Map (ROI)'}</b><ImageWithFallback sources={maps.c} alt="C map with ROI"/></div>
+      <div className="focusPanel"><b>{humanROIActive?'N Map (Human ROI)':'N Map (ROI)'}</b><ImageWithFallback sources={maps.n} alt="N map with ROI"/></div>
+      <div className="focusPanel"><b>{humanROIActive?'O Map (Human ROI)':'O Map (ROI)'}</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
     </div>
-    <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi}/>
+    <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} nThreshold={nThreshold} setNThreshold={setNThreshold}/>
    </div>
    <section className="analysisResultCard" aria-label="판정 근거">
     <div className="analysisResultHead"><small>현재 판정</small><strong className={`resultTitle ${resultCssClass(resultLabel)}`}>{resultLabel}</strong></div>
-    <div className={`screeningScore scoreHero ${resultCssClass(resultLabel)}`}><b>{score==null?"—":score}<small> / 100</small></b><span>C/O 스크리닝 점수</span><small>판정 보조 지표 · 확률 아님</small></div>
-    <p className="decisionBasis">{p.human_result?"사용자가 검증한 판정을 표시합니다.":"자동 분석 결과를 표시합니다."}</p>
-    <div className="ratioFocus"><div><span>C ROI / Global</span><b>{fmtRatio(cRatio)}</b><small>Residue 기준 ≥ 2.40×</small></div><div><span>O ROI / Global</span><b>{fmtRatio(oRatio)}</b><small>Residue 기준 ≥ 3.00×</small></div></div>
-    <div className="ratioRuleNote"><b>C와 O가 모두 기준 이상일 때 Residue</b><span>둘 다 2.00× 이상이면서 위 기준에 못 미치면 Ambiguous입니다. C/O 증가만으로 UV tape 유래를 확정하지 않습니다.</span></div>
-    <div className="humanRoiStatus"><MousePointer2 size={16}/><span>{humanROIActive?"저장된 수동 ROI를 C/O 계산에 적용했습니다.":"자동 ROI를 표시합니다. 영역이 맞지 않으면 이미지 아래에서 수동 ROI를 지정하세요."}</span></div>
-    <details className="verificationDetails"><summary>보조 지표와 ROI 정보</summary><div className="metricBars"><MetricBar label="SEM 형상" value={f.morphology_score} color="blue"/><MetricBar label="C 점수" value={f.c_score} color="red"/><MetricBar label="O 점수" value={f.o_score} color="green"/><MetricBar label="공간 겹침" value={typeof f.spatial_overlap==="number"?f.spatial_overlap/100:null} color="purple"/></div>
-    <div className="roiInfo"><div><span>ROI 면적</span><strong>{(humanROIActive?f.human_roi_area_px:f.roi_area_px)?`${(humanROIActive?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'—'}</strong></div><div><span>ROI Coverage</span><strong>{humanROIActive&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'—':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'—':maskQuality.toFixed(2)}</strong></div><div><span>신뢰도 표시</span><strong>{confidence}</strong></div></div><p>형상과 공간 겹침은 보조 지표입니다. 사용자 판정은 C/O 점수와 다를 수 있습니다.</p></details>
+    <div className="criterionChooser"><small>자동 판정 기준</small><div>{SCREENING_CRITERIA.map(x=><button key={x.id} className={criterion===x.id?'selected':'secondary'} aria-pressed={criterion===x.id} onClick={()=>setCriterion(x.id)}>{x.short}</button>)}</div>{meta.needsN&&<label>N 강한 증가 기준 <input type="number" min="2.01" max="10" step="0.05" value={nThreshold} onChange={e=>{const v=Number(e.target.value);if(Number.isFinite(v)&&v>2)setNThreshold(v)}}/> ×</label>}<span>{meta.description}{meta.needsN?' · 탐색용 기준':''}</span></div>
+    <div className={`screeningScore scoreHero ${resultCssClass(autoLabel)}`}><b>{score==null?'—':score}<small> / 100</small></b><span>{meta.short} 스크리닝 점수</span><small>선택 기준에 따라 즉시 재계산 · 확률 아님</small></div>
+    <p className="decisionBasis">{p.human_result?`사용자 최종 판정은 유지됩니다. 선택 기준 자동 판정: ${autoLabel}`:`선택한 ${meta.label} 기준의 자동 판정입니다.`}</p>
+    <div className="ratioFocus ratioFocusThree"><div><span>C ROI / Global</span><b>{fmtRatio(cRatio)}</b><small>강한 증가 ≥ {C_THRESHOLD.toFixed(2)}×</small></div><div><span>N ROI / Global</span><b>{fmtRatio(nRatio)}</b><small>{meta.needsN?`강한 증가 ≥ ${Number(nThreshold).toFixed(2)}×`:'비교용 지표'}</small></div><div><span>O ROI / Global</span><b>{fmtRatio(oRatio)}</b><small>강한 증가 ≥ {O_THRESHOLD.toFixed(2)}×</small></div></div>
+    <div className="ratioRuleNote"><b>{meta.rule}</b><span>강한 증가 기준을 만족하면 Residue, 필요한 원소 조합이 모두 2.00× 이상이지만 강한 기준에 못 미치면 Ambiguous입니다. N 포함 기준은 Si 기판 경향 탐색용이며 UV tape 유래를 화학적으로 확정하지 않습니다.</span></div>
+    <div className="humanRoiStatus"><MousePointer2 size={16}/><span>{humanROIActive?'저장된 수동 ROI를 C/N/O 계산에 동일 적용했습니다.':'자동 ROI를 표시합니다. 영역이 맞지 않으면 이미지 아래에서 수동 ROI를 지정하세요.'}</span></div>
+    <details className="verificationDetails"><summary>보조 지표와 ROI 정보</summary><div className="metricBars"><MetricBar label="SEM 형상" value={f.morphology_score} color="blue"/><MetricBar label="C 점수" value={f.c_score} color="red"/><MetricBar label="N 점수" value={nScore} color="green"/><MetricBar label="O 점수" value={f.o_score} color="green"/><MetricBar label="공간 겹침" value={typeof f.spatial_overlap==='number'?f.spatial_overlap/100:null} color="purple"/></div>
+    <div className="roiInfo"><div><span>ROI 면적</span><strong>{(humanROIActive?f.human_roi_area_px:f.roi_area_px)?`${(humanROIActive?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'—'}</strong></div><div><span>ROI Coverage</span><strong>{humanROIActive&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'—':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'—':maskQuality.toFixed(2)}</strong></div><div><span>신뢰도 표시</span><strong>{confidence}</strong></div></div><p>형상과 공간 겹침은 보조 지표입니다. 사용자 판정은 자동 스크리닝 점수와 다를 수 있습니다.</p></details>
    </section>
   </div>
-  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, Verification에서 직접 지정한 Human ROI가 있으면 그 ROI를 SEM/C/O에 반영합니다. Human ROI는 C/O 재계산과 사용자 검증 데이터로 저장됩니다. Local Ring은 판정 기준으로 사용하지 않습니다.</span></div>
-  <div className="verificationButtons"><button className="danger" onClick={()=>human("Non-residue")}>Non-residue로 저장</button><button className="ambiguousDecision" onClick={()=>human("Ambiguous")}>Ambiguous로 저장</button><button className="approve" onClick={()=>human("Residue")}>Residue로 저장</button><button className="secondary" onClick={()=>human("Skip")}><SkipForward size={14}/> 건너뛰기</button></div>
+  <div className="verificationInfo v21Info"><b>ROI 표시</b><span>AI/CV ROI를 기본으로 표시하고, 저장된 Human ROI가 있으면 동일 ROI를 SEM/C/N/O에 반영합니다. 기준 변경은 저장된 원소 비율로 점수와 자동 판정만 다시 계산하며 Human 최종 판정은 덮어쓰지 않습니다.</span></div>
+  <div className="verificationButtons"><button className="danger" onClick={()=>human('Non-residue')}>Non-residue로 저장</button><button className="ambiguousDecision" onClick={()=>human("Ambiguous")}>Ambiguous로 저장</button><button className="approve" onClick={()=>human('Residue')}>Residue로 저장</button><button className="secondary" onClick={()=>human('Skip')}><SkipForward size={14}/> 건너뛰기</button></div>
   <div className="verificationNav"><button className="secondary" onClick={prev}><ChevronLeft size={14}/> 이전</button><button className="secondary" onClick={next}>다음 <ChevronRight size={14}/></button></div>
  </div>
 }
+
 function HumanRoiEditor({p,saveHumanRoi}){
  const [open,setOpen]=useState(false), [regions,setRegions]=useState([]), [current,setCurrent]=useState([]), [drawing,setDrawing]=useState(false), [saving,setSaving]=useState(false), [sourceIndex,setSourceIndex]=useState(0), [sourceAttempt,setSourceAttempt]=useState(0), [imageState,setImageState]=useState("idle"), [imageReadyTick,setImageReadyTick]=useState(0);
  const canvasRef=useRef(); const wrapRef=useRef(); const baseImgRef=useRef(null); const loadSeqRef=useRef(0); const retryTimerRef=useRef(null);
@@ -608,20 +608,20 @@ function HumanRoiEditor({p,saveHumanRoi}){
  const retryNow=()=>{clearTimeout(retryTimerRef.current);baseImgRef.current=null;setSourceIndex(0);setSourceAttempt(a=>a+1);setImageState("loading")};
  return <div className="humanRoiEditor" data-point-id={pointKey}><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓는 순간 선이 자동으로 닫히고 smoothing되어 하나의 ROI로 완료됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} />{imageState!=="ready"&&<div className="humanRoiCanvasStatus">{imageState==="error"?<><span>SEM 이미지를 불러오지 못했습니다.</span><button className="secondary" onClick={retryNow}>이미지 다시 불러오기</button></>:<span>{imageState==="retry"?"SEM 연결 재시도 중…":"SEM 이미지 불러오는 중…"}</span>}</div>}</div><div className="humanRoiEditorHint"><span>현재 Point: SET{p.set_number} P{p.point} · 현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>빨간색=Human ROI 작성/저장 · 마우스 놓으면 자동 영역 완료 · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>취소</button><button className="primary" disabled={saving||imageState!=="ready"||(!regions.length&&current.length<3)} onClick={save}>{saving?"저장 중…":"ROI 저장"}</button></div></div>
 }
-function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,wafer,setWafer,resultFilter,setResultFilter,human,saveHumanRoi,recalculateSavedHumanRois}){
+function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,wafer,setWafer,resultFilter,setResultFilter,human,saveHumanRoi,recalculateSavedHumanRois,criterion,setCriterion,nThreshold,setNThreshold}){
  const dialogRef=useDialog(close);
  const visible=points.filter(x=>{
    const c=condition==="ALL"||`${x.power} · ${x.time}`===condition;
    const w=wafer==="ALL"||String(x.wafer??"")===String(wafer);
-   const r=resultFilter==="ALL"||(verificationResult(x)===resultFilter);
+   const r=resultFilter==="ALL"||(verificationResult(x,criterion,nThreshold)===resultFilter);
    return c&&w&&r;
  }).sort((a,b)=>String(a.power).localeCompare(String(b.power),undefined,{numeric:true})||String(a.time).localeCompare(String(b.time),undefined,{numeric:true})||Number(a.wafer)-Number(b.wafer)||a.set_number-b.set_number||Number(a.point)-Number(b.point));
  const currentPos=Math.max(0,visible.findIndex(x=>x.id===p?.id));
- useEffect(()=>{if(visible.length&&!visible.some(x=>x.id===p?.id))setIdx(points.findIndex(x=>x.id===visible[0].id));},[condition,wafer,resultFilter,visible.length,p?.id]);
+ useEffect(()=>{if(visible.length&&!visible.some(x=>x.id===p?.id))setIdx(points.findIndex(x=>x.id===visible[0].id));},[condition,wafer,resultFilter,criterion,nThreshold,visible.length,p?.id]);
  const goVisible=delta=>{if(!visible.length)return;const n=Math.min(visible.length-1,Math.max(0,currentPos+delta));const ni=points.findIndex(x=>x.id===visible[n].id);if(ni>=0)setIdx(ni)};
  const conditions=[...new Set(points.map(x=>`${x.power} · ${x.time}`).filter(Boolean))];
  const wafers=[...new Set(points.map(x=>x.wafer).filter(v=>v!==undefined&&v!==null&&String(v)!==""))].sort((a,b)=>Number(a)-Number(b));
- return <div className="verificationOverlay" onClick={close}><div ref={dialogRef} className="verificationModal" role="dialog" aria-modal="true" aria-label="결과 검증" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>결과 검증</b><div className="verificationHeadTools"><span>{visible.length} Point 선택됨</span><button className="secondary" onClick={recalculateSavedHumanRois}><RotateCcw size={14}/> 저장 ROI 전체 재계산</button><button className="secondary" onClick={close}>닫기</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point 탐색</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>플라즈마 조건<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">전체 조건</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>웨이퍼 위치<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">전체 위치</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>판정<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">전체 판정</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>SET{x.set_number} P{Number(x.point)||i+1}</span><em>{safeText(x.power)} · {safeText(x.time)} · W{safeText(x.wafer)} · {safeText(x.substrate_type,"SiCN")}</em><small className="ex-nav-identity">{identityText(x)}</small><strong className={resultCssClass(r)}>{r}</strong></button>})}</div></aside><div className="verificationMain">{visible.length?<Review p={p} idx={currentPos} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={v=>human(v,visible.map(x=>x.id))} saveHumanRoi={saveHumanRoi}/>:<div className="emptyPanel"><b>조건에 맞는 Point가 없습니다</b><small>왼쪽 조건·위치·판정 필터를 변경하세요.</small></div>}</div></div></div></div>}
+ return <div className="verificationOverlay" onClick={close}><div ref={dialogRef} className="verificationModal" role="dialog" aria-modal="true" aria-label="결과 검증" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>결과 검증</b><div className="verificationHeadTools"><span>{visible.length} Point 선택됨</span><button className="secondary" onClick={recalculateSavedHumanRois}><RotateCcw size={14}/> 저장 ROI 전체 재계산</button><button className="secondary" onClick={close}>닫기</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point 탐색</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>플라즈마 조건<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">전체 조건</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>웨이퍼 위치<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">전체 위치</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>판정<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">전체 판정</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x,criterion,nThreshold);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>SET{x.set_number} P{Number(x.point)||i+1}</span><em>{safeText(x.power)} · {safeText(x.time)} · W{safeText(x.wafer)} · {safeText(x.substrate_type,"SiCN")}</em><small className="ex-nav-identity">{identityText(x)}</small><strong className={resultCssClass(r)}>{r}</strong></button>})}</div></aside><div className="verificationMain">{visible.length?<Review p={p} idx={currentPos} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={v=>human(v,visible.map(x=>x.id))} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} nThreshold={nThreshold} setNThreshold={setNThreshold}/>:<div className="emptyPanel"><b>조건에 맞는 Point가 없습니다</b><small>왼쪽 조건·위치·판정 필터를 변경하세요.</small></div>}</div></div></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).map(normalizeAssetValue).filter(Boolean))];
@@ -638,11 +638,11 @@ function Visual({title,sources}){
  const list=Array.isArray(sources)?sources:[sources];
  return <div className="visual panel"><div className="panelHead"><b>{title}</b><small>분석 근거 이미지</small></div><ImageWithFallback sources={list} alt={title}/></div>;
 }
-function Gallery({points,q,setQ,result,setResult}){
+function Gallery({points,q,setQ,result,setResult,classify=pointClass,scoreFn=displayScore,criterion="co",nThreshold=DEFAULT_N_THRESHOLD}){
  const [selected,setSelected]=useState(null),[page,setPage]=useState(0),[view,setView]=useState("roi");
  useEffect(()=>setPage(0),[q,result]);
  const last=Math.max(0,Math.ceil(points.length/24)-1),current=Math.min(page,last);
- return <div className="content"><div className="intro"><div><h2>이미지 조회</h2><p>Point별 SEM과 원소 맵을 확인합니다. 이미지를 선택하면 상세 근거가 열립니다.</p></div><span>{points.length.toLocaleString()} Point</span></div><section className="panel"><div className="filters"><label className="search"><Search size={17}/><input aria-label="이미지 검색" value={q} onChange={e=>setQ(e.target.value)} placeholder="조건, Wafer, Point 검색"/></label><div className="galleryResultFilters">{["All","Residue","Ambiguous","Non-residue"].map(x=><button aria-pressed={result===x} className={result===x?"sel":"secondary"} onClick={()=>setResult(x)} key={x}>{x==="All"?"전체":x}</button>)}</div></div><div className="galleryToolbar"><span>Residue · 잔사 의심 / Non-residue · 기준 미충족 / Ambiguous · 판정 보류</span><label>SEM 표시<select value={view} onChange={e=>setView(e.target.value)}><option value="roi">ROI 표시</option><option value="raw">저장 원본</option></select></label></div></section>{!points.length?<section className="panel emptyPanel"><Images size={28}/><b>조건에 맞는 이미지가 없습니다</b><small>검색어 또는 판정 필터를 변경해 주세요.</small></section>:<><div className="gallery">{points.slice(current*24,(current+1)*24).map(p=><button className="tile" onClick={()=>setSelected(p)} key={p.id}><div className="tileImg"><ImageWithFallback loading="lazy" sources={view==="raw"?[p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem]} alt={`SEM ${p.power} ${p.time} W${p.wafer} P${p.point}`}/><em className={resultCssClass(pointClass(p))}>{pointClass(p)}</em></div><div className="tileBody"><b>{p.power} · {p.time}</b><span>W{p.wafer} · SET{p.set_number} P{p.point} · {p.substrate_type||"기판 미지정"}</span><small className="ex-point-identity">{identityText(p)}</small></div></button>)}</div><div className="workspacePagination"><span>{current*24+1}–{Math.min((current+1)*24,points.length)} / {points.length} Point</span><div><button className="secondary" disabled={!current} onClick={()=>setPage(current-1)}><ChevronLeft size={16}/>이전</button><b>{current+1} / {last+1}</b><button className="secondary" disabled={current>=last} onClick={()=>setPage(current+1)}>다음<ChevronRight size={16}/></button></div></div></>}{selected&&<ImageLightbox p={selected} close={()=>setSelected(null)}/>}</div>
+ return <div className="content"><div className="intro"><div><h2>이미지 조회</h2><p>Point별 SEM과 원소 맵을 확인합니다. 이미지를 선택하면 상세 근거가 열립니다.</p></div><span>{points.length.toLocaleString()} Point</span></div><section className="panel"><div className="filters"><label className="search"><Search size={17}/><input aria-label="이미지 검색" value={q} onChange={e=>setQ(e.target.value)} placeholder="조건, Wafer, Point 검색"/></label><div className="galleryResultFilters">{["All","Residue","Ambiguous","Non-residue"].map(x=><button aria-pressed={result===x} className={result===x?"sel":"secondary"} onClick={()=>setResult(x)} key={x}>{x==="All"?"전체":x}</button>)}</div></div><div className="galleryToolbar"><span>Residue · 잔사 의심 / Non-residue · 기준 미충족 / Ambiguous · 판정 보류</span><label>SEM 표시<select value={view} onChange={e=>setView(e.target.value)}><option value="roi">ROI 표시</option><option value="raw">저장 원본</option></select></label></div></section>{!points.length?<section className="panel emptyPanel"><Images size={28}/><b>조건에 맞는 이미지가 없습니다</b><small>검색어 또는 판정 필터를 변경해 주세요.</small></section>:<><div className="gallery">{points.slice(current*24,(current+1)*24).map(p=><button className="tile" onClick={()=>setSelected(p)} key={p.id}><div className="tileImg"><ImageWithFallback loading="lazy" sources={view==="raw"?[p.assets?.sem]:[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem]} alt={`SEM ${p.power} ${p.time} W${p.wafer} P${p.point}`}/><em className={resultCssClass(classify(p))}>{classify(p)}</em></div><div className="tileBody"><b>{p.power} · {p.time}</b><span>W{p.wafer} · SET{p.set_number} P{p.point} · {p.substrate_type||"기판 미지정"}</span><small className="ex-point-identity">{identityText(p)}</small></div></button>)}</div><div className="workspacePagination"><span>{current*24+1}–{Math.min((current+1)*24,points.length)} / {points.length} Point</span><div><button className="secondary" disabled={!current} onClick={()=>setPage(current-1)}><ChevronLeft size={16}/>이전</button><b>{current+1} / {last+1}</b><button className="secondary" disabled={current>=last} onClick={()=>setPage(current+1)}>다음<ChevronRight size={16}/></button></div></div></>}{selected&&<ImageLightbox p={selected} close={()=>setSelected(null)} classify={classify} scoreFn={scoreFn}/>}</div>
 }
 function imageUrl(src){
  const value=normalizeAssetValue(src);
@@ -651,28 +651,28 @@ function imageUrl(src){
  if(value.startsWith("/"))return `${API}${value}`;
  return `${API}/api/assets/${encodeURIComponent(value)}`;
 }
-function ImageLightbox({p,close}){
+function ImageLightbox({p,close,classify=pointClass,scoreFn=displayScore}){
  const dialogRef=useDialog(close);
  const f=p.features||{};
- const scoreValue=displayScore(p);
+ const scoreValue=scoreFn(p);
  const sem=[dynamicAsset(p,"sem_residue_overlay"),p.assets?.sem_residue_overlay,p.assets?.sem];
  const eds=[dynamicAsset(p,"eds_map"),p.assets?.eds_map,p.assets?.full_element_maps_original];
- const maps=[["SE",[p.assets?.se_map_roi_ring,p.assets?.se_map]],["C",[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map]],["O",[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map]]];
- return <div className="lightbox" onClick={close}><div ref={dialogRef} className="lightboxCard" role="dialog" aria-modal="true" aria-label="Point 근거 이미지" onClick={e=>e.stopPropagation()}><div className="lightboxHead"><div><b>{p.power} · {p.time}</b><span>W{p.wafer} · P{p.point} · {p.zone}</span></div><button className="secondary" onClick={close}>닫기</button></div><div className="lightboxGrid"><div><small>SEM / Residue ROI</small><ImageWithFallback sources={sem} alt="SEM overlay"/></div><div><small>Full EDS Map</small><ImageWithFallback sources={eds} alt="Full EDS Map"/></div></div><div className="elementDetailGrid">{maps.map(([label,sources])=><div key={label}><small>{label} / ROI</small><ImageWithFallback sources={sources} alt={`${label} map`}/></div>)}</div><div className="lightboxResult"><b>{pointClass(p)}</b><span>Score {typeof scoreValue==="number"?scoreValue:"-"} / 100 · {p.confidence||f.confidence||"-"}</span></div></div></div>
+ const maps=[["SE",[p.assets?.se_map_roi_ring,p.assets?.se_map]],["C",[dynamicAsset(p,"c_map_enhanced_overlay"),p.assets?.c_map_enhanced_overlay,p.assets?.c_map]],["N",[dynamicAsset(p,"n_map_enhanced_overlay"),p.assets?.n_map_enhanced_overlay,p.assets?.n_map]],["O",[dynamicAsset(p,"o_map_enhanced_overlay"),p.assets?.o_map_enhanced_overlay,p.assets?.o_map]]];
+ return <div className="lightbox" onClick={close}><div ref={dialogRef} className="lightboxCard" role="dialog" aria-modal="true" aria-label="Point 근거 이미지" onClick={e=>e.stopPropagation()}><div className="lightboxHead"><div><b>{p.power} · {p.time}</b><span>W{p.wafer} · P{p.point} · {p.zone}</span></div><button className="secondary" onClick={close}>닫기</button></div><div className="lightboxGrid"><div><small>SEM / Residue ROI</small><ImageWithFallback sources={sem} alt="SEM overlay"/></div><div><small>Full EDS Map</small><ImageWithFallback sources={eds} alt="Full EDS Map"/></div></div><div className="elementDetailGrid">{maps.map(([label,sources])=><div key={label}><small>{label} / ROI</small><ImageWithFallback sources={sources} alt={`${label} map`}/></div>)}</div><div className="lightboxResult"><b>{classify(p)}</b><span>Score {typeof scoreValue==="number"?scoreValue:"-"} / 100 · {p.confidence||f.confidence||"-"}</span></div></div></div>
 }
 function AIAnalysis({points,analysis,busy,run}){const residue=points.filter(p=>pointClass(p)==="Residue").length;const non=points.filter(p=>pointClass(p)==="Non-residue").length;return <div className="content"><div className="intro"><div><label>RESEARCH INTERPRETATION</label><h2>AI 해석</h2><p>OpenAI는 개별 Point의 분류기가 아니라, 이미 계산된 SEM/EDS 분석 결과를 연구 관점에서 해석합니다.</p></div><button className="primary" disabled={busy} onClick={run}><BrainCircuit size={14}/>{busy?"해석 중…":"AI 해석 실행"}</button></div><div className="metrics"><Metric t="Points" v={points.length} s="현재 데이터"/><Metric t="Residue" v={residue} s="판정 수"/><Metric t="Non-residue" v={non} s="판정 수"/><Metric t="Review" v={Math.max(0,points.length-residue-non)} s="판정 보류"/></div>{analysis?<div className="aiAnalysisGrid"><section className="panel"><div className="panelHead"><b>요약</b><small>저장된 결과를 바탕으로 한 해석</small></div><div className="aiBody"><p>{analysis.summary}</p><h4>주요 관찰</h4><ul>{(analysis.key_findings||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section><section className="panel"><div className="panelHead"><b>조건별 경향</b><small>현재 데이터 기준</small></div><div className="aiBody"><ul>{(analysis.condition_trends||[]).map((x,i)=><li key={i}>{x}</li>)}</ul><h4>추가 확인 항목</h4><ul>{(analysis.anomalies||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section><section className="panel"><div className="panelHead"><b>후속 검토 제안</b><small>검토를 위한 참고 제안</small></div><div className="aiBody"><ul>{(analysis.next_steps||[]).map((x,i)=><li key={i}>{x}</li>)}</ul><h4>해석 시 유의사항</h4><ul>{(analysis.caveats||[]).map((x,i)=><li key={i}>{x}</li>)}</ul></div></section></div>:<section className="panel emptyPanel"><BrainCircuit size={26}/><b>AI Analysis를 실행하세요</b><small>Residue / Non-residue 분류 자체는 CV + Human Review 결과를 사용하고, OpenAI는 조건별 경향과 이상점, 연구 해석에 사용합니다.</small><button className="primary" disabled={busy} onClick={run}><BrainCircuit size={14}/> AI 해석 실행</button></section>}</div>}
 
 function conditionKey(p){return `${p.power||"-"} / ${p.time||"-"}`}
 function conditionGroups(points){const g={};(points||[]).forEach(p=>{const k=conditionKey(p);(g[k]??=[]).push(p)});return g}
-function ConditionView({points,selected,setSelected,go}){
+function ConditionView({points,selected,setSelected,go,classify=pointClass}){
  const groups=conditionGroups(points); const keys=Object.keys(groups); const active=selected&&selected!=="ALL"?groups[selected]||[]:points;
- const residue=active.filter(p=>pointClass(p)==="Residue").length, non=active.filter(p=>pointClass(p)==="Non-residue").length, amb=active.length-residue-non;
+ const residue=active.filter(p=>classify(p)==="Residue").length, non=active.filter(p=>classify(p)==="Non-residue").length, amb=active.length-residue-non;
  const wafers=[...new Set(active.map(p=>p.wafer).filter(x=>x!=null))].sort((a,b)=>Number(a)-Number(b));
  return <div className="content"><div className="intro"><div><span className="badge"><Activity size={13}/> CONDITION VIEW</span><h2>조건별 데이터</h2><p>누적된 전체 데이터를 Power / Time 조건별로 확인합니다.</p></div><span>{active.length} Points</span></div>
  <section className="panel conditionViewToolbar"><div className="conditionViewSelect"><label>플라즈마 조건</label><select value={selected} onChange={e=>setSelected(e.target.value)}><option value="ALL">전체 조건 · {points.length} Points</option>{keys.map(k=><option key={k} value={k}>{k} · {groups[k].length} Points</option>)}</select></div><button className="secondary" onClick={()=>go("Condition Compare")}><GitCompare size={14}/> 조건·위치 비교</button></section>
  <div className="dashboardMetrics conditionMetrics"><Metric t="Points" v={active.length} s={selected==="ALL"?"전체 데이터":"선택 조건"}/><Metric t="Residue" v={residue} s={active.length?`${Math.round(residue/active.length*100)}%`:"—"}/><Metric t="Non-residue" v={non} s={active.length?`${Math.round(non/active.length*100)}%`:"—"}/><Metric t="Ambiguous" v={amb} s="추가 검토 대상"/><Metric t="Human Verified" v={active.filter(p=>!!p.human_result).length} s="사용자 검증 완료"/><Metric t="Wafers" v={wafers.length} s={wafers.map(w=>`W${w}`).join(", ")||"—"}/></div>
- <section className="panel"><div className="panelHead"><b>{selected==="ALL"?"전체 조건":"조건 · "+selected}</b><small>저장된 조건별 판정 현황 · 전체 위치 포함</small></div><div className="dashTable"><div className="dashTr dashTh"><span>플라즈마 조건</span><span>Point</span><span>Residue</span><span>Non-residue</span><span>Ambiguous</span><span>Residue 비율</span></div>{keys.map(k=>{const a=groups[k],r=a.filter(p=>pointClass(p)==="Residue").length,n=a.filter(p=>pointClass(p)==="Non-residue").length,q=a.length-r-n;return <button className={`dashTr conditionRowBtn ${selected===k?"selected": ""}`} key={k} onClick={()=>setSelected(k)}><span>{k}</span><span>{a.length}</span><span>{r}</span><span>{n}</span><span>{q}</span><strong>{a.length?Math.round(r/a.length*100):0}%</strong></button>})}</div></section>
- {selected!=="ALL"&&<section className="panel conditionPointPanel"><div className="panelHead"><b>{selected} · Point List</b><small>Point를 클릭하면 Verification에서 해당 결과를 확인합니다.</small></div><div className="conditionPointGrid">{active.map(p=>{const c=pointClass(p);return <button className={`conditionPointCard ${resultCssClass(c).replace(/-/g,"")}`} key={p.id} onClick={()=>{const i=points.findIndex(x=>x.id===p.id);if(i>=0){go("Dashboard");setTimeout(()=>window.dispatchEvent(new CustomEvent("uvtape:open-point",{detail:{index:i}})),0)}}}><b>SET{p.set_number} P{p.point}</b><span>W{p.wafer} · {p.power} · {p.time}</span><strong>{c}</strong><small>Score {displayScore(p)==null?"-":displayScore(p)}</small></button>})}</div></section>}
+ <section className="panel"><div className="panelHead"><b>{selected==="ALL"?"전체 조건":"조건 · "+selected}</b><small>저장된 조건별 판정 현황 · 전체 위치 포함</small></div><div className="dashTable"><div className="dashTr dashTh"><span>플라즈마 조건</span><span>Point</span><span>Residue</span><span>Non-residue</span><span>Ambiguous</span><span>Residue 비율</span></div>{keys.map(k=>{const a=groups[k],r=a.filter(p=>classify(p)==="Residue").length,n=a.filter(p=>classify(p)==="Non-residue").length,q=a.length-r-n;return <button className={`dashTr conditionRowBtn ${selected===k?"selected": ""}`} key={k} onClick={()=>setSelected(k)}><span>{k}</span><span>{a.length}</span><span>{r}</span><span>{n}</span><span>{q}</span><strong>{a.length?Math.round(r/a.length*100):0}%</strong></button>})}</div></section>
+ {selected!=="ALL"&&<section className="panel conditionPointPanel"><div className="panelHead"><b>{selected} · Point List</b><small>Point를 클릭하면 Verification에서 해당 결과를 확인합니다.</small></div><div className="conditionPointGrid">{active.map(p=>{const c=classify(p);return <button className={`conditionPointCard ${resultCssClass(c).replace(/-/g,"")}`} key={p.id} onClick={()=>{const i=points.findIndex(x=>x.id===p.id);if(i>=0){go("Dashboard");setTimeout(()=>window.dispatchEvent(new CustomEvent("uvtape:open-point",{detail:{index:i}})),0)}}}><b>SET{p.set_number} P{p.point}</b><span>W{p.wafer} · {p.power} · {p.time}</span><strong>{c}</strong><small>Score {displayScore(p)==null?"-":displayScore(p)}</small></button>})}</div></section>}
  </div>
 }
 function compareRatio(p,kind){
@@ -695,7 +695,7 @@ function Compare({points,selected,setSelected}){
  const substrateOf=p=>safeText(p?.substrate_type||p?.features?.substrate_type,"SiCN");
  const makeRow=k=>{
    const all=groups[k]||[],a=all.filter(isMain);
-   const r=a.filter(p=>pointClass(p)==="Residue").length,n=a.filter(p=>pointClass(p)==="Non-residue").length,q=a.length-r-n;
+   const r=a.filter(p=>classify(p)==="Residue").length,n=a.filter(p=>classify(p)==="Non-residue").length,q=a.length-r-n;
    const locations=locationDefs.map(loc=>{const pts=a.filter(p=>Number(p.wafer)===loc.wafer),rr=pts.filter(p=>pointClass(p)==="Residue").length,nn=pts.filter(p=>pointClass(p)==="Non-residue").length,qq=pts.length-rr-nn;return {...loc,pts,r:rr,n:nn,q:qq,rate:pts.length?compareRate(rr,pts.length):null}});
    const valid=locations.filter(x=>x.rate!=null),spread=valid.length>1?Math.max(...valid.map(x=>x.rate))-Math.min(...valid.map(x=>x.rate)):null;
    const worst=valid.length?[...valid].sort((x,y)=>y.rate-x.rate)[0]:null;
@@ -717,7 +717,7 @@ function Compare({points,selected,setSelected}){
  const w9Points=effectiveKeys.flatMap(k=>(groups[k]||[]).filter(p=>Number(p.wafer)===9));
  const w9Map=new Map();
  w9Points.forEach(p=>{const key=`${conditionKey(p)}|||${substrateOf(p)}`;(w9Map.get(key)||w9Map.set(key,[]).get(key)).push(p)});
- const w9Rows=[...w9Map.entries()].map(([key,a])=>{const [condition,substrate]=key.split("|||");const r=a.filter(p=>pointClass(p)==="Residue").length,n=a.filter(p=>pointClass(p)==="Non-residue").length,q=a.length-r-n;return {condition,substrate,a,r,n,q,rate:compareRate(r,a.length),ambRate:compareRate(q,a.length),verified:a.filter(p=>!!p.human_result).length}}).sort((a,b)=>a.substrate.localeCompare(b.substrate)||a.condition.localeCompare(b.condition));
+ const w9Rows=[...w9Map.entries()].map(([key,a])=>{const [condition,substrate]=key.split("|||");const r=a.filter(p=>classify(p)==="Residue").length,n=a.filter(p=>classify(p)==="Non-residue").length,q=a.length-r-n;return {condition,substrate,a,r,n,q,rate:compareRate(r,a.length),ambRate:compareRate(q,a.length),verified:a.filter(p=>!!p.human_result).length}}).sort((a,b)=>a.substrate.localeCompare(b.substrate)||a.condition.localeCompare(b.condition));
  const w9Substrates=[...new Set(w9Rows.map(x=>x.substrate))];
  const otherPoints=effectiveKeys.flatMap(k=>(groups[k]||[]).filter(p=>![1,4,5,9].includes(Number(p.wafer))));
  const printReport=()=>{

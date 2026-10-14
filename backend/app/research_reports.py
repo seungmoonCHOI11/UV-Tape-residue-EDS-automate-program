@@ -8,7 +8,7 @@ from io import BytesIO
 from datetime import datetime, timezone
 from PIL import Image
 from .research import *
-from .classification import feature_ratios
+from .classification import feature_element_ratios, criterion_rule_text
 
 NAVY='#20334D'; MUTED='#687A91'; BLUE='#526BB5'; RED='#C15B64'; GREEN='#398E83'; AMBER='#D6A64E'; LIGHT='#F1F4F8'
 def textnum(v):return '-' if v is None else f'{v:.1f}'
@@ -19,8 +19,8 @@ def fit(iw,ih,x,y,w,h):
 
 class Document:
     W,H=13.333,7.5
-    def __init__(self,fmt,out):
-        self.fmt,self.out=fmt,Path(out);self.number=0;self.page_offset=0
+    def __init__(self,fmt,out,footer_text=None):
+        self.fmt,self.out=fmt,Path(out);self.number=0;self.page_offset=0;self.footer_text=footer_text or "SEM / EDS screening"
         if fmt=='pptx':
             from pptx import Presentation
             from pptx.util import Inches
@@ -39,7 +39,7 @@ class Document:
         self.text(.35,.22,12.5,.4,title,22,bold=True)
         self.text(.35,.72,12.5,.35,subtitle,9,color=MUTED)
         self.rect(.35,1.1,12.6,.015,BLUE)
-        self.text(.35,7.15,11.9,.16,'SEM / EDS screening | C >= 2.40x and O >= 3.00x | Source origin not chemically confirmed by C/O alone',7,color=MUTED)
+        self.text(.35,7.15,11.9,.16,self.footer_text,7,color=MUTED)
         self.text(12.35,7.13,.6,.18,str(self.number+self.page_offset),8,color=MUTED)
     def rect(self,x,y,w,h,color=LIGHT):
         if self.fmt=='pptx':
@@ -133,21 +133,24 @@ class Assets:
     def clear_downloads(self):
         for p in self.folder.glob('*.jpg'):p.unlink(missing_ok=True)
 
-def metadata(p,basis):
-    c,o,src=feature_ratios(p.get('features') or {})
-    return f"{condition(p)} | W{p.get('wafer')} {POSITIONS.get(integer(p.get('wafer')),'Other')} | P{p.get('point')} | {substrate(p)}",c,o,src
+def metadata(p,basis,criterion="co",n_threshold=2.40):
+    c,n,o,src=feature_element_ratios(p.get('features') or {})
+    return f"{condition(p)} | W{p.get('wafer')} {POSITIONS.get(integer(p.get('wafer')),'Other')} | P{p.get('point')} | {substrate(p)}",c,n,o,src
 
 def point_page(doc,p,opts,assets):
-    line,c,o,src=metadata(p,opts.cohort.basis)
-    doc.page(f"{condition(p)}   W{p.get('wafer')} / P{p.get('point')}",f"{substrate(p)} | {POSITIONS.get(integer(p.get('wafer')),'Other')} | {decision(p,opts.cohort.basis)} | {opts.cohort.basis.upper()} decision basis")
+    line,c,n,o,src=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
+    result=decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
+    sc=score(p,opts.cohort.criterion,opts.cohort.n_threshold)
+    doc.page(f"{condition(p)}   W{p.get('wafer')} / P{p.get('point')}",f"{substrate(p)} | {POSITIONS.get(integer(p.get('wafer')),'Other')} | {result} | {opts.cohort.basis.upper()} decision basis")
     f=p.get('features') or {};polygons=(f.get('human_roi_polygons') or f.get('human_roi_polygon')) if opts.include_verification else None
-    panels=[(.35,1.35,4.6,3.08,'sem','SEM original'+(' + saved Human ROI' if polygons else '')),(5.12,1.35,3.6,3.08,'eds_map','Full EDS original'),(8.9,1.35,4.05,5.32,'full_element_maps_original','Element maps original'),(.35,4.68,2.2,1.85,'c_map','C map'+(' + ROI' if polygons else '')),(2.75,4.68,2.2,1.85,'o_map','O map'+(' + ROI' if polygons else ''))]
+    # Keep v23.9.14/15 one-page composition, adding N beside C/O without reducing the main SEM/EDS evidence.
+    panels=[(.35,1.35,4.6,3.08,'sem','SEM original'+(' + saved Human ROI' if polygons else '')),(5.12,1.35,3.6,3.08,'eds_map','Full EDS original'),(8.9,1.35,4.05,5.32,'full_element_maps_original','Element maps original'),(.35,4.68,1.45,1.85,'c_map','C map'+(' + ROI' if polygons else '')),(1.92,4.68,1.45,1.85,'n_map','N map'+(' + ROI' if polygons else '')),(3.49,4.68,1.45,1.85,'o_map','O map'+(' + ROI' if polygons else ''))]
     for x,y,w,h,key,title in panels:
-        doc.text(x,y-.2,w,.2,title,10,bold=True);doc.image(assets.get(p,key),x,y,w,h,polygons if key in ('sem','c_map','o_map') else None)
+        doc.text(x,y-.2,w,.2,title,10,bold=True);doc.image(assets.get(p,key),x,y,w,h,polygons if key in ('sem','c_map','n_map','o_map') else None)
     doc.rect(5.12,4.48,3.6,2.2,LIGHT)
-    lines=[f"Result: {decision(p,opts.cohort.basis)}",f"C ROI/Global: {textnum(c)}x",f"O ROI/Global: {textnum(o)}x",f"Score: {textnum(score(p))} / 100"]
+    lines=[f"Result: {result}",f"C ROI/Global: {textnum(c)}x",f"N ROI/Global: {textnum(n)}x",f"O ROI/Global: {textnum(o)}x",f"Score: {textnum(sc)} / 100"]
     if opts.include_verification:lines += [f"Human: {label(p.get('human_result')) or 'Not verified'}",f"Ratio source: {src}",f"Reviewed: {p.get('human_verified_at') or p.get('human_updated_at') or '-'}"]
-    doc.text(5.28,4.65,3.26,1.85,'\n'.join(lines),10)
+    doc.text(5.28,4.6,3.26,1.95,'\n'.join(lines),9.2)
     doc.text(.35,6.78,12.5,.22,f"Point ID: {p.get('id')} | Batch: {p.get('project_id') or 'Unknown'}",8,color=MUTED)
 
 def gallery_page(doc,key,pts,opts,assets,start,total):
@@ -159,16 +162,16 @@ def gallery_page(doc,key,pts,opts,assets,start,total):
         x=.35+(i%cols)*cw;y=1.26+(i//cols)*ch
         doc.image(assets.get(p,'sem'),x+.045,y,cw-.14,ch-.56)
         doc.text(x+.045,y+ch-.52,cw-.13,.16,f"{p.get('power')} {p.get('time')} | W{p.get('wafer')} P{p.get('point')}",8,bold=True)
-        doc.text(x+.045,y+ch-.34,cw-.13,.15,f"Score {textnum(score(p))} | {str(p.get('id',''))[:10]}",7,color=MUTED)
+        doc.text(x+.045,y+ch-.34,cw-.13,.15,f"Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold))} | {str(p.get('id',''))[:10]}",7,color=MUTED)
 
 def summary_pages(doc,records,opts):
     data=summary(records,opts.cohort)
     doc.page(opts.title,'Condition / location evaluation | W1 Corner, W4 Edge, W5 Middle | W9 reference evaluated separately')
     doc.text(.4,1.45,12,1.0,'Plasma activation and UV tape residue screening',27,bold=True)
-    doc.text(.4,2.5,11.9,1.1,'SEM morphology and C/O enrichment support a residue screening decision.\nResidue denotes the configured screening class; it is not source-specific chemical identification.',17,color=MUTED)
-    st=stats(records,opts.cohort.basis)
+    doc.text(.4,2.5,11.9,1.1,'SEM morphology and the selected C/N/O enrichment rule support a residue screening decision.\nResidue denotes the configured screening class; it is not source-specific chemical identification.',17,color=MUTED)
+    st=stats(records,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
     doc.table(['Selected points','Residue','Non-residue','Ambiguous','Human verified'],[[str(st[k]) for k in ['n','residue','non','ambiguous','verified']]],.4,3.9,[2.5]*5,row_h=.65,size=15)
-    doc.text(.4,5.5,12,1.25,f"Scope: {opts.cohort.scope} | Decision basis: {opts.cohort.basis}\nRate = residue points / observed points. Ambiguous remains in denominator.\nPooled location rates reflect condition mix. Balanced rates equally weight common conditions.\nC/O score is a screening index, not probability, chemical concentration or removal efficiency.",12,color=MUTED)
+    doc.text(.4,5.5,12,1.25,f"Scope: {opts.cohort.scope} | Decision basis: {opts.cohort.basis}\nRate = residue points / observed points. Ambiguous remains in denominator.\nPooled location rates reflect condition mix. Balanced rates equally weight common conditions.\nSelected-rule score is a screening index, not probability, chemical concentration or removal efficiency.",12,color=MUTED)
     for s in data['strata']:
         for start in range(0,len(s['conditions']),5):
             rows=s['conditions'][start:start+5];ws=[c['wafer'] for c in rows[0]['cells']] if rows else []
@@ -193,14 +196,14 @@ def comparison_page(doc,records,opts,assets):
     doc.page('Selected Point comparison','Original stored images | Columns are independent observations; scale bars retain original units')
     width=12.6/len(records);maps=list(dict.fromkeys(opts.comparison_maps));height=4.4/len(maps)
     for i,p in enumerate(records):
-        x=.35+i*width;ident=p.get('research_identity') or {};_,c,o,_=metadata(p,opts.cohort.basis)
+        x=.35+i*width;ident=p.get('research_identity') or {};_,c,n,o,_=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
         doc.text(x+.06,1.22,width-.12,.22,f"{p.get('power')} {p.get('time')} | W{p.get('wafer')} P{p.get('point')}",11,bold=True)
         doc.text(x+.06,1.52,width-.12,.28,f"{ident.get('sample_id') or '-'} | Repeat {ident.get('repeat_index') or '-'} | {str(p.get('project_id',''))[:12]}",8,color=MUTED)
         for j,key in enumerate(maps):
             y=1.95+j*height;doc.text(x+.06,y-.15,width-.12,.15,key.replace('_map','').upper(),8,bold=True)
             doc.image(assets.get(p,key),x+.06,y,width-.12,height-.25)
-        doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis)} | Score {textnum(score(p))}",9,bold=True)
-        doc.text(x+.06,6.75,width-.12,.2,f"{substrate(p)} | C {textnum(c)}x | O {textnum(o)}x",9,color=MUTED)
+        doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)} | Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold))}",9,bold=True)
+        doc.text(x+.06,6.75,width-.12,.2,f"{substrate(p)} | C {textnum(c)}x | N {textnum(n)}x | O {textnum(o)}x",9,color=MUTED)
 
 def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);assets=Assets(folder/'assets',storage)
@@ -209,7 +212,7 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     def page_ready():
         nonlocal doc,part
         if doc is None:
-            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}');doc.page_offset=done
+            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}',footer_text=f"SEM / EDS screening | {criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold)}");doc.page_offset=done
     def flush():
         nonlocal doc
         if doc is not None:outputs.append(doc.save());doc=None;assets.clear_downloads()
@@ -246,13 +249,13 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     for part_file in outputs:part_file.unlink()
     outputs=[final]
     # Always deliver an audit manifest and original-SEM hashes alongside the outputs.
-    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':CLASSIFICATION_RULE_TEXT,'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
+    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold),'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
     (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8')
     with (folder/'points.csv').open('w',encoding='utf-8-sig',newline='') as f:
-        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Result','Human','C ratio','O ratio','Score','Score band','Sample ID','Repeat','Measured on','Batch label'])
+        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Result','Human','Criterion','C ratio','N ratio','O ratio','Score','Score band','Sample ID','Repeat','Measured on','Batch label'])
         for p in records:
-            _,c,o,_=metadata(p,opts.cohort.basis)
-            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis),label(p.get('human_result')) or '',c,o,score(p),band(p),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
+            _,c,n,o,_=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
+            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold),label(p.get('human_result')) or '',opts.cohort.criterion,c,n,o,score(p,opts.cohort.criterion,opts.cohort.n_threshold),band(p,opts.cohort.criterion,opts.cohort.n_threshold),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
             writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in row])
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
@@ -274,7 +277,7 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
         return _render_parts(records,opts,folder,storage,progress)
     import shutil
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
-    groups=[(label,[p for p in records if decision(p,opts.cohort.basis)==label]) for label in RESULTS]
+    groups=[(label,[p for p in records if decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)==label]) for label in RESULTS]
     groups=[(label,pts) for label,pts in groups if pts]
     results=[];audits=[];outputs=[]
     for index,(label,pts) in enumerate(groups):
