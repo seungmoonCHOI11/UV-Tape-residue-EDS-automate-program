@@ -3,13 +3,13 @@ from collections import defaultdict
 import math, re
 from typing import Literal
 from pydantic import BaseModel, Field
-from .classification import record_result, auto_result, record_score, criterion_rule_text, N_RESIDUE_RATIO, feature_element_ratios
+from .classification import record_result, auto_result, record_score, criterion_rule_text, C_RESIDUE_RATIO, N_RESIDUE_RATIO, O_RESIDUE_RATIO, feature_element_ratios
 
 POSITIONS={1:'Corner',4:'Edge',5:'Middle',9:'Reference'}
 RESULTS=('Residue','Non-residue','Ambiguous')
 BANDS=('0-60','60-70','70-80','80-90','90-100','missing')
-Criterion = Literal['co','cno','c_n_or_o']
-AUTO_CRITERIA=('co','cno','c_n_or_o')
+Criterion = Literal['co','cno','cn','c_n_or_o']
+AUTO_CRITERIA=('co','cno','cn')
 
 class Cohort(BaseModel):
     scope: Literal['main','reference','other','all']='main'
@@ -20,7 +20,9 @@ class Cohort(BaseModel):
     review: Literal['all','verified','unverified']='all'
     basis: Literal['final','auto']='final'
     criterion: Criterion='co'
+    c_threshold: float=Field(default=C_RESIDUE_RATIO,ge=2.01,le=10.0)
     n_threshold: float=Field(default=N_RESIDUE_RATIO,ge=2.01,le=10.0)
+    o_threshold: float=Field(default=O_RESIDUE_RATIO,ge=2.01,le=10.0)
     results: list[Literal['Residue','Non-residue','Ambiguous']]|None=None
     score_bands: list[Literal['0-60','60-70','70-80','80-90','90-100','missing']]|None=None
     point_ids: list[str]|None=Field(default=None,max_length=10000)
@@ -49,14 +51,14 @@ def integer(v):
 def natural(v):return [int(x) if x.isdigit() else x for x in re.split(r'(\d+)',str(v))]
 def condition(p):return f"{p.get('power','-')} / {p.get('time','-')}"
 def substrate(p):return str(p.get('substrate_type') or (p.get('features') or {}).get('substrate_type') or 'Unknown')
-def decision(p,basis='final',criterion='co',n_threshold=N_RESIDUE_RATIO):
+def decision(p,basis='final',criterion='co',n_threshold=N_RESIDUE_RATIO,c_threshold=C_RESIDUE_RATIO,o_threshold=O_RESIDUE_RATIO):
     h=label(p.get('human_result'))
-    return (h if basis=='final' and h else label(auto_result(p,criterion,n_threshold))) or 'Ambiguous'
-def score(p,criterion='co',n_threshold=N_RESIDUE_RATIO):
-    v=record_score(p,criterion,n_threshold)
+    return (h if basis=='final' and h else label(auto_result(p,criterion,n_threshold,c_threshold,o_threshold))) or 'Ambiguous'
+def score(p,criterion='co',n_threshold=N_RESIDUE_RATIO,c_threshold=C_RESIDUE_RATIO,o_threshold=O_RESIDUE_RATIO):
+    v=record_score(p,criterion,n_threshold,c_threshold,o_threshold)
     return max(0.,min(100.,v)) if v is not None and math.isfinite(v) else None
-def band(p,criterion='co',n_threshold=N_RESIDUE_RATIO):
-    v=score(p,criterion,n_threshold)
+def band(p,criterion='co',n_threshold=N_RESIDUE_RATIO,c_threshold=C_RESIDUE_RATIO,o_threshold=O_RESIDUE_RATIO):
+    v=score(p,criterion,n_threshold,c_threshold,o_threshold)
     if v is None:return 'missing'
     return '0-60' if v<60 else '60-70' if v<70 else '70-80' if v<80 else '80-90' if v<90 else '90-100'
 def select(records, opts:Cohort):
@@ -77,20 +79,20 @@ def select(records, opts:Cohort):
         human=bool(label(p.get('human_result')))
         if opts.review=='verified' and not human:continue
         if opts.review=='unverified' and human:continue
-        if opts.results is not None and decision(p,opts.basis,opts.criterion,opts.n_threshold) not in opts.results:continue
-        if opts.score_bands is not None and band(p,opts.criterion,opts.n_threshold) not in opts.score_bands:continue
+        if opts.results is not None and decision(p,opts.basis,opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold) not in opts.results:continue
+        if opts.score_bands is not None and band(p,opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold) not in opts.score_bands:continue
         out.append(p)
     return sorted(out,key=lambda p:(natural(condition(p)),substrate(p),integer(p.get('wafer')),integer(p.get('point')),str(p.get('project_id','')),str(p.get('id',''))))
 
-def auto_stats(points,criterion='co',n_threshold=N_RESIDUE_RATIO):
-    n=len(points);labels=[label(auto_result(p,criterion,n_threshold)) or 'Ambiguous' for p in points]
+def auto_stats(points,criterion='co',n_threshold=N_RESIDUE_RATIO,c_threshold=C_RESIDUE_RATIO,o_threshold=O_RESIDUE_RATIO):
+    n=len(points);labels=[label(auto_result(p,criterion,n_threshold,c_threshold,o_threshold)) or 'Ambiguous' for p in points]
     r=sum(x=='Residue' for x in labels);a=sum(x=='Ambiguous' for x in labels)
     verified=[p for p in points if label(p.get('human_result'))]
-    agree=sum((label(auto_result(p,criterion,n_threshold)) or 'Ambiguous')==label(p.get('human_result')) for p in verified)
+    agree=sum((label(auto_result(p,criterion,n_threshold,c_threshold,o_threshold)) or 'Ambiguous')==label(p.get('human_result')) for p in verified)
     n_available=sum(feature_element_ratios((p.get('features') or {}),prefer_human=True)[1] is not None for p in points)
     return {'n':n,'residue':r,'non':n-r-a,'ambiguous':a,'rate':100*r/n if n else None,'upper':100*(r+a)/n if n else None,'verified':len(verified),'agreement':100*agree/len(verified) if verified else None,'n_available':n_available}
-def stats(points,basis='final',criterion='co',n_threshold=N_RESIDUE_RATIO):
-    n=len(points);r=sum(decision(p,basis,criterion,n_threshold)=='Residue' for p in points);a=sum(decision(p,basis,criterion,n_threshold)=='Ambiguous' for p in points)
+def stats(points,basis='final',criterion='co',n_threshold=N_RESIDUE_RATIO,c_threshold=C_RESIDUE_RATIO,o_threshold=O_RESIDUE_RATIO):
+    n=len(points);r=sum(decision(p,basis,criterion,n_threshold,c_threshold,o_threshold)=='Residue' for p in points);a=sum(decision(p,basis,criterion,n_threshold,c_threshold,o_threshold)=='Ambiguous' for p in points)
     return {'n':n,'residue':r,'non':n-r-a,'ambiguous':a,'rate':100*r/n if n else None,'upper':100*(r+a)/n if n else None,'verified':sum(bool(label(p.get('human_result'))) for p in points)}
 def summary(records,opts:Cohort):
     rows=[]
@@ -102,23 +104,23 @@ def summary(records,opts:Cohort):
         conds=[]
         for key in keys:
             a=[p for p in pts if condition(p)==key]
-            cells=[{'wafer':w,'label':POSITIONS.get(w,'Other'),**stats([p for p in a if integer(p.get('wafer'))==w],opts.basis,opts.criterion,opts.n_threshold)} for w in ws]
+            cells=[{'wafer':w,'label':POSITIONS.get(w,'Other'),**stats([p for p in a if integer(p.get('wafer'))==w],opts.basis,opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold)} for w in ws]
             batches={str(p.get('project_id') or 'unknown') for p in a}
             slots={(str(p.get('project_id') or 'unknown'),integer(p.get('wafer')),integer(p.get('point'))) for p in a if 1<=integer(p.get('point'))<=9}
             expected=9*len(ws)*len(batches)
             rates=[c['rate'] for c in cells if c['n']]
-            conds.append({'condition':key,**stats(a,opts.basis,opts.criterion,opts.n_threshold),'cells':cells,'slots':len(slots),'expected':expected,'coverage':100*len(slots)/expected if expected else None,'duplicates':len(a)-len({(str(p.get('project_id') or 'unknown'),integer(p.get('wafer')),integer(p.get('point'))) for p in a}),'batches':len(batches),'spread':max(rates)-min(rates) if len(rates)==len(ws) and len(ws)>1 else None})
+            conds.append({'condition':key,**stats(a,opts.basis,opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold),'cells':cells,'slots':len(slots),'expected':expected,'coverage':100*len(slots)/expected if expected else None,'duplicates':len(a)-len({(str(p.get('project_id') or 'unknown'),integer(p.get('wafer')),integer(p.get('point'))) for p in a}),'batches':len(batches),'spread':max(rates)-min(rates) if len(rates)==len(ws) and len(ws)>1 else None})
         common=[r for r in conds if all(c['n'] for c in r['cells'])]
         pooled=[]
         for w in ws:
             cstats=[next(c for c in r['cells'] if c['wafer']==w) for r in common]
-            pooled.append({'wafer':w,'label':POSITIONS.get(w,'Other'),**stats([p for p in pts if integer(p.get('wafer'))==w],opts.basis,opts.criterion,opts.n_threshold),'balanced':sum(c['rate'] for c in cstats)/len(cstats) if cstats else None,'balanced_upper':sum(c['upper'] for c in cstats)/len(cstats) if cstats else None,'common_conditions':len(common)})
+            pooled.append({'wafer':w,'label':POSITIONS.get(w,'Other'),**stats([p for p in pts if integer(p.get('wafer'))==w],opts.basis,opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold),'balanced':sum(c['rate'] for c in cstats)/len(cstats) if cstats else None,'balanced_upper':sum(c['upper'] for c in cstats)/len(cstats) if cstats else None,'common_conditions':len(common)})
         rows.append({'substrate':sub,'conditions':conds,'positions':pooled,'common_keys':[r['condition'] for r in common]})
-    return {'n':len(records),'strata':rows,'rule':criterion_rule_text(opts.criterion,opts.n_threshold),'basis':opts.basis,'criterion':opts.criterion,'n_threshold':opts.n_threshold}
+    return {'n':len(records),'strata':rows,'rule':criterion_rule_text(opts.criterion,opts.n_threshold,opts.c_threshold,opts.o_threshold),'basis':opts.basis,'criterion':opts.criterion,'c_threshold':opts.c_threshold,'n_threshold':opts.n_threshold,'o_threshold':opts.o_threshold}
 def gallery_groups(records,opts:ExportOptions):
     groups=defaultdict(list)
     for p in records:
-        k=(substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold),condition(p) if opts.group_conditions else 'All selected conditions',band(p,opts.cohort.criterion,opts.cohort.n_threshold) if opts.group_scores else 'All scores')
+        k=(substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),condition(p) if opts.group_conditions else 'All selected conditions',band(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold) if opts.group_scores else 'All scores')
         groups[k].append(p)
     return sorted(groups.items(),key=lambda kv:(kv[0][0],kv[0][1],natural(kv[0][2]),BANDS.index(kv[0][3]) if kv[0][3] in BANDS else 0))
 def page_count(records,opts):

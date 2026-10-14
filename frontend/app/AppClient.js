@@ -8,7 +8,7 @@ import useDialog from "./useDialog";
 import WorkspaceDashboard from "./WorkspaceDashboard";
 import ResearchTools from "./ResearchTools";
 import {DEFAULT_FILTERS} from "./researchModel.mjs";
-import {SCREENING_CRITERIA,DEFAULT_N_THRESHOLD,C_THRESHOLD,O_THRESHOLD,MODERATE_THRESHOLD,pointRatios,criterionScore,criterionResult,autoClass as screeningAutoClass,finalClass as screeningFinalClass,screeningScore,criterionMeta,normalizeResultLabel as screeningNormalizeResult,hasHumanROI as screeningHasHumanROI} from "./screeningModel.mjs";
+import {SCREENING_CRITERIA,DEFAULT_N_THRESHOLD,C_THRESHOLD,O_THRESHOLD,MODERATE_THRESHOLD,pointRatios,criterionScore,criterionResult,autoClass as screeningAutoClass,finalClass as screeningFinalClass,screeningScore,criterionMeta,normalizeCriterion,normalizeResultLabel as screeningNormalizeResult,hasHumanROI as screeningHasHumanROI} from "./screeningModel.mjs";
 import {Upload,LayoutDashboard,BrainCircuit,Images,GitCompare,FileText,Settings,FileUp,Play,Check,Download,ChevronLeft,ChevronRight,SkipForward,Search,Database,Activity,Plus,Trash2,MousePointer2,RotateCcw} from "lucide-react";
 
 const API=process.env.NEXT_PUBLIC_API_BASE_URL||"https://uv-tape-residue-eds-backend.onrender.com";
@@ -78,20 +78,24 @@ export default function App(){
  const [mounted,setMounted]=useState(false),[initialLoading,setInitialLoading]=useState(true),[page,setPage]=useState("Dashboard"),[points,setPoints]=useState([]),[project,setProject]=useState(null),[projectList,setProjectList]=useState([]),[idx,setIdx]=useState(0),[msg,setMsg]=useState(""),[aiAnalysis,setAiAnalysis]=useState(null),[aiBusy,setAiBusy]=useState(false),conditionInputs=useRef({});
  const [q,setQ]=useState(""),[result,setResult]=useState("All"),[conditionView,setConditionView]=useState("ALL"),[compareConditions,setCompareConditions]=useState([]),[conditions,setConditions]=useState([{...DEFAULT_CONDITION}]),[substrateType,setSubstrateType]=useState("SiCN"),[positionSubstrates,setPositionSubstrates]=useState(()=>({"1":"SiCN","4":"SiCN","5":"SiCN","9":"Si"})),[sampleCategory,setSampleCategory]=useState("MAIN"),[pagesPerPoint,setPagesPerPoint]=useState(3),[draggingCondition,setDraggingCondition]=useState(null),[busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[progressPhase,setProgressPhase]=useState("idle"),[progressMessage,setProgressMessage]=useState(""),[verificationOpen,setVerificationOpen]=useState(false),[verificationCondition,setVerificationCondition]=useState("ALL"),[verificationWafer,setVerificationWafer]=useState("ALL"),[verificationResult,setVerificationResult]=useState("ALL"),[analysisQueue,setAnalysisQueue]=useState([]),[analysisModalOpen,setAnalysisModalOpen]=useState(false);
  const [dataState,setDataState]=useState("loading");
- const [screeningCriterion,setScreeningCriterion]=useState(()=>typeof window!=="undefined"?(localStorage.getItem("uvtape:screeningCriterion")||"co"):"co");
+ const [screeningCriterion,setScreeningCriterion]=useState(()=>normalizeCriterion(typeof window!=="undefined"?(localStorage.getItem("uvtape:screeningCriterion")||"co"):"co"));
+ const [cStrongThreshold,setCStrongThreshold]=useState(()=>{if(typeof window==="undefined")return C_THRESHOLD;const v=Number(localStorage.getItem("uvtape:cStrongThreshold"));return Number.isFinite(v)&&v>2?v:C_THRESHOLD});
  const [nStrongThreshold,setNStrongThreshold]=useState(()=>{if(typeof window==="undefined")return DEFAULT_N_THRESHOLD;const v=Number(localStorage.getItem("uvtape:nStrongThreshold"));return Number.isFinite(v)&&v>2?v:DEFAULT_N_THRESHOLD});
+ const [oStrongThreshold,setOStrongThreshold]=useState(()=>{if(typeof window==="undefined")return O_THRESHOLD;const v=Number(localStorage.getItem("uvtape:oStrongThreshold"));return Number.isFinite(v)&&v>2?v:O_THRESHOLD});
  const [researchFilters,setResearchFilters]=useState(DEFAULT_FILTERS);
  const [queueLoaded,setQueueLoaded]=useState(false);
  const identifiedPoints=useMemo(()=>assignSets(points,projectList),[points,projectList]);
  useEffect(()=>{try{localStorage.setItem("uvtape:screeningCriterion",screeningCriterion)}catch{}},[screeningCriterion]);
+ useEffect(()=>{try{localStorage.setItem("uvtape:cStrongThreshold",String(cStrongThreshold))}catch{}},[cStrongThreshold]);
  useEffect(()=>{try{localStorage.setItem("uvtape:nStrongThreshold",String(nStrongThreshold))}catch{}},[nStrongThreshold]);
+ useEffect(()=>{try{localStorage.setItem("uvtape:oStrongThreshold",String(oStrongThreshold))}catch{}},[oStrongThreshold]);
  const uploadingRef=useRef(false);
  const activeAnalysis=analysisQueue.some(isActiveJob);
  const activeJob=analysisQueue.find(isActiveJob)||analysisQueue[0]||null;
  const activeJobIsReanalysis=activeJob?.job_type==="reanalysis";
- const classifyPoint=p=>pointClass(p,screeningCriterion,nStrongThreshold);
- const autoClassifyPoint=p=>autoPointClass(p,screeningCriterion,nStrongThreshold);
- const scorePoint=p=>displayScore(p,screeningCriterion,nStrongThreshold);
+ const classifyPoint=p=>pointClass(p,screeningCriterion,nStrongThreshold,cStrongThreshold,oStrongThreshold);
+ const autoClassifyPoint=p=>autoPointClass(p,screeningCriterion,nStrongThreshold,cStrongThreshold,oStrongThreshold);
+ const scorePoint=p=>displayScore(p,screeningCriterion,nStrongThreshold,cStrongThreshold,oStrongThreshold);
  const notify=x=>{setMsg(x);setTimeout(()=>setMsg(""),3200)};
  async function loadProjectList(){
    try{
@@ -340,7 +344,7 @@ function goNav(n){if(n==="Verification"){openVerification();return}setVerificati
  {page==="AI Analysis"&&<AIInterpretation points={identifiedPoints} api={API}/>}
  {page==="Image Gallery"&&<Gallery points={filtered} q={q} setQ={setQ} result={result} setResult={setResult} classify={classifyPoint} scoreFn={scorePoint} criterion={screeningCriterion} nThreshold={nStrongThreshold}/>}
  {page==="Condition View"&&<ConditionView points={identifiedPoints} selected={conditionView} setSelected={setConditionView} go={goNav} classify={classifyPoint}/>}
- {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList} analysisQueue={analysisQueue}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois} criterion={screeningCriterion} setCriterion={setScreeningCriterion} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
+ {page==="Condition Compare"&&<ResearchTools mode="compare" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} cThreshold={cStrongThreshold} setCThreshold={setCStrongThreshold} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold} oThreshold={oStrongThreshold} setOThreshold={setOStrongThreshold}/>} {page==="Reports"&&<ResearchTools mode="reports" points={identifiedPoints} filters={researchFilters} setFilters={setResearchFilters} classify={classifyPoint} autoClass={autoClassifyPoint} scoreFn={scorePoint} ratios={currentRatios} renderEvidence={(p,close)=><ImageLightbox p={p} close={close} classify={classifyPoint} scoreFn={scorePoint}/>} api={API} go={goNav} projectList={projectList} analysisActive={activeAnalysis} criterion={screeningCriterion} setCriterion={setScreeningCriterion} cThreshold={cStrongThreshold} setCThreshold={setCStrongThreshold} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold} oThreshold={oStrongThreshold} setOThreshold={setOStrongThreshold}/>} {page==="Delete Data"&&<DeleteData projectList={projectList} currentProject={project} deleteProject={deleteProjectById} busy={busy||activeAnalysis} reanalyze={reanalyzeProject} api={API} reloadProjects={loadProjectList} analysisQueue={analysisQueue}/>} </main>{busy&&progressPhase==="upload"&&<AnalysisProgress progress={progress} phase={progressPhase} message={progressMessage}/>} {analysisModalOpen&&<AnalysisBatchModal items={analysisQueue} open={analysisModalOpen} close={()=>setAnalysisModalOpen(false)}/>} {verificationOpen&&p&&<VerificationErrorBoundary resetKey={`${safeText(p?.id,"-")}-${points.length}`} close={()=>setVerificationOpen(false)}><VerificationModal p={p} idx={idx} total={points.length} points={identifiedPoints} close={()=>setVerificationOpen(false)} setIdx={setIdx} condition={verificationCondition} setCondition={setVerificationCondition} wafer={verificationWafer} setWafer={setVerificationWafer} resultFilter={verificationResult} setResultFilter={setVerificationResult} human={human} saveHumanRoi={saveHumanRoi} recalculateSavedHumanRois={recalculateSavedHumanRois} criterion={screeningCriterion} setCriterion={setScreeningCriterion} cThreshold={cStrongThreshold} setCThreshold={setCStrongThreshold} nThreshold={nStrongThreshold} setNThreshold={setNStrongThreshold} oThreshold={oStrongThreshold} setOThreshold={setOStrongThreshold}/></VerificationErrorBoundary>} {msg&&<div className="toast" role="status">{msg}</div>}</div>
 }
 function InitialLoading(){return <div className="initialLoading"><div className="initialLoadingCard"><div className="initialLoadingBrand"><b>EDS</b><span>Insight Lab</span></div><div className="initialLoadingTitle">저장 데이터 불러오는 중</div><p>기존 분석 데이터와 Point 정보를 불러오는 중입니다.</p><div className="initialLoadingTrack"><div className="initialLoadingBar"/></div><div className="initialLoadingMeta"><span>프로젝트 연결 확인</span><span>잠시만 기다려주세요</span></div></div></div>}
 function AnalysisProgress({progress,phase,message}){
@@ -395,14 +399,14 @@ function elementRatioDisplayScore(ratio,strong){
  const equivalent=x*(3/strong),k=0.23,denom=1-Math.exp(-k*17),normalized=(1-Math.exp(-k*(equivalent-3)))/denom;
  return Math.min(100,70+30*Math.max(0,normalized));
 }
-function coRatioDisplayScore(cRatio,oRatio){
- const c=elementRatioDisplayScore(cRatio,2.40),o=elementRatioDisplayScore(oRatio,3.00);
+function coRatioDisplayScore(cRatio,oRatio,cThreshold=2.40,oThreshold=3.00){
+ const c=elementRatioDisplayScore(cRatio,cThreshold),o=elementRatioDisplayScore(oRatio,oThreshold);
  return c==null||o==null?null:Math.min(c,o);
 }
-function coRatioRuleResult(cRatio,oRatio){
+function coRatioRuleResult(cRatio,oRatio,cThreshold=2.40,oThreshold=3.00){
  const c=finiteNumber(cRatio),o=finiteNumber(oRatio);
  if(c==null||o==null)return null;
- if(c>=2.40&&o>=3.00)return "Residue";
+ if(c>=cThreshold&&o>=oThreshold)return "Residue";
  if(c>=2.00&&o>=2.00)return "Ambiguous";
  return "Non-residue";
 }
@@ -432,26 +436,25 @@ function currentRatios(p){
  }
  return {c:autoC,n:autoN,o:autoO,source:"auto"};
 }
-function autoPointClass(p,criterion="co",nThreshold=2.40){
+function autoPointClass(p,criterion="co",nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
  if(criterion==="co"){
-   const r=currentRatios(p),byRatio=coRatioRuleResult(r.c,r.o);
+   const r=currentRatios(p),byRatio=coRatioRuleResult(r.c,r.o,cThreshold,oThreshold);
    if(byRatio)return byRatio;
-   const f=p?.features||{};
-   for(const candidate of [p?.result,p?.auto_result,f?.result,f?.human_roi_rule_result,f?.co_rule_result]){const n=normalizeResultLabel(candidate);if(n&&n!=="Skip")return n}
+   const f=p?.features||{};for(const candidate of [p?.result,p?.auto_result,f?.result,f?.human_roi_rule_result,f?.co_rule_result]){const n=normalizeResultLabel(candidate);if(n&&n!=="Skip")return n}
    return "Ambiguous";
  }
- return screeningAutoClass(p,criterion,nThreshold);
+ return screeningAutoClass(p,criterion,nThreshold,cThreshold,oThreshold);
 }
-function pointClass(p,criterion="co",nThreshold=2.40){
+function pointClass(p,criterion="co",nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
  const human=normalizeResultLabel(p?.human_result);
  if(human&&human!=="Skip")return human;
- return autoPointClass(p,criterion,nThreshold);
+ return autoPointClass(p,criterion,nThreshold,cThreshold,oThreshold);
 }
-function verificationResult(x,criterion="co",nThreshold=2.40){return pointClass(x,criterion,nThreshold)}
+function verificationResult(x,criterion="co",nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){return pointClass(x,criterion,nThreshold,cThreshold,oThreshold)}
 function resultCssClass(v){return pointClass({human_result:v,features:{}}).toLowerCase().replace(/[^a-z]+/g,"-")}
-function displayScore(p,criterion="co",nThreshold=2.40){
- if(criterion!=="co")return screeningScore(p,criterion,nThreshold);
- const r=currentRatios(p),ratioScore=coRatioDisplayScore(r.c,r.o);
+function displayScore(p,criterion="co",nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
+ if(criterion!=="co")return screeningScore(p,criterion,nThreshold,cThreshold,oThreshold);
+ const r=currentRatios(p),ratioScore=coRatioDisplayScore(r.c,r.o,cThreshold,oThreshold);
  if(ratioScore!=null)return ratioScore;
  const stored=finiteNumber(p?.score??p?.evaluation_score??p?.features?.evaluation_score);
  return stored;
@@ -473,13 +476,13 @@ function dynamicAsset(p,type){
  const rv="23916";
  return `/api/assets/${encodeURIComponent(p.id)}/${type}?rv=${rv}${v?`&v=${v}`:""}`;
 }
-function Review({p,idx,total,prev,next,human,saveHumanRoi,criterion,setCriterion,nThreshold,setNThreshold}){
+function Review({p,idx,total,prev,next,human,saveHumanRoi,criterion,setCriterion,cThreshold,setCThreshold,nThreshold,setNThreshold,oThreshold,setOThreshold}){
  const f=p.features||{},hasHumanROIFlag=hasHumanROI(f),liveRatios=currentRatios(p),humanROIActive=hasHumanROIFlag;
- const {c:cRatio,n:nRatio,o:oRatio}=liveRatios,meta=criterionMeta(criterion,nThreshold);
- const score=criterionScore(liveRatios,criterion,nThreshold)??(criterion==='co'&&humanROIActive&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p,criterion,nThreshold));
+ const {c:cRatio,n:nRatio,o:oRatio}=liveRatios,meta=criterionMeta(criterion,nThreshold,cThreshold,oThreshold);
+ const score=criterionScore(liveRatios,criterion,nThreshold,cThreshold,oThreshold)??(criterion==='co'&&humanROIActive&&typeof f.human_residue_score==='number'?Math.round(f.human_residue_score):displayScore(p,criterion,nThreshold,cThreshold,oThreshold));
  const coverage=humanROIActive&&typeof f.human_roi_area_px==='number'?Math.round((f.human_roi_area_px/Math.max(1,(f.human_roi_global_area_px||f.roi_area_px||1)))*100):typeof f.candidate_coverage==='number'?Math.round(f.candidate_coverage):null;
  const maskQuality=humanROIActive&&typeof f.human_roi_quality==='number'?f.human_roi_quality:(typeof f.roi_quality==='number'?f.roi_quality:null);
- const autoLabel=autoPointClass(p,criterion,nThreshold),resultLabel=pointClass(p,criterion,nThreshold),confidence=humanROIActive?'Human ROI':safeText(f.confidence||p?.confidence,'-');
+ const autoLabel=autoPointClass(p,criterion,nThreshold,cThreshold,oThreshold),resultLabel=pointClass(p,criterion,nThreshold,cThreshold,oThreshold),confidence=humanROIActive?'Human ROI':safeText(f.confidence||p?.confidence,'-');
  const maps={
    sem:humanROIActive?[dynamicAsset(p,'sem_residue_overlay'),p.assets?.sem]:[dynamicAsset(p,'sem_residue_overlay'),p.assets?.sem_residue_overlay,p.assets?.sem],
    eds:[dynamicAsset(p,'eds_map'),p.assets?.eds_map,p.assets?.full_element_maps_original],
@@ -502,15 +505,15 @@ function Review({p,idx,total,prev,next,human,saveHumanRoi,criterion,setCriterion
       <div className="focusPanel"><b>{humanROIActive?'N Map (Human ROI)':'N Map (ROI)'}</b><ImageWithFallback sources={maps.n} alt="N map with ROI"/></div>
       <div className="focusPanel"><b>{humanROIActive?'O Map (Human ROI)':'O Map (ROI)'}</b><ImageWithFallback sources={maps.o} alt="O map with ROI"/></div>
     </div>
-    <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} nThreshold={nThreshold} setNThreshold={setNThreshold}/>
+    <HumanRoiEditor p={p} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} cThreshold={cThreshold} setCThreshold={setCThreshold} nThreshold={nThreshold} setNThreshold={setNThreshold} oThreshold={oThreshold} setOThreshold={setOThreshold}/>
    </div>
    <section className="analysisResultCard" aria-label="판정 근거">
     <div className="analysisResultHead"><small>현재 판정</small><strong className={`resultTitle ${resultCssClass(resultLabel)}`}>{resultLabel}</strong></div>
-    <div className="criterionChooser"><small>자동 판정 기준</small><div>{SCREENING_CRITERIA.map(x=><button key={x.id} className={criterion===x.id?'selected':'secondary'} aria-pressed={criterion===x.id} onClick={()=>setCriterion(x.id)}>{x.short}</button>)}</div>{meta.needsN&&<label>N 강한 증가 기준 <input type="number" min="2.01" max="10" step="0.05" value={nThreshold} onChange={e=>{const v=Number(e.target.value);if(Number.isFinite(v)&&v>2)setNThreshold(v)}}/> ×</label>}<span>{meta.description}{meta.needsN?' · 탐색용 기준':''}</span></div>
+    <div className="criterionChooser"><small>자동 판정 기준</small><div>{SCREENING_CRITERIA.map(x=><button key={x.id} className={criterion===x.id?'selected':'secondary'} aria-pressed={criterion===x.id} onClick={()=>setCriterion(x.id)}>{x.short}</button>)}</div><div className="criterionThreshold compact"><label>C 기준 <input type="number" min="2.01" max="10" step="0.05" value={cThreshold} onChange={e=>{const v=Number(e.target.value);if(Number.isFinite(v)&&v>2)setCThreshold(v)}}/> ×</label><label>N 기준 <input type="number" min="2.01" max="10" step="0.05" value={nThreshold} onChange={e=>{const v=Number(e.target.value);if(Number.isFinite(v)&&v>2)setNThreshold(v)}}/> ×</label><label>O 기준 <input type="number" min="2.01" max="10" step="0.05" value={oThreshold} onChange={e=>{const v=Number(e.target.value);if(Number.isFinite(v)&&v>2)setOThreshold(v)}}/> ×</label></div><span>{meta.description}</span></div>
     <div className={`screeningScore scoreHero ${resultCssClass(autoLabel)}`}><b>{score==null?'—':score}<small> / 100</small></b><span>{meta.short} 스크리닝 점수</span><small>선택 기준에 따라 즉시 재계산 · 확률 아님</small></div>
     <p className="decisionBasis">{p.human_result?`사용자 최종 판정은 유지됩니다. 선택 기준 자동 판정: ${autoLabel}`:`선택한 ${meta.label} 기준의 자동 판정입니다.`}</p>
-    <div className="ratioFocus ratioFocusThree"><div><span>C ROI / Global</span><b>{fmtRatio(cRatio)}</b><small>강한 증가 ≥ {C_THRESHOLD.toFixed(2)}×</small></div><div><span>N ROI / Global</span><b>{fmtRatio(nRatio)}</b><small>{meta.needsN?`강한 증가 ≥ ${Number(nThreshold).toFixed(2)}×`:'비교용 지표'}</small></div><div><span>O ROI / Global</span><b>{fmtRatio(oRatio)}</b><small>강한 증가 ≥ {O_THRESHOLD.toFixed(2)}×</small></div></div>
-    <div className="ratioRuleNote"><b>{meta.rule}</b><span>강한 증가 기준을 만족하면 Residue, 필요한 원소 조합이 모두 2.00× 이상이지만 강한 기준에 못 미치면 Ambiguous입니다. N 포함 기준은 기판 종류와 관계없이 원소 조합 경향을 비교하기 위한 탐색 기준이며 UV tape 유래를 화학적으로 확정하지 않습니다.</span></div>
+    <div className="ratioFocus ratioFocusThree"><div><span>C ROI / Global</span><b>{fmtRatio(cRatio)}</b><small>강한 증가 ≥ {Number(cThreshold).toFixed(2)}×</small></div><div><span>N ROI / Global</span><b>{fmtRatio(nRatio)}</b><small>강한 증가 ≥ {Number(nThreshold).toFixed(2)}×</small></div><div><span>O ROI / Global</span><b>{fmtRatio(oRatio)}</b><small>강한 증가 ≥ {Number(oThreshold).toFixed(2)}×</small></div></div>
+    <div className="ratioRuleNote"><b>{meta.rule}</b><span>강한 증가 기준을 만족하면 Residue, 필요한 원소 조합이 모두 2.00× 이상이지만 강한 기준에 못 미치면 Ambiguous입니다. N 포함 기준도 동일한 ROI/Global 비율을 사용해 자동 판정합니다. 이 원소 조합만으로 UV tape 유래를 화학적으로 확정하지 않습니다.</span></div>
     <div className="humanRoiStatus"><MousePointer2 size={16}/><span>{humanROIActive?'저장된 수동 ROI를 C/N/O 계산에 동일 적용했습니다.':'자동 ROI를 표시합니다. 영역이 맞지 않으면 이미지 아래에서 수동 ROI를 지정하세요.'}</span></div>
     <details className="verificationDetails"><summary>보조 지표와 ROI 정보</summary><div className="metricBars"><MetricBar label="SEM 형상" value={f.morphology_score} color="blue"/><MetricBar label="C 점수" value={f.c_score} color="red"/><MetricBar label="N 점수" value={nScore} color="green"/><MetricBar label="O 점수" value={f.o_score} color="green"/><MetricBar label="공간 겹침" value={typeof f.spatial_overlap==='number'?f.spatial_overlap/100:null} color="purple"/></div>
     <div className="roiInfo"><div><span>ROI 면적</span><strong>{(humanROIActive?f.human_roi_area_px:f.roi_area_px)?`${(humanROIActive?f.human_roi_area_px:f.roi_area_px).toLocaleString()} px²`:'—'}</strong></div><div><span>ROI Coverage</span><strong>{humanROIActive&&typeof f.human_roi_fill_ratio==='number'?`${Math.round(f.human_roi_fill_ratio*100)}%`:coverage==null?'—':`${coverage}%`}</strong></div><div><span>Mask Quality</span><strong>{maskQuality==null?'—':maskQuality.toFixed(2)}</strong></div><div><span>신뢰도 표시</span><strong>{confidence}</strong></div></div><p>형상과 공간 겹침은 보조 지표입니다. 사용자 판정은 자동 스크리닝 점수와 다를 수 있습니다.</p></details>
@@ -608,12 +611,12 @@ function HumanRoiEditor({p,saveHumanRoi}){
  const retryNow=()=>{clearTimeout(retryTimerRef.current);baseImgRef.current=null;setSourceIndex(0);setSourceAttempt(a=>a+1);setImageState("loading")};
  return <div className="humanRoiEditor" data-point-id={pointKey}><div className="humanRoiEditorHead"><b>Human ROI 직접 지정</b><span><b>그림판처럼 마우스로 residue 외곽을 따라 그리세요.</b> 마우스를 놓는 순간 선이 자동으로 닫히고 smoothing되어 하나의 ROI로 완료됩니다. 떨어진 residue가 여러 개면 다시 그려서 여러 영역을 추가할 수 있습니다.</span></div><div className="humanRoiCanvasWrap" ref={wrapRef}><canvas ref={canvasRef} className="humanRoiDrawCanvas" onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} />{imageState!=="ready"&&<div className="humanRoiCanvasStatus">{imageState==="error"?<><span>SEM 이미지를 불러오지 못했습니다.</span><button className="secondary" onClick={retryNow}>이미지 다시 불러오기</button></>:<span>{imageState==="retry"?"SEM 연결 재시도 중…":"SEM 이미지 불러오는 중…"}</span>}</div>}</div><div className="humanRoiEditorHint"><span>현재 Point: SET{p.set_number} P{p.point} · 현재 선: {current.length}점 · 저장할 영역: {regions.length}개</span><span>빨간색=Human ROI 작성/저장 · 마우스 놓으면 자동 영역 완료 · 자동 smoothing: 약하게</span></div><div className="humanRoiActions"><button className="secondary" onClick={undo} disabled={!current.length}>↶ 마지막 선 되돌리기</button><button className="secondary" onClick={finishRegion} disabled={current.length<3}>✓ 영역 완료</button><button className="secondary" onClick={removeLastRegion} disabled={!regions.length}>− 마지막 영역 삭제</button><button className="secondary" onClick={clear}><RotateCcw size={14}/>전체 삭제</button><button className="secondary" onClick={()=>setOpen(false)}>취소</button><button className="primary" disabled={saving||imageState!=="ready"||(!regions.length&&current.length<3)} onClick={save}>{saving?"저장 중…":"ROI 저장"}</button></div></div>
 }
-function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,wafer,setWafer,resultFilter,setResultFilter,human,saveHumanRoi,recalculateSavedHumanRois,criterion,setCriterion,nThreshold,setNThreshold}){
+function VerificationModal({p,idx,total,points,close,setIdx,condition,setCondition,wafer,setWafer,resultFilter,setResultFilter,human,saveHumanRoi,recalculateSavedHumanRois,criterion,setCriterion,cThreshold,setCThreshold,nThreshold,setNThreshold,oThreshold,setOThreshold}){
  const dialogRef=useDialog(close);
  const visible=points.filter(x=>{
    const c=condition==="ALL"||`${x.power} · ${x.time}`===condition;
    const w=wafer==="ALL"||String(x.wafer??"")===String(wafer);
-   const r=resultFilter==="ALL"||(verificationResult(x,criterion,nThreshold)===resultFilter);
+   const r=resultFilter==="ALL"||(verificationResult(x,criterion,nThreshold,cThreshold,oThreshold)===resultFilter);
    return c&&w&&r;
  }).sort((a,b)=>String(a.power).localeCompare(String(b.power),undefined,{numeric:true})||String(a.time).localeCompare(String(b.time),undefined,{numeric:true})||Number(a.wafer)-Number(b.wafer)||a.set_number-b.set_number||Number(a.point)-Number(b.point));
  const currentPos=Math.max(0,visible.findIndex(x=>x.id===p?.id));
@@ -621,7 +624,7 @@ function VerificationModal({p,idx,total,points,close,setIdx,condition,setConditi
  const goVisible=delta=>{if(!visible.length)return;const n=Math.min(visible.length-1,Math.max(0,currentPos+delta));const ni=points.findIndex(x=>x.id===visible[n].id);if(ni>=0)setIdx(ni)};
  const conditions=[...new Set(points.map(x=>`${x.power} · ${x.time}`).filter(Boolean))];
  const wafers=[...new Set(points.map(x=>x.wafer).filter(v=>v!==undefined&&v!==null&&String(v)!==""))].sort((a,b)=>Number(a)-Number(b));
- return <div className="verificationOverlay" onClick={close}><div ref={dialogRef} className="verificationModal" role="dialog" aria-modal="true" aria-label="결과 검증" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>결과 검증</b><div className="verificationHeadTools"><span>{visible.length} Point 선택됨</span><button className="secondary" onClick={recalculateSavedHumanRois}><RotateCcw size={14}/> 저장 ROI 전체 재계산</button><button className="secondary" onClick={close}>닫기</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point 탐색</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>플라즈마 조건<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">전체 조건</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>웨이퍼 위치<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">전체 위치</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>판정<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">전체 판정</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x,criterion,nThreshold);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>SET{x.set_number} P{Number(x.point)||i+1}</span><em>{safeText(x.power)} · {safeText(x.time)} · W{safeText(x.wafer)} · {safeText(x.substrate_type,"SiCN")}</em><small className="ex-nav-identity">{identityText(x)}</small><strong className={resultCssClass(r)}>{r}</strong></button>})}</div></aside><div className="verificationMain">{visible.length?<Review p={p} idx={currentPos} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={v=>human(v,visible.map(x=>x.id))} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} nThreshold={nThreshold} setNThreshold={setNThreshold}/>:<div className="emptyPanel"><b>조건에 맞는 Point가 없습니다</b><small>왼쪽 조건·위치·판정 필터를 변경하세요.</small></div>}</div></div></div></div>}
+ return <div className="verificationOverlay" onClick={close}><div ref={dialogRef} className="verificationModal" role="dialog" aria-modal="true" aria-label="결과 검증" onClick={e=>e.stopPropagation()}><div className="verificationModalHead"><b>결과 검증</b><div className="verificationHeadTools"><span>{visible.length} Point 선택됨</span><button className="secondary" onClick={recalculateSavedHumanRois}><RotateCcw size={14}/> 저장 ROI 전체 재계산</button><button className="secondary" onClick={close}>닫기</button></div></div><div className="verificationWorkspace"><aside className="verificationQueue"><div className="verificationQueueTitle"><b>Point 탐색</b><small>조건 / 웨이퍼 / 결과별 Point 선택</small></div><label>플라즈마 조건<select value={condition} onChange={e=>setCondition(e.target.value)}><option value="ALL">전체 조건</option>{conditions.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>웨이퍼 위치<select value={wafer} onChange={e=>setWafer(e.target.value)}><option value="ALL">전체 위치</option>{wafers.map(w=><option key={w} value={String(w)}>W{w}</option>)}</select></label><label>판정<select value={resultFilter} onChange={e=>setResultFilter(e.target.value)}><option value="ALL">전체 판정</option><option value="Residue">Residue</option><option value="Ambiguous">Ambiguous</option><option value="Non-residue">Non-residue</option></select></label><div className="verificationQueueCount">{visible.length} / {points.length} points</div><div className="verificationPointList">{visible.map((x,i)=>{const gi=points.findIndex(y=>y.id===x.id);const r=verificationResult(x,criterion,nThreshold,cThreshold,oThreshold);return <button key={x.id} className={`verificationPointItem ${gi===idx?"active":""}`} onClick={()=>setIdx(gi)}><span>SET{x.set_number} P{Number(x.point)||i+1}</span><em>{safeText(x.power)} · {safeText(x.time)} · W{safeText(x.wafer)} · {safeText(x.substrate_type,"SiCN")}</em><small className="ex-nav-identity">{identityText(x)}</small><strong className={resultCssClass(r)}>{r}</strong></button>})}</div></aside><div className="verificationMain">{visible.length?<Review p={p} idx={currentPos} total={visible.length||total} prev={()=>goVisible(-1)} next={()=>goVisible(1)} human={v=>human(v,visible.map(x=>x.id))} saveHumanRoi={saveHumanRoi} criterion={criterion} setCriterion={setCriterion} cThreshold={cThreshold} setCThreshold={setCThreshold} nThreshold={nThreshold} setNThreshold={setNThreshold} oThreshold={oThreshold} setOThreshold={setOThreshold}/>:<div className="emptyPanel"><b>조건에 맞는 Point가 없습니다</b><small>왼쪽 조건·위치·판정 필터를 변경하세요.</small></div>}</div></div></div></div>}
 
 function ImageWithFallback({sources,alt,className="",...props}){
  const list=[...new Set((Array.isArray(sources)?sources:[sources]).map(normalizeAssetValue).filter(Boolean))];

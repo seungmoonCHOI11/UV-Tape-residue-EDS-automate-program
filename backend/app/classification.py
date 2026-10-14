@@ -3,8 +3,8 @@
 Human verification remains the final ground truth. Automatic labels and scores can
 be evaluated with one of three screening criteria without rewriting stored data:
 - co: C AND O (legacy/current production rule)
-- cno: C AND N AND O (exploratory elemental-combination screening across substrates)
-- c_n_or_o: C AND (N OR O) (exploratory elemental-combination screening across substrates)
+- cno: C AND N AND O
+- cn: C AND N
 """
 from __future__ import annotations
 
@@ -15,11 +15,13 @@ C_RESIDUE_RATIO = 2.40
 O_RESIDUE_RATIO = 3.00
 N_RESIDUE_RATIO = 2.40
 MODERATE_RATIO = 2.00
-VALID_CRITERIA = {"co", "cno", "c_n_or_o"}
+VALID_CRITERIA = {"co", "cno", "cn"}
 
 
 def normalize_criterion(value: Any) -> str:
     key = str(value or "co").strip().lower()
+    if key == "c_n_or_o":  # legacy UI id from v23.9.16-v23.9.19
+        key = "cn"
     return key if key in VALID_CRITERIA else "co"
 
 
@@ -38,37 +40,45 @@ def element_ratio_score(ratio: float, strong_ratio: float) -> float:
     return min(100.0, 70.0 + 30.0 * max(0.0, normalized))
 
 
-def criterion_score(c_ratio: float, n_ratio: Optional[float], o_ratio: float, criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> Optional[float]:
+def criterion_score(c_ratio: float, n_ratio: Optional[float], o_ratio: Optional[float], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> Optional[float]:
     criterion = normalize_criterion(criterion)
-    c_score = element_ratio_score(c_ratio, C_RESIDUE_RATIO)
-    o_score = element_ratio_score(o_ratio, O_RESIDUE_RATIO)
+    c_score = element_ratio_score(c_ratio, c_threshold)
     if criterion == "co":
-        return min(c_score, o_score)
+        if o_ratio is None:
+            return None
+        return min(c_score, element_ratio_score(o_ratio, o_threshold))
     if n_ratio is None:
         return None
     n_score = element_ratio_score(n_ratio, n_threshold)
-    if criterion == "cno":
-        return min(c_score, n_score, o_score)
-    # C AND (N OR O): C is mandatory, N/O use the stronger supporting branch.
-    return min(c_score, max(n_score, o_score))
+    if criterion == "cn":
+        return min(c_score, n_score)
+    if o_ratio is None:
+        return None
+    return min(c_score, n_score, element_ratio_score(o_ratio, o_threshold))
 
 
-def criterion_result(c_ratio: float, n_ratio: Optional[float], o_ratio: float, criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> Optional[str]:
+def criterion_result(c_ratio: float, n_ratio: Optional[float], o_ratio: Optional[float], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> Optional[str]:
     criterion = normalize_criterion(criterion)
-    c, o = float(c_ratio), float(o_ratio)
+    c = float(c_ratio)
     if criterion == "co":
-        strong = c >= C_RESIDUE_RATIO and o >= O_RESIDUE_RATIO
+        if o_ratio is None:
+            return None
+        o = float(o_ratio)
+        strong = c >= c_threshold and o >= o_threshold
         moderate = c >= MODERATE_RATIO and o >= MODERATE_RATIO
     else:
         if n_ratio is None:
             return None
         n = float(n_ratio)
-        if criterion == "cno":
-            strong = c >= C_RESIDUE_RATIO and n >= n_threshold and o >= O_RESIDUE_RATIO
-            moderate = c >= MODERATE_RATIO and n >= MODERATE_RATIO and o >= MODERATE_RATIO
+        if criterion == "cn":
+            strong = c >= c_threshold and n >= n_threshold
+            moderate = c >= MODERATE_RATIO and n >= MODERATE_RATIO
         else:
-            strong = c >= C_RESIDUE_RATIO and (n >= n_threshold or o >= O_RESIDUE_RATIO)
-            moderate = c >= MODERATE_RATIO and (n >= MODERATE_RATIO or o >= MODERATE_RATIO)
+            if o_ratio is None:
+                return None
+            o = float(o_ratio)
+            strong = c >= c_threshold and n >= n_threshold and o >= o_threshold
+            moderate = c >= MODERATE_RATIO and n >= MODERATE_RATIO and o >= MODERATE_RATIO
     if strong:
         return "Residue"
     if moderate:
@@ -105,7 +115,7 @@ def feature_element_ratios(features: Optional[Dict[str, Any]], prefer_human: boo
         c = _number(f.get("human_c_ratio"))
         n = _number(f.get("human_n_ratio"))
         o = _number(f.get("human_o_ratio"))
-        if c is not None and o is not None:
+        if c is not None and (n is not None or o is not None):
             return c, n, o, "human_roi"
 
     def ratio(prefix: str) -> Optional[float]:
@@ -133,11 +143,11 @@ def feature_ratios(features: Optional[Dict[str, Any]], prefer_human: bool = True
     return c, o, src
 
 
-def auto_result(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> str:
+def auto_result(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> str:
     f = record.get("features") or {}
     c, n, o, _ = feature_element_ratios(f, prefer_human=True)
     if c is not None and o is not None:
-        result = criterion_result(c, n, o, criterion, n_threshold)
+        result = criterion_result(c, n, o, criterion, n_threshold, c_threshold, o_threshold)
         if result is not None:
             return result
         # Missing N under an N-dependent criterion is a review case, never a false negative.
@@ -147,19 +157,19 @@ def auto_result(record: Dict[str, Any], criterion: str = "co", n_threshold: floa
     return "Ambiguous" if fallback in (None, "Review") else str(fallback)
 
 
-def record_result(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> str:
+def record_result(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> str:
     """Human verified label wins; otherwise evaluate the selected automatic rule."""
     human = record.get("human_result")
     if human:
         return str(human)
-    return auto_result(record, criterion, n_threshold)
+    return auto_result(record, criterion, n_threshold, c_threshold, o_threshold)
 
 
-def record_score(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> Optional[float]:
+def record_score(record: Dict[str, Any], criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> Optional[float]:
     """Screening score on 0-100 scale for the selected criterion."""
     c, n, o, _ = feature_element_ratios(record.get("features") or {}, prefer_human=True)
     if c is not None and o is not None:
-        live = criterion_score(c, n, o, criterion, n_threshold)
+        live = criterion_score(c, n, o, criterion, n_threshold, c_threshold, o_threshold)
         if live is not None:
             return round(live, 1)
         if normalize_criterion(criterion) != "co":
@@ -171,13 +181,13 @@ def record_score(record: Dict[str, Any], criterion: str = "co", n_threshold: flo
     return round(raw * 100.0 if raw <= 1.000001 else raw, 1)
 
 
-def criterion_rule_text(criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO) -> str:
+def criterion_rule_text(criterion: str = "co", n_threshold: float = N_RESIDUE_RATIO, c_threshold: float = C_RESIDUE_RATIO, o_threshold: float = O_RESIDUE_RATIO) -> str:
     criterion = normalize_criterion(criterion)
     if criterion == "cno":
-        return f"C >= {C_RESIDUE_RATIO:.2f}x AND N >= {n_threshold:.2f}x AND O >= {O_RESIDUE_RATIO:.2f}x -> Residue; all three >= {MODERATE_RATIO:.2f}x but a strong gate unmet -> Ambiguous; otherwise Non-residue."
-    if criterion == "c_n_or_o":
-        return f"C >= {C_RESIDUE_RATIO:.2f}x AND (N >= {n_threshold:.2f}x OR O >= {O_RESIDUE_RATIO:.2f}x) -> Residue; C >= {MODERATE_RATIO:.2f}x and (N or O) >= {MODERATE_RATIO:.2f}x but a strong gate unmet -> Ambiguous; otherwise Non-residue."
-    return f"C >= {C_RESIDUE_RATIO:.2f}x AND O >= {O_RESIDUE_RATIO:.2f}x -> Residue; both >= {MODERATE_RATIO:.2f}x but either strong gate unmet -> Ambiguous; otherwise Non-residue."
+        return f"C >= {c_threshold:.2f}x AND N >= {n_threshold:.2f}x AND O >= {o_threshold:.2f}x -> Residue; all three >= {MODERATE_RATIO:.2f}x but a strong gate unmet -> Ambiguous; otherwise Non-residue."
+    if criterion == "cn":
+        return f"C >= {c_threshold:.2f}x AND N >= {n_threshold:.2f}x -> Residue; both >= {MODERATE_RATIO:.2f}x but a strong gate unmet -> Ambiguous; otherwise Non-residue."
+    return f"C >= {c_threshold:.2f}x AND O >= {o_threshold:.2f}x -> Residue; both >= {MODERATE_RATIO:.2f}x but either strong gate unmet -> Ambiguous; otherwise Non-residue."
 
 
 CLASSIFICATION_RULE_TEXT = criterion_rule_text("co")

@@ -139,8 +139,8 @@ def metadata(p,basis,criterion="co",n_threshold=2.40):
 
 def point_page(doc,p,opts,assets):
     line,c,n,o,src=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
-    result=decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
-    sc=score(p,opts.cohort.criterion,opts.cohort.n_threshold)
+    result=decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)
+    sc=score(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)
     doc.page(f"{condition(p)}   W{p.get('wafer')} / P{p.get('point')}",f"{substrate(p)} | {POSITIONS.get(integer(p.get('wafer')),'Other')} | {result} | {opts.cohort.basis.upper()} decision basis")
     f=p.get('features') or {};polygons=(f.get('human_roi_polygons') or f.get('human_roi_polygon')) if opts.include_verification else None
     # Keep v23.9.14/15 one-page composition, adding N beside C/O without reducing the main SEM/EDS evidence.
@@ -162,24 +162,24 @@ def gallery_page(doc,key,pts,opts,assets,start,total):
         x=.35+(i%cols)*cw;y=1.26+(i//cols)*ch
         doc.image(assets.get(p,'sem'),x+.045,y,cw-.14,ch-.56)
         doc.text(x+.045,y+ch-.52,cw-.13,.16,f"{p.get('power')} {p.get('time')} | W{p.get('wafer')} P{p.get('point')}",8,bold=True)
-        doc.text(x+.045,y+ch-.34,cw-.13,.15,f"Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold))} | {str(p.get('id',''))[:10]}",7,color=MUTED)
+        doc.text(x+.045,y+ch-.34,cw-.13,.15,f"Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold))} | {str(p.get('id',''))[:10]}",7,color=MUTED)
 
 def summary_pages(doc,records,opts):
     data=summary(records,opts.cohort)
     doc.page(opts.title,'Condition / location evaluation | W1 Corner, W4 Edge, W5 Middle | W9 reference evaluated separately')
     doc.text(.4,1.45,12,1.0,'Plasma activation and UV tape residue screening',27,bold=True)
     doc.text(.4,2.5,11.9,1.1,'SEM morphology and the selected C/N/O enrichment rule support a residue screening decision.\nResidue denotes the configured screening class; it is not source-specific chemical identification.',17,color=MUTED)
-    st=stats(records,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
+    st=stats(records,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)
     doc.table(['Selected points','Residue','Non-residue','Ambiguous','Human verified'],[[str(st[k]) for k in ['n','residue','non','ambiguous','verified']]],.4,3.9,[2.5]*5,row_h=.65,size=15)
     doc.text(.4,5.5,12,1.25,f"Scope: {opts.cohort.scope} | Decision basis: {opts.cohort.basis}\nRate = residue points / observed points. Ambiguous remains in denominator.\nPooled location rates reflect condition mix. Balanced rates equally weight common conditions.\nSelected-rule score is a screening index, not probability, chemical concentration or removal efficiency.",12,color=MUTED)
     # Three automatic rules are always reported in parallel for screening sensitivity.
     for sub in sorted({substrate(p) for p in records}):
         pts=[p for p in records if substrate(p)==sub]
         doc.page('Three-rule screening overview',f"Substrate: {sub} | Same {len(pts)} points | Human verification shown only as a reference")
-        labels={'co':'C AND O','cno':'C AND N AND O','c_n_or_o':'C AND (N OR O)'}
+        labels={'co':'C AND O','cno':'C AND N AND O','cn':'C AND N'}
         overview=[]
         for rule in AUTO_CRITERIA:
-            stx=auto_stats(pts,rule,opts.cohort.n_threshold)
+            stx=auto_stats(pts,rule,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)
             overview.append([labels[rule],f"{stx['residue']}/{stx['n']}",str(stx['non']),str(stx['ambiguous']),percent(stx['rate']),'-' if rule=='co' else f"{stx['n_available']}/{stx['n']}",percent(stx['agreement'])])
         doc.table(['Auto rule','Residue / n','Non','Amb.','Residue %','N available','Human agreement'],overview,.35,1.35,[2.45,1.55,1.0,1.0,1.45,1.45,2.25],row_h=.62,size=11)
         doc.text(.4,4.55,12.2,.8,'All three rows are recomputed from the same stored C/N/O ROI/Global ratios. Human agreement is descriptive agreement on verified points, not model accuracy.',10,color=MUTED)
@@ -188,17 +188,17 @@ def summary_pages(doc,records,opts):
         if opts.cohort.wafers is not None:ws=[w for w in ws if w in opts.cohort.wafers]
         for start in range(0,len(keys),5):
             chunk=keys[start:start+5]
-            doc.page('Condition x location x rule',f"Substrate: {sub} | Automatic screening only | N threshold {opts.cohort.n_threshold:.2f}x")
+            doc.page('Condition x location x rule',f"Substrate: {sub} | Automatic screening only | C/N/O threshold {opts.cohort.c_threshold:.2f}/{opts.cohort.n_threshold:.2f}/{opts.cohort.o_threshold:.2f}x")
             headers=['Condition','Rule']+[f"W{w} {POSITIONS.get(w,'Other')}" for w in ws]+['Overall']
             widths=[2.0,1.65]+[6.2/max(1,len(ws))]*len(ws)+[1.35]
             table_rows=[]
             for key in chunk:
                 a=[p for p in pts if condition(p)==key]
                 for rule in AUTO_CRITERIA:
-                    row=[key,{'co':'C·O','cno':'C·N·O','c_n_or_o':'C·(N or O)'}[rule]]
+                    row=[key,{'co':'C·O','cno':'C·N·O','cn':'C·N'}[rule]]
                     for w in ws:
-                        z=auto_stats([p for p in a if integer(p.get('wafer'))==w],rule,opts.cohort.n_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
-                    z=auto_stats(a,rule,opts.cohort.n_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
+                        z=auto_stats([p for p in a if integer(p.get('wafer'))==w],rule,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
+                    z=auto_stats(a,rule,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold);row.append(f"{percent(z['rate'])}\n{z['residue']}/{z['n']}" if z['n'] else '-')
                     table_rows.append(row)
             doc.table(headers,table_rows,.35,1.32,widths,row_h=.34,size=8)
             doc.text(.4,6.55,12.2,.28,'Rate = automatic Residue points / observed points. Ambiguous remains in the denominator.',9,color=MUTED)
@@ -232,7 +232,7 @@ def comparison_page(doc,records,opts,assets):
         for j,key in enumerate(maps):
             y=1.95+j*height;doc.text(x+.06,y-.15,width-.12,.15,key.replace('_map','').upper(),8,bold=True)
             doc.image(assets.get(p,key),x+.06,y,width-.12,height-.25)
-        doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)} | Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold))}",9,bold=True)
+        doc.text(x+.06,6.45,width-.12,.22,f"{decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)} | Score {textnum(score(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold))}",9,bold=True)
         doc.text(x+.06,6.75,width-.12,.2,f"{substrate(p)} | C {textnum(c)}x | N {textnum(n)}x | O {textnum(o)}x",9,color=MUTED)
 
 def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
@@ -242,7 +242,7 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     def page_ready():
         nonlocal doc,part
         if doc is None:
-            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}',footer_text=f"SEM / EDS screening | {criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold)}");doc.page_offset=done
+            part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}',footer_text=f"SEM / EDS screening | {criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)}");doc.page_offset=done
     def flush():
         nonlocal doc
         if doc is not None:outputs.append(doc.save());doc=None;assets.clear_downloads()
@@ -279,13 +279,13 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     for part_file in outputs:part_file.unlink()
     outputs=[final]
     # Always deliver an audit manifest and original-SEM hashes alongside the outputs.
-    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold),'all_auto_rules':{r:criterion_rule_text(r,opts.cohort.n_threshold) for r in AUTO_CRITERIA},'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
+    audit={'created_at':datetime.now(timezone.utc).isoformat(),'options':opts.model_dump(),'point_ids':[p['id'] for p in records],'identities':{p['id']:p.get('research_identity') or {} for p in records},'n':len(records),'pages':total,'rule':criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),'all_auto_rules':{r:criterion_rule_text(r,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold) for r in AUTO_CRITERIA},'source_note':'Original means stored SEM extracted from source PDF. No overlay, enhancement or crop added in gallery.','missing_assets':assets.missing,'sem_sha256':assets.hashes,'page_index':manifest}
     (folder/'manifest.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf8')
     with (folder/'points.csv').open('w',encoding='utf-8-sig',newline='') as f:
-        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Selected result','Human','Selected criterion','C ratio','N ratio','O ratio','Selected score','Score band','Auto C-O','Score C-O','Auto C-N-O','Score C-N-O','Auto C-(N or O)','Score C-(N or O)','Sample ID','Repeat','Measured on','Batch label'])
+        writer=csv.writer(f);writer.writerow(['Point ID','Batch','Condition','Wafer','Position','Point','Substrate','Selected result','Human','Selected criterion','C ratio','N ratio','O ratio','Selected score','Score band','Auto C-O','Score C-O','Auto C-N-O','Score C-N-O','Auto C-N','Score C-N','Sample ID','Repeat','Measured on','Batch label'])
         for p in records:
             _,c,n,o,_=metadata(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)
-            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold),label(p.get('human_result')) or '',opts.cohort.criterion,c,n,o,score(p,opts.cohort.criterion,opts.cohort.n_threshold),band(p,opts.cohort.criterion,opts.cohort.n_threshold),auto_result(p,'co',opts.cohort.n_threshold),score(p,'co',opts.cohort.n_threshold),auto_result(p,'cno',opts.cohort.n_threshold),score(p,'cno',opts.cohort.n_threshold),auto_result(p,'c_n_or_o',opts.cohort.n_threshold),score(p,'c_n_or_o',opts.cohort.n_threshold),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
+            row=[p['id'],p.get('project_id'),condition(p),p.get('wafer'),POSITIONS.get(integer(p.get('wafer')),'Other'),p.get('point'),substrate(p),decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),label(p.get('human_result')) or '',opts.cohort.criterion,c,n,o,score(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),band(p,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),auto_result(p,'co',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),score(p,'co',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),auto_result(p,'cno',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),score(p,'cno',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),auto_result(p,'cn',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),score(p,'cn',opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold),*((p.get('research_identity') or {}).get(k,'') for k in ['sample_id','repeat_index','measured_on','batch_label'])]
             writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in row])
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
@@ -307,7 +307,7 @@ def render_export(records,opts,folder,storage=None,progress=lambda **x:None):
         return _render_parts(records,opts,folder,storage,progress)
     import shutil
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
-    groups=[(label,[p for p in records if decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold)==label]) for label in RESULTS]
+    groups=[(label,[p for p in records if decision(p,opts.cohort.basis,opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)==label]) for label in RESULTS]
     groups=[(label,pts) for label,pts in groups if pts]
     results=[];audits=[];outputs=[]
     for index,(label,pts) in enumerate(groups):
