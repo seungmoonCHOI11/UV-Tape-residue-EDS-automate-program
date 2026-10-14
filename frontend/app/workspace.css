@@ -87,7 +87,7 @@ button,input,select,textarea{font-family:inherit}button{transition:background .1
 
 .criterionThreshold.compact{padding:8px 0 4px}.criterionThreshold.compact label{font-size:10px}.criterionChooser .criterionThreshold.compact input{width:64px}
 
-/* v23.9.23 · Verification decision card compact alignment */
+/* v23.9.24 · Verification decision card compact alignment */
 .criterionChooser>.criterionRuleButtons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .criterionChooser>.criterionThreshold.compact{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:7px!important;padding:10px 0 2px!important;align-items:stretch!important}
 .criterionChooser>.criterionThreshold.compact>label{display:flex!important;flex-direction:column!important;align-items:stretch!important;justify-content:flex-start;gap:5px!important;min-width:0;margin:0!important;padding:7px 7px 6px;border:1px solid #e1e7ef;border-radius:7px;background:#fff;color:#60748d}
@@ -115,3 +115,40 @@ button,input,select,textarea{font-family:inherit}button{transition:background .1
  .criterionChooser>.criterionThreshold.compact{grid-template-columns:repeat(3,minmax(0,1fr))!important}
  .analysisResultCard .ratioFocus.ratioFocusThree{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
+
+/* v23.9.24 · wider Verification evidence panel + clean ratio status cards */
+.verificationModal{width:min(1600px,98.5vw)!important;max-height:97vh!important}
+.verificationWorkspace{grid-template-columns:230px minmax(0,1fr)!important}
+.verificationLayout{grid-template-columns:minmax(0,1fr) 360px!important;gap:18px!important}
+.analysisResultCard{padding:18px!important}
+.analysisResultCard .criterionChooser{padding:13px!important;margin:10px 0 12px!important}
+.analysisResultCard .criterionChooser>span{line-height:1.5!important}
+.analysisResultCard .decisionBasis{margin:10px 0 13px!important;padding:9px 11px;background:#f8fafc;border-radius:7px;color:#66778b}
+.analysisResultCard .ratioSection{margin-top:2px}
+.analysisResultCard .ratioSectionHead{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin:0 1px 8px}
+.analysisResultCard .ratioSectionHead>b{font-size:11px;color:#314861;font-weight:750;white-space:nowrap}
+.analysisResultCard .ratioSectionHead>small{font-size:8px!important;color:#8190a2;text-align:right;line-height:1.35}
+.analysisResultCard .ratioFocus.ratioFocusThree{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.analysisResultCard .ratioFocus.ratioFocusThree>.ratioElementCard{position:relative;min-width:0;padding:11px 9px 10px;background:#f9fbfd;border:1px solid #dce5f0;border-top-width:3px;overflow:hidden}
+.analysisResultCard .ratioElementHead{display:flex;align-items:center;justify-content:space-between;gap:5px;min-width:0}
+.analysisResultCard .ratioElementHead>b{display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;margin:0;border-radius:6px;background:#e8eef7;color:#294b77;font-size:11px!important;font-weight:850!important}
+.analysisResultCard .ratioElementHead>span{display:block;min-width:0;font-size:8px!important;line-height:1.2;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+.analysisResultCard .ratioElementCard>strong{display:block;margin:10px 0 5px;font-size:25px;line-height:1;font-weight:700;letter-spacing:-.045em;white-space:nowrap;font-variant-numeric:tabular-nums}
+.analysisResultCard .ratioElementCard>small{display:block;font-size:8.5px!important;line-height:1.35;color:#75859a;white-space:nowrap}
+.analysisResultCard .ratioElementCard.ratio-residue{border-top-color:var(--residue);background:#fffafb}.analysisResultCard .ratioElementCard.ratio-residue>strong,.analysisResultCard .ratioElementCard.ratio-residue .ratioElementHead>span{color:var(--residue)}
+.analysisResultCard .ratioElementCard.ratio-ambiguous{border-top-color:var(--ambiguous);background:#fffdf7}.analysisResultCard .ratioElementCard.ratio-ambiguous>strong,.analysisResultCard .ratioElementCard.ratio-ambiguous .ratioElementHead>span{color:var(--ambiguous)}
+.analysisResultCard .ratioElementCard.ratio-non{border-top-color:var(--non);background:#f8fcfb}.analysisResultCard .ratioElementCard.ratio-non>strong,.analysisResultCard .ratioElementCard.ratio-non .ratioElementHead>span{color:var(--non)}
+.analysisResultCard .ratioElementCard.ratio-neutral{border-top-color:#aab4c0}.analysisResultCard .ratioElementCard.ratio-neutral>strong,.analysisResultCard .ratioElementCard.ratio-neutral .ratioElementHead>span{color:#718096}
+.analysisResultCard .ratioRuleNote{display:block!important;padding:12px!important;margin:14px 0 10px!important;border:1px solid #e1e7ee!important;border-radius:8px!important;background:#fafbfd!important}
+.analysisResultCard .ratioRuleFormula{padding-bottom:10px;margin-bottom:9px;border-bottom:1px solid #e5eaf0}
+.analysisResultCard .ratioRuleFormula>small{display:block;font-size:8.5px!important;color:#7b899a;margin-bottom:4px}
+.analysisResultCard .ratioRuleFormula>b{display:block;font-size:11px!important;line-height:1.5;color:#21364f!important;overflow-wrap:anywhere}
+.analysisResultCard .ratioRuleLegend{display:grid;gap:6px}
+.analysisResultCard .ratioRuleLegend>span{display:grid;grid-template-columns:7px auto 1fr;align-items:center;column-gap:6px;font-size:9px!important;line-height:1.35!important;color:#526479!important}
+.analysisResultCard .ratioRuleLegend i{width:7px;height:7px;border-radius:50%}
+.analysisResultCard .ratioRuleLegend span.residue i{background:var(--residue)}.analysisResultCard .ratioRuleLegend span.ambiguous i{background:var(--ambiguous)}.analysisResultCard .ratioRuleLegend span.non-residue i{background:var(--non)}
+.analysisResultCard .ratioRuleLegend span.residue{color:var(--residue)!important}.analysisResultCard .ratioRuleLegend span.ambiguous{color:var(--ambiguous)!important}.analysisResultCard .ratioRuleLegend span.non-residue{color:var(--non)!important}
+.analysisResultCard .ratioRuleLegend em{font-style:normal;color:#75859a;text-align:right;font-weight:400;min-width:0}
+@media(max-width:1250px){.verificationLayout{grid-template-columns:minmax(0,1fr) 330px!important}.verificationWorkspace{grid-template-columns:210px minmax(0,1fr)!important}}
+@media(max-width:1050px){.verificationWorkspace{grid-template-columns:1fr!important}.verificationLayout{grid-template-columns:1fr!important}.analysisResultCard .ratioSectionHead{align-items:flex-start;flex-direction:column}}
+@media(max-width:700px){.analysisResultCard .ratioFocus.ratioFocusThree{grid-template-columns:1fr!important}.analysisResultCard .ratioSectionHead>small{text-align:left}.analysisResultCard .ratioRuleLegend>span{grid-template-columns:7px auto;row-gap:2px}.analysisResultCard .ratioRuleLegend em{grid-column:2;text-align:left}}

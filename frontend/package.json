@@ -1,7 +1,7 @@
 {
   "name": "uv-tape-residue-eds-full-system",
   "private": true,
-  "version": "23.9.23",
+  "version": "23.9.24",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
