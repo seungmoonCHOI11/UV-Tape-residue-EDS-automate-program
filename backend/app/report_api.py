@@ -4,10 +4,54 @@ from pathlib import Path
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .research import ExportOptions,select,page_count,summary
+from .r2_storage import r2
 
 def install_report_routes(app,loader,analysis_slot,root):
     root=Path(root)/'_research_reports';root.mkdir(parents=True,exist_ok=True)
     jobs={};lock=threading.Lock();pending=queue.Queue();max_jobs=3
+    remote_prefix='workspace/research_reports'
+    def remote_key(jid,name): return f'{remote_prefix}/{jid}/{name}'
+    def mime_for(name):
+        suffix=Path(name).suffix.lower()
+        if suffix=='.pdf': return 'application/pdf'
+        if suffix=='.pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        if suffix=='.zip': return 'application/zip'
+        if suffix=='.json': return 'application/json'
+        if suffix=='.csv': return 'text/csv'
+        return 'application/octet-stream'
+    def persist_completed(jid,folder,result):
+        """Keep completed report downloads durable across Render restarts."""
+        if not r2.configured: return False
+        names=list(result.get('documents') or [])
+        bundle=result.get('file') or 'report_bundle.zip'
+        if bundle not in names: names.append(bundle)
+        for name in names:
+            path=folder/name
+            if path.is_file(): r2.upload_file(path,remote_key(jid,name),mime_for(name))
+        meta=folder/'result.json'
+        if meta.is_file(): r2.upload_file(meta,remote_key(jid,'result.json'),'application/json')
+        return True
+    def hydrate_result(jid,folder):
+        """Restore result metadata from durable storage after an instance reset."""
+        meta=folder/'result.json'
+        if meta.is_file():
+            try:return json.loads(meta.read_text(encoding='utf8'))
+            except (OSError,ValueError):pass
+        if not r2.configured:return None
+        try:
+            folder.mkdir(parents=True,exist_ok=True)
+            r2.download_file(remote_key(jid,'result.json'),meta)
+            return json.loads(meta.read_text(encoding='utf8'))
+        except Exception:
+            meta.unlink(missing_ok=True)
+            return None
+    def hydrate_file(jid,folder,name):
+        path=folder/name
+        if path.is_file():return path
+        if not r2.configured:return path
+        try:r2.download_file(remote_key(jid,name),path)
+        except Exception:pass
+        return path
     def update(jid,**data):
         with lock:jobs[jid].update(data)
     def cleanup():
@@ -26,7 +70,11 @@ def install_report_routes(app,loader,analysis_slot,root):
                         try:code=proc.wait(timeout=7200)
                         except subprocess.TimeoutExpired:proc.kill();proc.wait();raise RuntimeError('Report exceeded 2 hours; select fewer points.')
                     if code:raise RuntimeError('Report generation failed. Check backend report worker log.')
-                    result=json.loads((folder/'result.json').read_text());update(jid,status='completed',progress=100,message='Ready to download',**result)
+                    result=json.loads((folder/'result.json').read_text())
+                    durable=False
+                    try: durable=persist_completed(jid,folder,result)
+                    except Exception as exc: print(f'[research-report] durable upload {jid}: {exc}')
+                    update(jid,status='completed',progress=100,message='Ready to download',durable=durable,**result)
             except Exception as exc:
                 print(f'[research-report] {jid}: {exc}');update(jid,status='failed',message=str(exc))
             finally:
@@ -68,9 +116,10 @@ def install_report_routes(app,loader,analysis_slot,root):
         with lock:state=dict(jobs.get(jid) or {})
         folder=root/jid
         if not state:
-            if (folder/'result.json').exists():return {'id':jid,'status':'completed','progress':100,**json.loads((folder/'result.json').read_text())}
-            if folder.exists():return {'id':jid,'status':'interrupted','message':'Server restarted. Create the report again.'}
-            raise HTTPException(404,'Report expired or server storage reset. Create it again.')
+            result=hydrate_result(jid,folder)
+            if result is not None:return {'id':jid,'status':'completed','progress':100,'durable':bool(r2.configured),**result}
+            if folder.exists():return {'id':jid,'status':'interrupted','message':'Server restarted before report completion. Create the report again.'}
+            raise HTTPException(404,'Report not found. Create it again.')
         if state['status']=='running':
             try:state.update(json.loads((folder/'progress.json').read_text()))
             except (OSError,ValueError):pass
@@ -81,10 +130,10 @@ def install_report_routes(app,loader,analysis_slot,root):
         if state['status']!='completed':raise HTTPException(409,'Report is not complete.')
         if document is not None:
             if document not in state.get('documents',[]) or Path(document).name!=document:raise HTTPException(404,'Unknown document')
-            file=root/jid/document
-            if not file.is_file():raise HTTPException(410,'Report expired. Create it again.')
+            file=hydrate_file(jid,root/jid,document)
+            if not file.is_file():raise HTTPException(410,'Report file is unavailable. Create it again.')
             mime='application/pdf' if file.suffix=='.pdf' else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
             return FileResponse(file,filename=document,media_type=mime)
-        file=root/jid/'report_bundle.zip'
-        if not file.exists():raise HTTPException(410,'Report expired. Create it again.')
+        file=hydrate_file(jid,root/jid,'report_bundle.zip')
+        if not file.exists():raise HTTPException(410,'Report file is unavailable. Create it again.')
         return FileResponse(file,filename=f'EDS_{jid[:8]}_report.zip',media_type='application/zip')
