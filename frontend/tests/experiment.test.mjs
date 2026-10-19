@@ -55,3 +55,26 @@ test('manual experimental repeat index overrides automatic SET filling',()=>{
  assert.equal(out.find(p=>p.id==='1').set_number,1);
  assert.equal(out.find(p=>p.id==='2').set_number,4);
 });
+
+test('27 points per position merge across time and position uploads into two complete repeats',()=>{
+ const projects=[],points=[];
+ for(let repeat=1;repeat<=2;repeat++)for(const wafer of [1,4,5])for(const time of ['30s','60s','120s']){
+  const id=`batch-${projects.length}`;projects.push({id,created_at:String(projects.length).padStart(3,'0')});
+  for(let point=1;point<=9;point++)points.push({id:`${id}-${point}`,project_id:id,power:'250W',time,wafer,point,substrate_type:'SiCN',expected:repeat});
+ }
+ const out=assignSets(points,projects);
+ assert.equal(out.length,162);assert(out.every(p=>p.set_number===p.expected));
+ assert.deepEqual(assignSets([...points].reverse(),projects).map(p=>[p.id,p.set_number]).sort(),out.map(p=>[p.id,p.set_number]).sort());
+});
+
+test('partial P uploads fill empty slots and keep repeated slots distinct',()=>{
+ const mk=(id,point)=>({id:`${id}-${point}`,project_id:id,power:'250W',time:'30s',wafer:1,point});
+ const out=assignSets([mk('a',1),mk('b',2),mk('c',1)],[{id:'a'},{id:'b'},{id:'c'}]);
+ assert.deepEqual(out.map(p=>p.set_number),[1,1,2]);
+});
+
+test('explicit repeats reserve their slots before automatic uploads',()=>{
+ const mk=id=>({id,project_id:id,power:'250W',time:'30s',wafer:1,point:1});
+ const out=assignSets([mk('a'),mk('b')],[{id:'a'},{id:'b',research_identity:{repeat_index:1}}]);
+ assert.deepEqual(out.map(p=>p.set_number),[2,1]);
+});

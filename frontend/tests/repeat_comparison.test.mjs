@@ -55,3 +55,15 @@ test('same logical SET can combine records from more than one upload batch',()=>
  assert.equal(g.sets[0].batches.length,2);
  assert.equal(g.sets[0].n,2);
 });
+
+test('location overview keeps corner edge and middle separate',()=>{
+ const groups=buildSetOverview([p('a',1,1,1,'Residue'),p('b',1,4,1,'Non-residue'),p('c',1,5,1,'Ambiguous')],'final',true);
+ assert.equal(groups.length,3);
+ assert.deepEqual(groups.map(g=>g.wafer),[1,4,5]);
+ assert.deepEqual(groups.map(g=>g.sets[0].rate),[100,0,0]);
+});
+
+test('duplicate slots are excluded from paired agreement',()=>{
+ const g=buildRepeatComparison([p('a',1,1,1,'Residue'),p('b',1,1,1,'Non-residue'),p('c',2,1,1,'Residue')])[0];
+ assert.equal(g.sets[0].duplicates,1);assert.equal(g.comparisons[0].paired,0);
+});

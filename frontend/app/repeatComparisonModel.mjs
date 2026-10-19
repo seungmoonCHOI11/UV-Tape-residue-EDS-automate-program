@@ -41,7 +41,7 @@ export function buildRepeatComparison(points,basis='final'){
   const wafers=[...new Set(pts.map(p=>Number(p.wafer)))].sort((a,b)=>waferOrder(a)-waferOrder(b));
   const baseline=sets[0];
   const comparisons=baseline?sets.slice(1).map(s=>{
-   const common=[...baseline.slots.keys()].filter(k=>s.slots.has(k));
+   const common=[...baseline.slots.keys()].filter(k=>baseline.slots.get(k).length===1&&s.slots.get(k)?.length===1);
    let same=0,gained=0,lost=0;
    for(const k of common){
     const a=baseline.slots.get(k)[0],b=s.slots.get(k)[0],da=decision(a,basis),db=decision(b,basis);
@@ -56,10 +56,10 @@ export function buildRepeatComparison(points,basis='final'){
 }
 
 /* High-level SET x Time summary shown before the point-level matrices. */
-export function buildSetOverview(points,basis='final'){
+export function buildSetOverview(points,basis='final',byLocation=false){
  const grouped=new Map();
  for(const p of points){
-  const key=`${substrate(p)}|${powerOf(p)}`;
+  const key=`${substrate(p)}|${powerOf(p)}${byLocation?`|W${p.wafer}`:''}`;
   if(!grouped.has(key))grouped.set(key,[]);
   grouped.get(key).push(p);
  }
@@ -71,7 +71,7 @@ export function buildSetOverview(points,basis='final'){
    const cells=times.map(time=>({time,points:setPoints.filter(p=>timeOf(p)===time),...resultCounts(setPoints.filter(p=>timeOf(p)===time),basis)}));
    return {number,points:setPoints,cells,...resultCounts(setPoints,basis),coverage:cells.filter(c=>c.n>0).length};
   });
-  return {key,substrate:substrate(pts[0]),power:powerOf(pts[0]),times,sets,points:pts};
+  return {key,substrate:substrate(pts[0]),power:powerOf(pts[0]),wafer:byLocation?Number(pts[0].wafer):null,times,sets,points:pts};
  }).sort((a,b)=>natural(a.substrate,b.substrate)||natural(a.power,b.power));
 }
 

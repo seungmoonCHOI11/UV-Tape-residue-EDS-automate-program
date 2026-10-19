@@ -19,54 +19,26 @@ const pointPower=p=>String(p?.power||'-').trim();
 const pointTime=p=>String(p?.time||'-').trim();
 const projectId=p=>String(p?.project_id||'unknown');
 
-/*
- * Logical SET assignment (v23.9.29)
- *
- * A SET is an experimental cycle, not an upload count. Within the same
- * substrate + Power family, different Time conditions fill the same SET as
- * long as that SET does not already contain the same Time condition.
- *
- * Example:
- *   upload A: 250W 30/60/120s -> SET1
- *   upload B: 250W 30s        -> SET2
- *   upload C: 250W 60s        -> SET2
- *   upload D: 250W 120s       -> SET2
- *
- * This also repairs historical workspaces at display time; no re-analysis is
- * required. A manually saved research_identity.repeat_index is treated as an
- * explicit override for that upload.
+/* SETs fill measurement slots, independent of upload boundaries.
+ * Allocate per project/time/position block to keep P1–P9 together.
+ * Explicit repeat identities reserve their slots before inferred assignments.
  */
-export function assignSets(points,projects){
+export function assignSets(points,projects=[]){
  const meta=new Map(projects.map(p=>[String(p.id),p])),entries=new Map();
+ const familyOf=p=>JSON.stringify([pointSubstrate(p),pointPower(p)]);
+ const keyOf=p=>JSON.stringify([familyOf(p),projectId(p),pointTime(p),String(p.wafer??'?')]);
+ const slotOf=p=>JSON.stringify([pointTime(p),String(p.wafer??'?'),String(p.point??'?')]);
  for(const p of points){
-  const pid=projectId(p),sub=pointSubstrate(p),power=pointPower(p),time=pointTime(p),family=`${sub}|${power}`,ekey=`${family}|${pid}`;
-  if(!entries.has(ekey))entries.set(ekey,{key:ekey,family,pid,sub,power,times:new Set(),createdAt:String(meta.get(pid)?.created_at||'')});
-  entries.get(ekey).times.add(time);
+  const key=keyOf(p),pid=projectId(p);
+  if(!entries.has(key))entries.set(key,{key,family:familyOf(p),pid,slots:new Set(),createdAt:String(meta.get(pid)?.created_at||''),manual:Number((meta.get(pid)?.research_identity||p.research_identity)?.repeat_index)});
+  entries.get(key).slots.add(slotOf(p));
  }
- const families=new Map();
- for(const e of entries.values()){if(!families.has(e.family))families.set(e.family,[]);families.get(e.family).push(e)}
- const assigned=new Map();
- for(const [family,items] of families){
-  const occupied=new Map();
-  const ordered=[...items].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.pid.localeCompare(b.pid));
-  for(const item of ordered){
-   const manual=Number(meta.get(item.pid)?.research_identity?.repeat_index);
-   let n=Number.isInteger(manual)&&manual>0?manual:null;
-   if(n==null){
-    n=1;
-    while(true){
-     const used=occupied.get(n)||new Set();
-     if([...item.times].every(t=>!used.has(t)))break;
-     n++;
-    }
-   }
-   if(!occupied.has(n))occupied.set(n,new Set());
-   for(const t of item.times)occupied.get(n).add(t);
-   assigned.set(item.key,n);
-  }
- }
- return points.map(p=>{
-  const pid=projectId(p),family=`${pointSubstrate(p)}|${pointPower(p)}`,n=assigned.get(`${family}|${pid}`)||1;
-  return {...p,set_number:n,set_family:family,research_identity:meta.get(pid)?.research_identity||p.research_identity||{}};
- });
+ const occupied=new Map(),assigned=new Map();
+ const used=(family,n)=>{const key=JSON.stringify([family,n]);if(!occupied.has(key))occupied.set(key,new Set());return occupied.get(key)};
+ const reserve=(e,n)=>{for(const slot of e.slots)used(e.family,n).add(slot);assigned.set(e.key,n)};
+ const manual=e=>Number.isInteger(e.manual)&&e.manual>0;
+ const ordered=[...entries.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.pid.localeCompare(b.pid)||a.key.localeCompare(b.key));
+ for(const e of ordered.filter(manual))reserve(e,e.manual);
+ for(const e of ordered.filter(e=>!manual(e))){let n=1;while([...e.slots].some(slot=>used(e.family,n).has(slot)))n++;reserve(e,n)}
+ return points.map(p=>({...p,set_number:assigned.get(keyOf(p))||1,set_family:familyOf(p),research_identity:meta.get(projectId(p))?.research_identity||p.research_identity||{}}));
 }
