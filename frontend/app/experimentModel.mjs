@@ -14,10 +14,59 @@ export function cleanPreset(raw){
  return {version:1,name:String(raw.name||'보고서 설정').trim().slice(0,80),kind:raw.kind,filters,splitByResult:raw.splitByResult===true,includeVerification:raw.includeVerification===true,perPage:[10,12,16,20].includes(raw.perPage)?raw.perPage:12,groupScores:raw.groupScores!==false,groupConditions:raw.groupConditions!==false};
 }
 
+const pointSubstrate=p=>p?.substrate_type||p?.features?.substrate_type||'Unknown';
+const pointPower=p=>String(p?.power||'-').trim();
+const pointTime=p=>String(p?.time||'-').trim();
+const projectId=p=>String(p?.project_id||'unknown');
+
+/*
+ * Logical SET assignment (v23.9.29)
+ *
+ * A SET is an experimental cycle, not an upload count. Within the same
+ * substrate + Power family, different Time conditions fill the same SET as
+ * long as that SET does not already contain the same Time condition.
+ *
+ * Example:
+ *   upload A: 250W 30/60/120s -> SET1
+ *   upload B: 250W 30s        -> SET2
+ *   upload C: 250W 60s        -> SET2
+ *   upload D: 250W 120s       -> SET2
+ *
+ * This also repairs historical workspaces at display time; no re-analysis is
+ * required. A manually saved research_identity.repeat_index is treated as an
+ * explicit override for that upload.
+ */
 export function assignSets(points,projects){
- const meta=new Map(projects.map(p=>[String(p.id),p])),groups=new Map();
- for(const p of points){const key=`${p.power} / ${p.time}`;if(!groups.has(key))groups.set(key,new Set());groups.get(key).add(String(p.project_id||'unknown'));}
- const indices=new Map();
- for(const [key,ids] of groups){const used=new Set();const ordered=[...ids].sort((a,b)=>String(meta.get(a)?.created_at||'').localeCompare(String(meta.get(b)?.created_at||''))||a.localeCompare(b));for(const id of ordered){const saved=Number(meta.get(id)?.repeat_no);let n=Number.isInteger(saved)&&saved>0&&!used.has(saved)?saved:Math.max(0,...used)+1;used.add(n);indices.set(`${key}|${id}`,n)}}
- return points.map(p=>({...p,set_number:indices.get(`${p.power} / ${p.time}|${p.project_id||'unknown'}`),research_identity:meta.get(String(p.project_id))?.research_identity||{}}));
+ const meta=new Map(projects.map(p=>[String(p.id),p])),entries=new Map();
+ for(const p of points){
+  const pid=projectId(p),sub=pointSubstrate(p),power=pointPower(p),time=pointTime(p),family=`${sub}|${power}`,ekey=`${family}|${pid}`;
+  if(!entries.has(ekey))entries.set(ekey,{key:ekey,family,pid,sub,power,times:new Set(),createdAt:String(meta.get(pid)?.created_at||'')});
+  entries.get(ekey).times.add(time);
+ }
+ const families=new Map();
+ for(const e of entries.values()){if(!families.has(e.family))families.set(e.family,[]);families.get(e.family).push(e)}
+ const assigned=new Map();
+ for(const [family,items] of families){
+  const occupied=new Map();
+  const ordered=[...items].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.pid.localeCompare(b.pid));
+  for(const item of ordered){
+   const manual=Number(meta.get(item.pid)?.research_identity?.repeat_index);
+   let n=Number.isInteger(manual)&&manual>0?manual:null;
+   if(n==null){
+    n=1;
+    while(true){
+     const used=occupied.get(n)||new Set();
+     if([...item.times].every(t=>!used.has(t)))break;
+     n++;
+    }
+   }
+   if(!occupied.has(n))occupied.set(n,new Set());
+   for(const t of item.times)occupied.get(n).add(t);
+   assigned.set(item.key,n);
+  }
+ }
+ return points.map(p=>{
+  const pid=projectId(p),family=`${pointSubstrate(p)}|${pointPower(p)}`,n=assigned.get(`${family}|${pid}`)||1;
+  return {...p,set_number:n,set_family:family,research_identity:meta.get(pid)?.research_identity||p.research_identity||{}};
+ });
 }

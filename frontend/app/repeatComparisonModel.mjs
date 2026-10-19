@@ -14,6 +14,8 @@ const resultCounts=(points,basis)=>{
 
 const waferOrder=w=>({1:1,4:2,5:3,9:4}[Number(w)]||100+Number(w));
 const slotKey=p=>`${Number(p.wafer)}|${Number(p.point)}`;
+const powerOf=p=>String(p?.power||'-');
+const timeOf=p=>String(p?.time||'-');
 
 export function buildRepeatComparison(points,basis='final'){
  const grouped=new Map();
@@ -25,14 +27,16 @@ export function buildRepeatComparison(points,basis='final'){
  return [...grouped.entries()].map(([key,pts])=>{
   const bySet=new Map();
   for(const p of pts){
-   const n=setNumber(p),batch=String(p.project_id||'unknown'),skey=`${n}|${batch}`;
-   if(!bySet.has(skey))bySet.set(skey,{number:n,batch,points:[]});
-   bySet.get(skey).points.push(p);
+   const n=setNumber(p);
+   if(!bySet.has(n))bySet.set(n,{number:n,points:[],batches:new Set()});
+   bySet.get(n).points.push(p);
+   bySet.get(n).batches.add(String(p.project_id||'unknown'));
   }
-  const sets=[...bySet.values()].sort((a,b)=>a.number-b.number||natural(a.batch,b.batch)).map(s=>{
+  const sets=[...bySet.values()].sort((a,b)=>a.number-b.number).map(s=>{
    const slots=new Map();
    for(const p of s.points){const k=slotKey(p);if(!slots.has(k))slots.set(k,[]);slots.get(k).push(p)}
-   return {...s,...resultCounts(s.points,basis),slots,duplicates:[...slots.values()].reduce((n,a)=>n+Math.max(0,a.length-1),0)};
+   const batches=[...s.batches].sort(natural);
+   return {...s,batches,batch:batches[0]||'unknown',...resultCounts(s.points,basis),slots,duplicates:[...slots.values()].reduce((n,a)=>n+Math.max(0,a.length-1),0)};
   });
   const wafers=[...new Set(pts.map(p=>Number(p.wafer)))].sort((a,b)=>waferOrder(a)-waferOrder(b));
   const baseline=sets[0];
@@ -47,8 +51,28 @@ export function buildRepeatComparison(points,basis='final'){
    }
    return {from:baseline.number,to:s.number,fromBatch:baseline.batch,toBatch:s.batch,paired:common.length,same,agreement:common.length?100*same/common.length:null,gained,lost,deltaRate:baseline.rate==null||s.rate==null?null:s.rate-baseline.rate};
   }):[];
-  return {key,substrate:substrate(pts[0]),condition:condition(pts[0]),points:pts,sets,wafers,comparisons};
+  return {key,substrate:substrate(pts[0]),condition:condition(pts[0]),power:powerOf(pts[0]),time:timeOf(pts[0]),points:pts,sets,wafers,comparisons};
  }).sort((a,b)=>natural(a.substrate,b.substrate)||natural(a.condition,b.condition));
+}
+
+/* High-level SET x Time summary shown before the point-level matrices. */
+export function buildSetOverview(points,basis='final'){
+ const grouped=new Map();
+ for(const p of points){
+  const key=`${substrate(p)}|${powerOf(p)}`;
+  if(!grouped.has(key))grouped.set(key,[]);
+  grouped.get(key).push(p);
+ }
+ return [...grouped.entries()].map(([key,pts])=>{
+  const times=[...new Set(pts.map(timeOf))].sort(natural);
+  const numbers=[...new Set(pts.map(setNumber))].sort((a,b)=>a-b);
+  const sets=numbers.map(number=>{
+   const setPoints=pts.filter(p=>setNumber(p)===number);
+   const cells=times.map(time=>({time,points:setPoints.filter(p=>timeOf(p)===time),...resultCounts(setPoints.filter(p=>timeOf(p)===time),basis)}));
+   return {number,points:setPoints,cells,...resultCounts(setPoints,basis),coverage:cells.filter(c=>c.n>0).length};
+  });
+  return {key,substrate:substrate(pts[0]),power:powerOf(pts[0]),times,sets,points:pts};
+ }).sort((a,b)=>natural(a.substrate,b.substrate)||natural(a.power,b.power));
 }
 
 export function repeatCell(set,wafer,point,basis='final'){

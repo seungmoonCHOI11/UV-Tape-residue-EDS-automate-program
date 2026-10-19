@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildRepeatComparison,repeatCell,setNumber} from '../app/repeatComparisonModel.mjs';
+import {buildRepeatComparison,buildSetOverview,repeatCell,setNumber} from '../app/repeatComparisonModel.mjs';
 
 const p=(id,set,wafer,point,result,batch=`b${set}`)=>({id,power:'150W',time:'30s',substrate_type:'SiCN',project_id:batch,set_number:set,wafer,point,_final:result,_auto:result,research_identity:{batch_label:`SET${set}`}});
 
@@ -32,4 +32,26 @@ test('saved set_number has priority and repeat_index is fallback',()=>{
  assert.equal(setNumber({set_number:2,research_identity:{repeat_index:9}}),2);
  assert.equal(setNumber({research_identity:{repeat_index:3}}),3);
  assert.equal(setNumber({}),1);
+});
+
+
+test('SET overview puts time conditions in columns and SETs in rows',()=>{
+ const mk=(id,set,time,result)=>({id,power:'250W',time,substrate_type:'SiCN',project_id:id,set_number:set,wafer:1,point:1,_final:result,_auto:result});
+ const points=[mk('a',1,'30s','Residue'),mk('b',1,'60s','Non-residue'),mk('c',1,'120s','Ambiguous'),mk('d',2,'30s','Non-residue'),mk('e',2,'60s','Residue')];
+ const o=buildSetOverview(points,'final')[0];
+ assert.deepEqual(o.times,['30s','60s','120s']);
+ assert.deepEqual(o.sets.map(s=>s.number),[1,2]);
+ assert.equal(o.sets[0].coverage,3);
+ assert.equal(o.sets[1].coverage,2);
+ assert.equal(o.sets[1].cells.find(c=>c.time==='120s').n,0);
+});
+
+test('same logical SET can combine records from more than one upload batch',()=>{
+ const a=p('a1',2,1,1,'Residue','batch-a');
+ const b=p('a2',2,1,2,'Non-residue','batch-b');
+ const g=buildRepeatComparison([a,b],'final')[0];
+ assert.equal(g.sets.length,1);
+ assert.equal(g.sets[0].number,2);
+ assert.equal(g.sets[0].batches.length,2);
+ assert.equal(g.sets[0].n,2);
 });
