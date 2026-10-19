@@ -18,11 +18,15 @@ def merge_documents(parts,target,fmt):
     if len(parts)==1:
         shutil.copyfile(parts[0],target);return
     if fmt=='pdf':
+        # Never build a hundreds-of-page image PDF in one PyMuPDF Document.
+        # Start from part 1, then append each small part and save incrementally.
+        # This keeps resident memory nearly independent of total Point count.
         import fitz
-        with fitz.open() as merged:
-            for path in parts:
-                with fitz.open(path) as source:merged.insert_pdf(source)
-            merged.save(target,garbage=3,deflate=True)
+        shutil.copyfile(parts[0],target)
+        for path in parts[1:]:
+            with fitz.open(target) as merged, fitz.open(path) as source:
+                merged.insert_pdf(source)
+                merged.saveIncr()
         return
     merge_pptx(parts,target)
 

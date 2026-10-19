@@ -1,10 +1,15 @@
 """Bounded report queue. Does not write points, labels or original assets."""
-import json,uuid,threading,queue,subprocess,sys,os,time,shutil
+import json,uuid,threading,queue,subprocess,sys,os,time,shutil,gc,ctypes
 from pathlib import Path
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from .research import ExportOptions,select,page_count,summary
 from .r2_storage import r2
+
+def _trim_memory():
+    gc.collect()
+    try: ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception: pass
 
 def install_report_routes(app,loader,analysis_slot,root):
     root=Path(root)/'_research_reports';root.mkdir(parents=True,exist_ok=True)
@@ -66,7 +71,8 @@ def install_report_routes(app,loader,analysis_slot,root):
                 with analysis_slot:
                     update(jid,status='running',message='Preparing report',progress=0)
                     with (folder/'worker.log').open('w') as log:
-                        proc=subprocess.Popen([sys.executable,'-m','app.report_worker',str(folder)],cwd=str(Path(__file__).resolve().parents[1]),stdout=log,stderr=log,env={**os.environ,'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1'})
+                        _trim_memory()
+                        proc=subprocess.Popen([sys.executable,'-m','app.report_worker',str(folder)],cwd=str(Path(__file__).resolve().parents[1]),stdout=log,stderr=log,env={**os.environ,'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','MKL_NUM_THREADS':'1','NUMEXPR_NUM_THREADS':'1','MALLOC_ARENA_MAX':'2'})
                         try:code=proc.wait(timeout=7200)
                         except subprocess.TimeoutExpired:proc.kill();proc.wait();raise RuntimeError('Report exceeded 2 hours; select fewer points.')
                     if code:raise RuntimeError('Report generation failed. Check backend report worker log.')
@@ -104,7 +110,12 @@ def install_report_routes(app,loader,analysis_slot,root):
             # Includes only selected persisted IDs. Snapshot locks labels and scores for this output.
             opts.cohort.point_ids=[str(p['id']) for p in records]
             (folder/'request.json').write_text(json.dumps({'records':records,'options':opts.model_dump()},ensure_ascii=False,default=str),encoding='utf8')
-            update(jid,status='queued',message='Queued',n=len(records),pages=page_count(records,opts),kind=opts.kind,format=opts.format)
+            selected_n=len(records);selected_pages=page_count(records,opts)
+            update(jid,status='queued',message='Queued',n=selected_n,pages=selected_pages,kind=opts.kind,format=opts.format)
+            # Do not overlap a full in-memory workspace snapshot in the API process
+            # with the isolated report renderer. The snapshot is now on disk.
+            del records
+            _trim_memory()
             pending.put(jid);return dict(jobs[jid])
         except HTTPException:
             update(jid,status='failed',message='No matching points');raise

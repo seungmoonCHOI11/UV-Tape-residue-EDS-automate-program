@@ -3,7 +3,7 @@ Original images are embedded with contain-fit, never cropped or enhanced.
 """
 from pathlib import Path
 from collections import defaultdict
-import csv, json, math, hashlib, zipfile
+import csv, json, math, hashlib, zipfile, gc, ctypes
 from io import BytesIO
 from datetime import datetime, timezone
 from PIL import Image
@@ -13,6 +13,14 @@ from .classification import feature_element_ratios, criterion_rule_text
 NAVY='#20334D'; MUTED='#687A91'; BLUE='#526BB5'; RED='#C15B64'; GREEN='#398E83'; AMBER='#D6A64E'; LIGHT='#F1F4F8'
 def textnum(v):return '-' if v is None else f'{v:.1f}'
 def percent(v):return textnum(v)+'%' if v is not None else '-'
+
+def _trim_memory():
+    """Best-effort return of Python/native image memory between report batches."""
+    gc.collect()
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
 def fit(iw,ih,x,y,w,h):
     scale=min(w/iw,h/ih);nw,nh=iw*scale,ih*scale
     return x+(w-nw)/2,y+(h-nh)/2,nw,nh
@@ -237,7 +245,14 @@ def comparison_page(doc,records,opts,assets):
 
 def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True);assets=Assets(folder/'assets',storage)
-    total=page_count(records,opts);outputs=[];manifest=[];done=0;max_pages=25 if opts.kind=='points' else 10
+    total=page_count(records,opts);outputs=[];manifest=[];done=0
+    # Point-detail exports embed 6 original evidence images per page. Keep the
+    # in-memory python-pptx / ReportLab document deliberately small; parts are
+    # merged afterwards by a streaming/bounded-memory merger.
+    if opts.kind=='points':
+        max_pages = 3 if opts.format=='pptx' else 4
+    else:
+        max_pages = 10
     doc=None;part=0
     def page_ready():
         nonlocal doc,part
@@ -245,7 +260,11 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
             part+=1;doc=Document(opts.format,folder/f'{opts.kind}_{part:03d}.{opts.format}',footer_text=f"SEM / EDS screening | {criterion_rule_text(opts.cohort.criterion,opts.cohort.n_threshold,opts.cohort.c_threshold,opts.cohort.o_threshold)}");doc.page_offset=done
     def flush():
         nonlocal doc
-        if doc is not None:outputs.append(doc.save());doc=None;assets.clear_downloads()
+        if doc is not None:
+            outputs.append(doc.save())
+            doc=None
+            assets.clear_downloads()
+            _trim_memory()
     if opts.kind=='summary':
         page_ready();summary_pages(doc,records,opts);done=total;flush()
     elif opts.kind=='comparison':
@@ -268,8 +287,11 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     # Parts are temporary working files; the delivered document is always merged.
     from .report_merge import merge_documents
     final=folder/f'{opts.kind}.{opts.format}'
-    progress(progress=96,message='최종 파일 통합 중')
+    part_count=len(outputs)
+    progress(progress=96,message=f'최종 파일 통합 중 · {part_count}개 저메모리 배치')
+    _trim_memory()
     merge_documents(outputs,final,opts.format)
+    _trim_memory()
     offsets={};offset=0
     for part_file in outputs:
         offsets[part_file.name]=offset
@@ -290,7 +312,7 @@ def _render_parts(records,opts,folder,storage=None,progress=lambda **x:None):
     archive=folder/'report_bundle.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
         for p in outputs+[folder/'manifest.json',folder/'points.csv']:z.write(p,p.name)
-    return {'file':archive.name,'n':len(records),'pages':total,'parts':len(outputs),'documents':[p.name for p in outputs],'missing_assets':len(assets.missing)}
+    return {'file':archive.name,'n':len(records),'pages':total,'parts':len(outputs),'render_batches':part_count,'documents':[p.name for p in outputs],'missing_assets':len(assets.missing)}
 
 
 def document_pages(path,fmt):
