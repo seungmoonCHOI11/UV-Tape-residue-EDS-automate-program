@@ -1,8 +1,12 @@
 import {SCREENING_CRITERIA,autoClass,criterionScore,normalizeResultLabel,pointRatios} from './screeningModel.mjs';
 import {condition,substrate,natural,LOCATIONS} from './researchModel.mjs';
 
-export function autoRuleStats(points,criterion,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
- const labels=points.map(p=>autoClass(p,criterion,nThreshold,cThreshold,oThreshold));
+export function comparisonLabel(p,criterion='co',basis='auto',nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
+ return (basis==='final'&&criterion==='co'?normalizeResultLabel(p?.human_result):null)||autoClass(p,criterion,nThreshold,cThreshold,oThreshold);
+}
+
+export function autoRuleStats(points,criterion,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00,basis='auto'){
+ const labels=points.map(p=>comparisonLabel(p,criterion,basis,nThreshold,cThreshold,oThreshold));
  const n=points.length,residue=labels.filter(x=>x==='Residue').length,ambiguous=labels.filter(x=>x==='Ambiguous').length,non=n-residue-ambiguous;
  const verified=points.filter(p=>normalizeResultLabel(p?.human_result));
  const agreement=verified.length?100*verified.filter(p=>autoClass(p,criterion,nThreshold,cThreshold,oThreshold)===normalizeResultLabel(p.human_result)).length/verified.length:null;
@@ -34,24 +38,24 @@ export function ruleTransitions(points,nThreshold=2.40,baseline='co',cThreshold=
  });
 }
 
-export function buildRuleStrata(points,filters,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
+export function buildRuleStrata(points,filters,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00,basis='auto'){
  return [...new Set(points.map(substrate))].sort(natural).map(sub=>{
   const pts=points.filter(p=>substrate(p)===sub);
   const ws=filters.scope==='main'?[1,4,5].filter(w=>filters.wafers===null||filters.wafers.includes(w)):[...new Set(pts.map(p=>Number(p.wafer)))].sort((a,b)=>a-b);
   const conditionRows=[...new Set(pts.map(condition))].sort(natural).map(key=>{
    const a=pts.filter(p=>condition(p)===key);
-   const cells=ws.map(w=>{const cellPoints=a.filter(p=>Number(p.wafer)===w);return {wafer:w,label:LOCATIONS[w]||'Other',points:cellPoints,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(cellPoints,rule.id,nThreshold,cThreshold,oThreshold)]))};});
+   const cells=ws.map(w=>{const cellPoints=a.filter(p=>Number(p.wafer)===w);return {wafer:w,label:LOCATIONS[w]||'Other',points:cellPoints,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(cellPoints,rule.id,nThreshold,cThreshold,oThreshold,basis)]))};});
    const rules={};
-   for(const rule of SCREENING_CRITERIA){const s=autoRuleStats(a,rule.id,nThreshold,cThreshold,oThreshold),rates=cells.map(c=>c.rules[rule.id]).filter(x=>x.n).map(x=>x.rate);rules[rule.id]={...s,spread:rates.length===ws.length&&rates.length>1?Math.max(...rates)-Math.min(...rates):null};}
+   for(const rule of SCREENING_CRITERIA){const s=autoRuleStats(a,rule.id,nThreshold,cThreshold,oThreshold,basis),rates=cells.map(c=>c.rules[rule.id]).filter(x=>x.n).map(x=>x.rate);rules[rule.id]={...s,spread:rates.length===ws.length&&rates.length>1?Math.max(...rates)-Math.min(...rates):null};}
    return {key,points:a,cells,rules};
   });
-  const positions=ws.map(w=>{const a=pts.filter(p=>Number(p.wafer)===w);return {wafer:w,label:LOCATIONS[w]||'Other',points:a,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(a,rule.id,nThreshold,cThreshold,oThreshold)]))};});
-  return {substrate:sub,points:pts,conditions:conditionRows,positions,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(pts,rule.id,nThreshold,cThreshold,oThreshold)]))};
+  const positions=ws.map(w=>{const a=pts.filter(p=>Number(p.wafer)===w);return {wafer:w,label:LOCATIONS[w]||'Other',points:a,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(a,rule.id,nThreshold,cThreshold,oThreshold,basis)]))};});
+  return {substrate:sub,points:pts,conditions:conditionRows,positions,rules:Object.fromEntries(SCREENING_CRITERIA.map(rule=>[rule.id,autoRuleStats(pts,rule.id,nThreshold,cThreshold,oThreshold,basis)]))};
  });
 }
 
 const csvCell=v=>'"'+(/^[=+@\-\t\r]/.test(String(v??''))?"'":'')+String(v??'').replaceAll('"','""')+'"';
 export function ruleComparisonCsv(points,nThreshold=2.40,cThreshold=2.40,oThreshold=3.00){
- const rows=[['Point ID','Batch','Condition','Wafer','Location','Point','Substrate','Human result','C ratio','N ratio','O ratio',...SCREENING_CRITERIA.flatMap(r=>[`Auto ${r.short}`,`Score ${r.short}`])],...points.map(p=>{const r=pointRatios(p);return [p.id,p.project_id,condition(p),p.wafer,LOCATIONS[p.wafer]||'Other',p.point,substrate(p),normalizeResultLabel(p.human_result)||'',r.c,r.n,r.o,...SCREENING_CRITERIA.flatMap(rule=>[autoClass(p,rule.id,nThreshold,cThreshold,oThreshold),criterionScore(r,rule.id,nThreshold,cThreshold,oThreshold)])]})];
+ const rows=[['Point ID','Batch','Condition','Wafer','Location','Point','Substrate','Human result','Final C-O (Human first)','C-O source','C ratio','N ratio','O ratio',...SCREENING_CRITERIA.flatMap(r=>[`Auto ${r.short}`,`Score ${r.short}`])],...points.map(p=>{const r=pointRatios(p);return [p.id,p.project_id,condition(p),p.wafer,LOCATIONS[p.wafer]||'Other',p.point,substrate(p),normalizeResultLabel(p.human_result)||'',comparisonLabel(p,'co','final',nThreshold,cThreshold,oThreshold),normalizeResultLabel(p.human_result)?'Human':'Auto C-O',r.c,r.n,r.o,...SCREENING_CRITERIA.flatMap(rule=>[autoClass(p,rule.id,nThreshold,cThreshold,oThreshold),criterionScore(r,rule.id,nThreshold,cThreshold,oThreshold)])]})];
  return '\uFEFF'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n');
 }
